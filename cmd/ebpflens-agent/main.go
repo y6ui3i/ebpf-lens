@@ -1,33 +1,41 @@
-// ebpflens-agent は eBPF プローブの値を一定間隔で JSON Lines として標準出力に書く。
+// ebpflens-agent は eBPF プローブの値を一定間隔で集め、ebpflens-server に送る
+// (-server 未指定なら JSON Lines として標準出力に書く)。
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
 )
-
-// Sample は 1 区間ぶんのヒストグラム。Slots[i] は [2^i, 2^(i+1)) µs の件数。
-type Sample struct {
-	Time  time.Time `json:"time"`
-	Probe string    `json:"probe"`
-	Unit  string    `json:"unit"`
-	Slots []uint64  `json:"slots"`
-}
 
 func main() {
 	interval := flag.Duration("interval", time.Second, "集計間隔")
 	count := flag.Int("count", 0, "出力回数(0 なら無限)")
 	text := flag.Bool("text", false, "JSON の代わりに runqlat 風のテキストヒストグラムを出す")
+	serverURL := flag.String("server", "", "送信先の ebpflens-server(例: http://127.0.0.1:8080)")
+	hostFlag := flag.String("host", "", "ホスト名(省略時は os.Hostname)")
 	flag.Parse()
+
+	host := *hostFlag
+	if host == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			log.Fatalf("hostname: %v", err)
+		}
+		host = h
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
 
 	p, err := runqlat.Open()
 	if err != nil {
@@ -54,11 +62,35 @@ func main() {
 				printText(now, slots)
 				continue
 			}
-			if err := enc.Encode(Sample{Time: now, Probe: "runqlat", Unit: "usecs", Slots: slots[:]}); err != nil {
+			x := model.Sample{Host: host, Time: now, Probe: "runqlat", Unit: "usecs", Slots: slots[:]}
+			if *serverURL != "" {
+				// サーバーが落ちていても収集は続ける。その区間のサンプルは捨てる
+				if err := send(client, *serverURL, x); err != nil {
+					log.Printf("send: %v", err)
+				}
+				continue
+			}
+			if err := enc.Encode(x); err != nil {
 				log.Fatal(err)
 			}
 		}
 	}
+}
+
+func send(client *http.Client, serverURL string, x model.Sample) error {
+	b, err := json.Marshal(x)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Post(strings.TrimRight(serverURL, "/")+"/api/ingest", "application/json", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("server returned %s", resp.Status)
+	}
+	return nil
 }
 
 func printText(now time.Time, slots [runqlat.MaxSlots]uint64) {

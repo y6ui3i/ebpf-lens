@@ -165,6 +165,8 @@ function StallChart({ samples, win, schemeKey }: { samples: Sample[]; win: TimeW
                 ctx.globalAlpha = 1;
                 ctx.fillStyle = cssVar("--text-muted");
                 ctx.font = `${10 * devicePixelRatio}px system-ui, sans-serif`;
+                // uPlot は y 軸の目盛りを右揃えで描いた状態のまま hook を呼ぶので、左揃えに戻す
+                ctx.textAlign = "left";
                 ctx.textBaseline = "bottom";
                 ctx.fillText(label, left + 4 * devicePixelRatio, y - 2 * devicePixelRatio);
               }

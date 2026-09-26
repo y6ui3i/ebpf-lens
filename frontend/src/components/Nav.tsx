@@ -8,7 +8,13 @@ import { Link, ROUTES } from "../lib/router";
 type Group = { title: string; items: { path?: string; label: string }[] };
 
 const GROUPS: Group[] = [
-  { title: "eBPFLens", items: [{ path: "/", label: "ダッシュボード" }] },
+  {
+    title: "eBPFLens",
+    items: [
+      { path: "/", label: "ダッシュボード" },
+      { path: "/all", label: "すべてのパネル" },
+    ],
+  },
   {
     title: "リソース",
     items: [

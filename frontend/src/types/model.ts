@@ -17,6 +17,23 @@ export interface Sample {
   probe: string;
   unit: string;
   slots: number /* uint64 */[];
+  intervalMs: number /* int64 */; // 集計区間の長さ
+  cpus: number /* int */; // CPU 使用率の分母に使う
+  procs?: ProcStat[];
+}
+/**
+ * ProcStat は 1 区間ぶんのプロセス別集計。同じ名前のプロセスはまとめる。
+ * エージェントは待ち時間と CPU 使用の上位だけを送るので、全プロセスではない。
+ */
+export interface ProcStat {
+  comm: string;
+  procs: number /* int */; // この名前のプロセス数
+  pids: number /* uint32 */[]; // 先頭の数件
+  onCpuNs: number /* uint64 */;
+  waitCount: number /* uint64 */;
+  waitNs: number /* uint64 */;
+  waitMaxNs: number /* uint64 */;
+  slots: number /* uint64 */[]; // 待ち時間の log2 ヒストグラム(µs)
 }
 /**
  * HostInfo はサーバーが把握しているホストの一覧に使う。

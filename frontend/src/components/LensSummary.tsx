@@ -3,6 +3,7 @@ import { formatUs } from "../lib/hist";
 import {
   LEVEL_COLOR, LEVEL_ICON, LEVEL_LABEL, baseline, current, episodes, type Episode, type Level,
 } from "../lib/lens";
+import { explain, formatMs, impact, samplesBetween } from "../lib/impact";
 
 const HEADLINE: Record<Level, string> = {
   ok: "CPU待ち時間は低い状態です",
@@ -48,6 +49,7 @@ export function LensSummary({ samples }: { samples: Sample[] }) {
       </div>
       <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>{detail}</p>
       {last && <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>{episodeSentence(last)}</p>}
+      {last && <CauseSentence samples={samples} episode={last} />}
 
       {eps.length > 0 && (
         <div className="mt-4">
@@ -80,6 +82,31 @@ export function LensSummary({ samples }: { samples: Sample[] }) {
         </div>
       )}
     </section>
+  );
+}
+
+// 出来事の間に「誰が CPU を使い、ほかに誰が待たされたか」を一文にする
+function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Episode }) {
+  const { culprit, victims } = explain(impact(samplesBetween(samples, episode.start, episode.end)));
+  if (!culprit && victims.length === 0) return null;
+  const tense = episode.ongoing ? "います" : "いました";
+  const parts: string[] = [];
+  if (culprit) {
+    const who = culprit.procs > 1 ? `${culprit.comm}(${culprit.procs}プロセス)` : culprit.comm;
+    parts.push(`原因: ${who} がCPU全体の${Math.round(culprit.cpuShare * 100)}%を使って${tense}。`);
+  } else {
+    parts.push("特定のプロセスがCPUを占有していたわけではありません。");
+  }
+  if (victims.length > 0) {
+    const v = victims
+      .map((x) => `${x.comm}(合計 ${formatMs(x.waitNs)}、99%は ${formatUs(x.p99)} 以内)`)
+      .join("、");
+    parts.push(`${culprit ? "そのほかで" : ""}待たされたのは ${v} です。`);
+  }
+  return (
+    <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
+      {parts.join(" ")}
+    </p>
   );
 }
 

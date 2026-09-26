@@ -9,3 +9,5 @@
 !/internal/webui/dist/.gitkeep
 node_modules/
 *.tsbuildinfo
+# 検証用のローカル設定
+/.claude/

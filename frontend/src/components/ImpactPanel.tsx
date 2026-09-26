@@ -29,7 +29,7 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
 
   return (
     <section
-      className="mb-6 rounded-xl p-5"
+      className="rounded-xl p-5"
       style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
     >
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">

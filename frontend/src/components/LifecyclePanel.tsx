@@ -16,7 +16,7 @@ export function LifecyclePanel({ events, life, dropped }: { events: ProcEvent[];
 
   return (
     <section
-      className="mt-6 rounded-xl p-5"
+      className="rounded-xl p-5"
       style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
     >
       <h2 className="text-lg font-semibold">プロセスの起動と終了</h2>

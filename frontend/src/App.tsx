@@ -1,22 +1,29 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { HostInfo } from "./types/model";
 import { useLiveHost, type StreamStatus } from "./lib/useLiveHost";
 import { analyze } from "./lib/lifecycle";
-import { LifecyclePanel } from "./components/LifecyclePanel";
+import { current, type Level } from "./lib/lens";
 import { useColorSchemeKey } from "./lib/theme";
-import { formatUs, percentile, total } from "./lib/hist";
-import { Heatmap } from "./components/Heatmap";
-import { PercentileChart } from "./components/PercentileChart";
-import { HistogramTable } from "./components/HistogramTable";
-import { LensSummary } from "./components/LensSummary";
-import { ImpactPanel } from "./components/ImpactPanel";
 import { timeWindow } from "./lib/timeWindow";
+import { Link, ROUTES, usePath } from "./lib/router";
+import { MenuButton, Nav } from "./components/Nav";
+import { LensSummary } from "./components/LensSummary";
+import { UseMatrix } from "./components/UseMatrix";
+import { ImpactPanel } from "./components/ImpactPanel";
+import { CpuLatencyCard } from "./components/CpuLatencyCard";
+import { LifecyclePanel } from "./components/LifecyclePanel";
 
 const WINDOW = 300; // 直近 5 分(1 秒 1 列)
+const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
+const worst = (a: Level, b: Level) => (RANK[a] >= RANK[b] ? a : b);
 
 export default function App() {
+  const path = usePath();
   const schemeKey = useColorSchemeKey();
+  const [navOpen, setNavOpen] = useState(false);
+  const closeNav = useCallback(() => setNavOpen(false), []);
+
   const hosts = useQuery({
     queryKey: ["hosts"],
     queryFn: () => fetch("/api/hosts").then((r) => r.json() as Promise<HostInfo[]>),
@@ -24,107 +31,97 @@ export default function App() {
   });
   const [picked, setPicked] = useState<string>();
   const host = picked ?? hosts.data?.[0]?.name;
+  // 受信は画面の外側で続ける。画面を切り替えてもライブ表示が途切れない
   const { samples, events, dropped, status } = useLiveHost(host, "runqlat", WINDOW);
   const life = useMemo(() => analyze(events), [events]);
-  const latest = samples.at(-1);
-  const [showTable, setShowTable] = useState(false);
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
-  const [hoverMs, setHoverMs] = useState<number | null>(null);
+  const cpuLevel = current(samples).level;
+  const levels = { "/": worst(cpuLevel, life.level), "/cpu": cpuLevel, "/processes": life.level };
+  const title = ROUTES.find((r) => r.path === path)?.label ?? "";
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6">
-      <header className="mb-6 flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold tracking-tight">eBPFLens</h1>
-        <select
-          className="rounded-md px-2 py-1 text-sm"
-          style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
-          value={host ?? ""}
-          onChange={(e) => setPicked(e.target.value)}
-          aria-label="ホスト"
+    <div>
+      {/* 上部バー(OpenSearch Dashboards 風): ☰ / ホーム / パンくず、右端にホストと受信状態 */}
+      <header
+        className="sticky top-0 z-40 flex h-12 items-center"
+        style={{ background: "var(--surface-1)", borderBottom: "1px solid var(--border)" }}
+      >
+        <MenuButton open={navOpen} onToggle={() => setNavOpen((v) => !v)} />
+        <Link
+          to="/"
+          onNavigate={closeNav}
+          aria-label="ダッシュボードへ"
+          className="flex h-12 w-12 items-center justify-center hover:bg-[var(--page)]"
+          style={{ borderRight: "1px solid var(--border)" }}
         >
-          {hosts.data?.length ? null : <option value="">ホストなし</option>}
-          {hosts.data?.map((h) => (
-            <option key={h.name} value={h.name}>{h.name}</option>
-          ))}
-        </select>
-        {host && <StatusBadge status={status} />}
-      </header>
-
-      {!host ? (
-        <p style={{ color: "var(--text-secondary)" }}>
-          エージェントからのデータを待っています。<code>ebpflens-agent -server …</code> を起動してください。
-        </p>
-      ) : (
-        <>
-        <LensSummary samples={samples} life={life} />
-        <ImpactPanel samples={samples} />
-        <section
-          className="rounded-xl p-5"
-          style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
+          <HomeIcon />
+        </Link>
+        <span
+          className="ml-3 min-w-0 truncate rounded px-3 py-0.5 text-sm"
+          style={{ background: "var(--page)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
         >
-          <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold">CPU実行待ち時間</h2>
-              <div className="text-xs" style={{ color: "var(--text-muted)" }}>Run Queue Latency · runqlat</div>
-              <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
-                実行可能になったプロセスが、CPUに割り当てられるまでの待ち時間
-              </p>
-            </div>
-            <div className="text-right text-sm">
-              <div className="text-xs" style={{ color: "var(--text-muted)" }}>直近1秒</div>
-              <div>
-                99%のタスクが <span className="text-lg font-semibold">{formatUs(latest && percentile(latest.slots, 0.99))}</span> 以内にCPUを獲得
-              </div>
-              <div className="text-xs tabular" style={{ color: "var(--text-secondary)" }}>
-                半数は {formatUs(latest && percentile(latest.slots, 0.5))} 以内 · 計 {latest ? total(latest.slots).toLocaleString() : "–"} 回
-              </div>
-            </div>
-          </div>
-
-          {/* 広い画面では横に並べ、狭い画面では縦に積む。横軸は同じ 5 分に揃え、カーソルを連動させる */}
-          <div className="grid gap-8 lg:grid-cols-2">
-            <div className="min-w-0">
-              <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-                待ち時間の分布
-              </h3>
-              <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>直近5分・1列 = 1秒</p>
-              <Heatmap samples={samples} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
-            </div>
-            <div className="min-w-0">
-              <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-                待ち時間の推移としきい値
-              </h3>
-              <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>
-                p99 の線が帯に入っている間は、CPUの取り合いが起きています(しきい値は仮)
-              </p>
-              <PercentileChart samples={samples} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
-            </div>
-          </div>
-
-          <button
-            className="mt-4 text-xs underline"
-            style={{ color: "var(--text-secondary)" }}
-            onClick={() => setShowTable((v) => !v)}
+          {title}
+        </span>
+        <div className="ml-auto flex shrink-0 items-center gap-2 pr-3 pl-2 sm:gap-3">
+          <select
+            className="max-w-[8.5rem] rounded-md px-2 py-1 text-sm sm:max-w-none"
+            style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
+            value={host ?? ""}
+            onChange={(e) => setPicked(e.target.value)}
+            aria-label="ホスト"
           >
-            {showTable ? "表を閉じる" : "直近のヒストグラムを表で見る"}
-          </button>
-          {showTable && <div className="mt-3 max-w-md"><HistogramTable sample={latest} /></div>}
-        </section>
-        <LifecyclePanel events={events} life={life} dropped={dropped} />
-        </>
-      )}
+            {hosts.data?.length ? null : <option value="">ホストなし</option>}
+            {hosts.data?.map((h) => (
+              <option key={h.name} value={h.name}>{h.name}</option>
+            ))}
+          </select>
+          {host && <StatusBadge status={status} />}
+        </div>
+      </header>
+      <Nav path={path} open={navOpen} onClose={closeNav} levels={levels} />
+
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        {/* 画面名は上部バーのパンくずで見せるので、見出しは読み上げ用だけにする */}
+        <h1 className="sr-only">{title}</h1>
+        {!host ? (
+          <p style={{ color: "var(--text-secondary)" }}>
+            エージェントからのデータを待っています。<code>ebpflens-agent -server …</code> を起動してください。
+          </p>
+        ) : path === "/cpu" ? (
+          <>
+            <CpuLatencyCard samples={samples} win={win} schemeKey={schemeKey} />
+            <div className="mt-6"><ImpactPanel samples={samples} /></div>
+          </>
+        ) : path === "/processes" ? (
+          <LifecyclePanel events={events} life={life} dropped={dropped} />
+        ) : (
+          <>
+            <LensSummary samples={samples} life={life} />
+            <UseMatrix samples={samples} events={events} life={life} win={win} />
+          </>
+        )}
+      </main>
     </div>
+  );
+}
+
+function HomeIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+      <path d="M2.5 7.5 8 3l5.5 4.5V13a.5.5 0 0 1-.5.5H9.5V10h-3v3.5H3a.5.5 0 0 1-.5-.5z" />
+    </svg>
   );
 }
 
 function StatusBadge({ status }: { status: StreamStatus }) {
   const live = status === "live";
   return (
-    <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+    <span className="flex shrink-0 items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
       <span aria-hidden style={{ color: live ? "var(--status-good)" : "var(--status-critical)" }}>
         {live ? "●" : "○"}
       </span>
-      {live ? "ライブ" : status === "connecting" ? "接続中" : "再接続中"}
+      {/* 狭い画面では記号だけにする(読み上げ用の文字は残す) */}
+      <span className="sr-only sm:not-sr-only">{live ? "ライブ" : status === "connecting" ? "接続中" : "再接続中"}</span>
     </span>
   );
 }

@@ -1,7 +1,7 @@
-// Package probe は各 eBPF プローブで共有する小道具。
+// Package probe holds small helpers shared by the eBPF probes.
 package probe
 
-// CString は BPF 側の char 配列(NUL 終端)を文字列にする。
+// CString converts a NUL-terminated char array from the BPF side into a string.
 func CString(b []int8) string {
 	s := make([]byte, 0, len(b))
 	for _, c := range b {

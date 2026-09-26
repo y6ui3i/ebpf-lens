@@ -1,5 +1,5 @@
-// ebpflens-agent は eBPF プローブの値とイベントを一定間隔で集め、ebpflens-server に送る
-// (-server 未指定なら JSON Lines として標準出力に書く)。
+// ebpflens-agent collects eBPF probe values and events at a fixed interval and sends them to ebpflens-server
+// (if -server is not given, it writes them to stdout as JSON Lines).
 package main
 
 import (
@@ -26,12 +26,12 @@ import (
 )
 
 func main() {
-	interval := flag.Duration("interval", time.Second, "集計間隔")
-	count := flag.Int("count", 0, "出力回数(0 なら無限)")
-	text := flag.Bool("text", false, "JSON の代わりに runqlat 風のテキストヒストグラムを出す")
-	serverURL := flag.String("server", "", "送信先の ebpflens-server(例: http://127.0.0.1:8080)")
-	hostFlag := flag.String("host", "", "ホスト名(省略時は os.Hostname)")
-	topN := flag.Int("top", 8, "送るプロセス数(待ち時間の上位と CPU 使用の上位それぞれ)")
+	interval := flag.Duration("interval", time.Second, "aggregation interval")
+	count := flag.Int("count", 0, "number of outputs (0 means unlimited)")
+	text := flag.Bool("text", false, "print a runqlat-style text histogram instead of JSON")
+	serverURL := flag.String("server", "", "ebpflens-server to send to (e.g. http://127.0.0.1:8080)")
+	hostFlag := flag.String("host", "", "host name (defaults to os.Hostname)")
+	topN := flag.Int("top", 8, "number of processes to send (each for the top by wait time and the top by CPU usage)")
 	flag.Parse()
 
 	host := *hostFlag
@@ -62,7 +62,7 @@ func main() {
 		log.Fatalf("proclife: %v", err)
 	}
 	defer pl.Close()
-	// ring buffer の読み出しは別 goroutine で回し、区間ごとにまとめて送る
+	// Read the ring buffer in a separate goroutine and send the events in one batch per interval
 	events := make(chan model.ProcEvent, eventBuffer)
 	var agentDrops atomic.Uint64
 	go func() {
@@ -123,7 +123,7 @@ func main() {
 			}
 			prev = now
 			if *serverURL != "" {
-				// サーバーが落ちていても収集は続ける。その区間のデータは捨てる
+				// Keep collecting even if the server is down. That interval's data is discarded
 				if err := send(client, *serverURL, "/api/ingest", x); err != nil {
 					log.Printf("send sample: %v", err)
 				}
@@ -152,7 +152,7 @@ func main() {
 	}
 }
 
-// memReader は /proc の値を読み、PSI の累計を区間の増分にする。
+// memReader reads values from /proc and turns the cumulative PSI totals into per-interval deltas.
 type memReader struct{ prev *procfs.PSI }
 
 func newMemReader() *memReader { return &memReader{} }
@@ -172,7 +172,7 @@ func (r *memReader) read(stallNs uint64) *model.MemStat {
 	return m
 }
 
-// memSample は memstall の 1 区間ぶんを作る(ホスト名・時刻などは呼び出し側で埋める)。
+// memSample builds one interval of memstall data (the caller fills in host name, time, etc.).
 func memSample(ms *memstall.Probe, mem *memReader, topN int) (model.Sample, error) {
 	slots, err := ms.Delta()
 	if err != nil {
@@ -206,7 +206,7 @@ func printMem(x model.Sample) {
 
 const (
 	eventBuffer       = 16384
-	maxEventsPerBatch = 2000 // これを超えた分は次の区間に回る
+	maxEventsPerBatch = 2000 // anything beyond this carries over to the next interval
 )
 
 func drain(ch <-chan model.ProcEvent, max int) []model.ProcEvent {
@@ -238,7 +238,7 @@ func printEvents(b model.EventBatch) {
 	}
 }
 
-// topProcs は待たされた時間の上位 n 件と CPU を使った時間の上位 n 件を合わせて返す。
+// topProcs returns the union of the top n by time spent waiting and the top n by time spent on CPU.
 func topProcs(all []model.ProcStat, n int) []model.ProcStat {
 	pick := map[string]bool{}
 	for _, cmp := range []func(a, b model.ProcStat) int{

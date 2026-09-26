@@ -1,9 +1,9 @@
 //go:build ignore
 
-// runqlat: タスクが起床(runnable)してから実際に CPU に載るまでの待ち時間を
-// log2 ヒストグラム(マイクロ秒)に積む。libbpf-tools の runqlat を簡略化したもの。
-// あわせてプロセス(tgid)ごとに「CPU を使った時間」と「待たされた時間」を積み、
-// 原因(誰が CPU を使っていたか)と影響(誰が待たされたか)を出せるようにする。
+// runqlat: accumulates the wait time from when a task wakes up (becomes runnable) until it
+// actually gets on a CPU into a log2 histogram (microseconds). A simplified version of runqlat from libbpf-tools.
+// It also accumulates "time spent on CPU" and "time spent waiting" per process (tgid),
+// so we can show both the cause (who was using the CPU) and the impact (who was kept waiting).
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -17,7 +17,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct proc_key {
 	u32 tgid;
-	char comm[TASK_COMM_LEN]; // スレッド名ではなくプロセス(group leader)の名前
+	char comm[TASK_COMM_LEN]; // name of the process (group leader), not the thread
 };
 
 struct proc_val {
@@ -25,10 +25,10 @@ struct proc_val {
 	u64 wait_count;
 	u64 wait_ns;
 	u64 wait_max_ns;
-	u64 slots[MAX_SLOTS]; // 待ち時間の log2 ヒストグラム(µs)
+	u64 slots[MAX_SLOTS]; // log2 histogram of wait time (µs)
 };
 
-// プロセスごとの集計。ユーザー空間が区間ごとに読んで消す
+// Per-process aggregates. User space reads and deletes them every interval
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 8192);
@@ -36,7 +36,7 @@ struct {
 	__type(value, struct proc_val);
 } procs SEC(".maps");
 
-// CPU ごとの直前の切り替え時刻。prev が CPU を使っていた時間の起点になる
+// Per-CPU time of the last switch. It is the starting point of the time prev spent on the CPU
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
@@ -44,7 +44,7 @@ struct {
 	__type(value, u64);
 } cpu_last SEC(".maps");
 
-// pid -> 起床時刻(ns)
+// pid -> wakeup time (ns)
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 10240);
@@ -52,7 +52,7 @@ struct {
 	__type(value, u64);
 } start SEC(".maps");
 
-// slot -> 件数。per-CPU なのでカーネル側はロック不要、ユーザー空間で合算する
+// slot -> count. Per-CPU, so the kernel side needs no locking; user space sums them up
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, MAX_SLOTS);
@@ -83,7 +83,7 @@ static __always_inline void trace_enqueue(u32 pid)
 {
 	u64 ts;
 
-	if (!pid) // idle タスクは数えない
+	if (!pid) // do not count the idle task
 		return;
 	ts = bpf_ktime_get_ns();
 	bpf_map_update_elem(&start, &pid, &ts, BPF_ANY);
@@ -100,7 +100,7 @@ static __always_inline struct proc_val *proc_of(struct task_struct *t)
 	v = bpf_map_lookup_elem(&procs, &k);
 	if (v)
 		return v;
-	// 満杯なら諦める(次の区間でユーザー空間が空にする)
+	// If the map is full, give up (user space empties it at the next interval)
 	bpf_map_update_elem(&procs, &k, &zero, BPF_NOEXIST);
 	return bpf_map_lookup_elem(&procs, &k);
 }
@@ -129,7 +129,7 @@ int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev,
 	struct proc_val *v;
 	s64 delta;
 
-	// 原因: 前回の切り替えから今までこの CPU を使っていたのは prev
+	// Cause: prev is the one that used this CPU from the previous switch until now
 	last = bpf_map_lookup_elem(&cpu_last, &zero);
 	if (last) {
 		if (*last && prev->pid) {
@@ -140,7 +140,7 @@ int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev,
 		*last = now;
 	}
 
-	// 横取り(preempt)されたタスクは runnable のまま待ち行列に戻る
+	// A preempted task goes back onto the run queue still runnable
 	if (prev_state == TASK_RUNNING)
 		trace_enqueue(prev->pid);
 
@@ -160,12 +160,12 @@ int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev,
 	if (cnt)
 		*cnt += 1;
 
-	// 影響: next がどれだけ待たされたか
+	// Impact: how long next was kept waiting
 	v = proc_of(next);
 	if (v) {
 		__sync_fetch_and_add(&v->wait_count, 1);
 		__sync_fetch_and_add(&v->wait_ns, (u64)delta);
-		if ((u64)delta > v->wait_max_ns) // 競合で取りこぼしうるが最大値の目安には十分
+		if ((u64)delta > v->wait_max_ns) // may miss an update under contention, but good enough as an indication of the max
 			v->wait_max_ns = (u64)delta;
 		__sync_fetch_and_add(&v->slots[slot], 1);
 	}

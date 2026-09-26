@@ -10,16 +10,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite" // cgo 不要の pure Go ドライバ。単一バイナリで配れる性質を崩さない
+	_ "modernc.org/sqlite" // pure Go driver with no cgo, so the project can still ship as a single binary
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
 )
 
-// SQL は SQLite と PostgreSQL の両方で動く書き方に限る(大きくなったら PostgreSQL に移すため)。
-//   - 時刻は整数の Unix ミリ秒。日付型の違いに引きずられない
-//   - 本体は JSON のテキスト。PostgreSQL に移すときは jsonb にする
-//   - INSERT OR REPLACE のような SQLite 独自の構文は使わない(ON CONFLICT は両方にある)
-//   - プレースホルダの ? は、PostgreSQL では $1 に置き換える
+// SQL is limited to syntax that works on both SQLite and PostgreSQL (so we can move to PostgreSQL once it grows).
+//   - Timestamps are integer Unix milliseconds, so differences in date types do not get in the way
+//   - The body is JSON text. When moving to PostgreSQL, make it jsonb
+//   - No SQLite-specific syntax such as INSERT OR REPLACE (ON CONFLICT exists in both)
+//   - The ? placeholders become $1 and so on in PostgreSQL
 const schema = `
 CREATE TABLE IF NOT EXISTS samples (
 	host  TEXT   NOT NULL,
@@ -39,11 +39,11 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_host_ts ON events (host, ts_ms);
 `
 
-// SQLite はサンプルとイベントを SQLite に書く Persister。
-// 書き込みは受け付けた順にキューへ積み、1 秒ごとに 1 トランザクションでまとめて書く。
+// SQLite is a Persister that writes samples and events to SQLite.
+// Writes are queued in the order received and written together in one transaction every second.
 type SQLite struct {
 	db             *sql.DB
-	queue          chan any // model.Sample か model.EventBatch
+	queue          chan any // model.Sample or model.EventBatch
 	retention      time.Duration
 	eventRetention time.Duration
 	dropped        atomic.Uint64
@@ -57,15 +57,15 @@ const (
 	pruneInterval = 10 * time.Minute
 )
 
-// OpenSQLite は path の DB を開き(無ければ作り)、書き込み用の goroutine を始める。
-// path は監視対象と同じホストのローカルディスクに置くこと(NFS 越しではロックが当てにならず壊れうる)。
+// OpenSQLite opens the DB at path (creating it if missing) and starts the writer goroutine.
+// path must be on a local disk of the monitored host (over NFS, locking is unreliable and the DB can be corrupted).
 func OpenSQLite(path string, retention, eventRetention time.Duration) (*SQLite, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1) // 書き手は 1 つ。SQLite の単一ライターに合わせる
+	db.SetMaxOpenConns(1) // a single writer, matching SQLite's single-writer model
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -80,7 +80,7 @@ func OpenSQLite(path string, retention, eventRetention time.Duration) (*SQLite, 
 	return s, nil
 }
 
-// SaveSample と SaveEvents は HTTP の受信を止めないよう、キューが満杯なら捨てて数える。
+// SaveSample and SaveEvents drop and count items when the queue is full, so HTTP ingestion is never blocked.
 func (s *SQLite) SaveSample(x model.Sample) { s.enqueue(x) }
 
 func (s *SQLite) SaveEvents(b model.EventBatch) {
@@ -112,7 +112,7 @@ func (s *SQLite) loop() {
 		case <-flush.C:
 			s.flush()
 			if n := s.dropped.Swap(0); n > 0 {
-				log.Printf("sqlite: キューが満杯で %d 件を捨てた", n)
+				log.Printf("sqlite: queue full, dropped %d items", n)
 			}
 		case <-prune.C:
 			s.prune()
@@ -120,7 +120,7 @@ func (s *SQLite) loop() {
 	}
 }
 
-// flush はキューに溜まった分を 1 トランザクションで書く。
+// flush writes everything accumulated in the queue in one transaction.
 func (s *SQLite) flush() {
 	var items []any
 drain:
@@ -180,7 +180,7 @@ func (s *SQLite) write(items []any) error {
 	return tx.Commit()
 }
 
-// prune は保持期間を過ぎた行を消す。
+// prune deletes rows older than the retention period.
 func (s *SQLite) prune() {
 	now := time.Now()
 	for _, q := range []struct {
@@ -196,8 +196,8 @@ func (s *SQLite) prune() {
 	}
 }
 
-// LoadInto は since 以降のサンプルとイベントを読み、メモリ上の Store に戻す。
-// サーバーを再起動しても画面の履歴が消えないようにするため、購読者が付く前に呼ぶ。
+// LoadInto reads samples and events since the given time and restores them into the in-memory Store.
+// It exists so the UI history survives a server restart; call it before any subscribers attach.
 func (s *SQLite) LoadInto(ctx context.Context, st *Store, since time.Time) (samples, events int, err error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT body FROM samples WHERE ts_ms >= ? ORDER BY ts_ms`, since.UnixMilli())
 	if err != nil {
@@ -246,7 +246,7 @@ func (s *SQLite) LoadInto(ctx context.Context, st *Store, since time.Time) (samp
 	return samples, events, rows.Err()
 }
 
-// Close は残りを書き切ってから閉じる。
+// Close flushes the remaining items and then closes the DB.
 func (s *SQLite) Close() error {
 	close(s.done)
 	s.wg.Wait()

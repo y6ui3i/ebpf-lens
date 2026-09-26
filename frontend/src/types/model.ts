@@ -3,13 +3,13 @@
 //////////
 // source: model.go
 /*
-Package model はエージェント・サーバー・フロントで共有するデータ型。
-フロントの型は tygo で frontend/src/types/model.ts に生成する(make types)。
+Package model defines the data types shared by the agent, the server, and the frontend.
+The frontend types are generated into frontend/src/types/model.ts with tygo (make types).
 */
 
 /**
- * Sample は 1 区間ぶんのヒストグラム。Slots[i] は [2^i, 2^(i+1)) の件数
- * (slot 0 のみ [0, 2))。単位は Unit。
+ * Sample is a histogram for one interval. Slots[i] is the count in [2^i, 2^(i+1))
+ * (slot 0 alone is [0, 2)). Values are in Unit.
  */
 export interface Sample {
   host: string;
@@ -17,25 +17,25 @@ export interface Sample {
   probe: string;
   unit: string;
   slots: number /* uint64 */[];
-  intervalMs: number /* int64 */; // 集計区間の長さ
-  cpus: number /* int */; // CPU 使用率の分母に使う
-  busyNs: number /* uint64 */; // 全プロセスの CPU 使用時間の合計(eBPF で計測。idle は含まない)
+  intervalMs: number /* int64 */; // Length of the aggregation interval
+  cpus: number /* int */; // Used as the denominator for CPU utilization
+  busyNs: number /* uint64 */; // Total CPU time used by all processes (measured with eBPF; excludes idle)
   procs?: ProcStat[];
-  mem?: MemStat; // memstall のみ
+  mem?: MemStat; // memstall only
 }
 /**
- * MemStat は memstall のサンプルに付けるメモリの状況。
- * StallNs が eBPF の計測値(主役)、使用量と PSI は /proc からの答え合わせ。
+ * MemStat is the memory status attached to a memstall sample.
+ * StallNs is the eBPF measurement (the main signal); usage and PSI come from /proc as a cross-check.
  */
 export interface MemStat {
   totalBytes: number /* uint64 */;
   availableBytes: number /* uint64 */;
-  stallNs: number /* uint64 */; // 区間内に全プロセスが回収で止まった時間の合計(eBPF)
-  psiSomeUs: number /* uint64 */; // 区間内の PSI memory some の増分(1 つ以上のタスクが止まっていた時間)
-  psiFullUs: number /* uint64 */; // 区間内の PSI memory full の増分(全タスクが止まっていた時間)
+  stallNs: number /* uint64 */; // Total time all processes were stalled in reclaim during the interval (eBPF)
+  psiSomeUs: number /* uint64 */; // Increase in PSI memory "some" during the interval (time at least one task was stalled)
+  psiFullUs: number /* uint64 */; // Increase in PSI memory "full" during the interval (time all tasks were stalled)
 }
 /**
- * ProcEvent はプロセスの起動・終了・OOM kill の 1 件。
+ * ProcEvent is a single process start, exit, or OOM kill.
  */
 export interface ProcEvent {
   time: string /* RFC3339 */;
@@ -51,48 +51,48 @@ export interface ProcEvent {
   /**
    * exit
    */
-  exitStatus: number /* int */; // 正常終了時の終了コード
-  signal: number /* int */; // シグナルで終了したときのシグナル番号(0 なら正常終了)
+  exitStatus: number /* int */; // Exit code on normal exit
+  signal: number /* int */; // Signal number when terminated by a signal (0 means normal exit)
   coreDump: boolean;
   lifetimeNs: number /* uint64 */;
   /**
-   * oom(Pid/Comm は強制終了されたプロセス)
+   * oom (Pid/Comm are the process that was killed)
    */
   triggerPid?: number /* uint32 */;
   triggerComm?: string;
   totalPages?: number /* uint64 */;
-  memcg: boolean; // cgroup のメモリ上限による OOM
+  memcg: boolean; // OOM caused by a cgroup memory limit
 }
 /**
- * EventBatch はエージェントが 1 区間ごとにまとめて送るイベント。
+ * EventBatch is the set of events the agent sends together for each interval.
  */
 export interface EventBatch {
   host: string;
   time: string /* RFC3339 */;
   events: ProcEvent[];
-  dropped: number /* uint64 */; // 溢れて捨てた件数(カーネル側 + エージェント側)
+  dropped: number /* uint64 */; // Number of events dropped on overflow (kernel side + agent side)
 }
 /**
- * ProcStat は 1 区間ぶんのプロセス別集計。同じ名前のプロセスはまとめる。
- * エージェントは待ち時間と CPU 使用の上位だけを送るので、全プロセスではない。
+ * ProcStat is a per-process aggregate for one interval. Processes with the same name are merged.
+ * The agent only sends the top processes by wait time and by CPU usage, so this is not every process.
  */
 export interface ProcStat {
   comm: string;
-  procs: number /* int */; // この名前のプロセス数
-  pids: number /* uint32 */[]; // 先頭の数件
+  procs: number /* int */; // Number of processes with this name
+  pids: number /* uint32 */[]; // The first few PIDs
   onCpuNs: number /* uint64 */;
   waitCount: number /* uint64 */;
   waitNs: number /* uint64 */;
   waitMaxNs: number /* uint64 */;
-  slots: number /* uint64 */[]; // 待ち時間の log2 ヒストグラム(µs)
+  slots: number /* uint64 */[]; // log2 histogram of wait time (µs)
   /**
-   * memstall のみ。memstall では Wait* を「メモリ回収で止まった」の意味で使う
+   * memstall only. In memstall, Wait* means "stalled in memory reclaim"
    */
   reclaimedPages?: number /* uint64 */;
-  memcgCount?: number /* uint64 */; // うち cgroup の上限による回収の回数
+  memcgCount?: number /* uint64 */; // Of those, the number of reclaims caused by a cgroup limit
 }
 /**
- * HostInfo はサーバーが把握しているホストの一覧に使う。
+ * HostInfo is used for the list of hosts known to the server.
  */
 export interface HostInfo {
   name: string;

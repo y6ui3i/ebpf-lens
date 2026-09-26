@@ -1,17 +1,19 @@
 #!/bin/sh
-# 検証用 VM(libvirt / KVM)を作る。hal を汚さずに、メモリ不足・OOM などを本物のカーネルで起こすため。
+# Create a test VM (libvirt / KVM) to trigger memory shortage, OOM and the like on a real kernel
+# without disturbing the host.
 #
-#   sh lab/create-vm.sh            # 作成して起動(既にあれば起動だけ)
-#   sh lab/create-vm.sh ssh        # VM に入る
-#   sh lab/create-vm.sh push       # bin/ebpflens-agent を VM にコピー
-#   virsh -c qemu:///system shutdown ebpflens-lab   # 止める(ディスクは残る)
+#   sh lab/create-vm.sh            # create and start (just start if it already exists)
+#   sh lab/create-vm.sh ssh        # log in to the VM
+#   sh lab/create-vm.sh push       # copy bin/ebpflens-agent into the VM
+#   virsh -c qemu:///system shutdown ebpflens-lab   # stop it (the disk is kept)
 #
-# 必要なもの: qemu-system-x86 libvirt-daemon-system virtinst cloud-image-utils、libvirt グループ
+# Requires: qemu-system-x86 libvirt-daemon-system virtinst cloud-image-utils, and membership in the libvirt group.
+# Set LAB_DIR to keep the VM files somewhere other than the default.
 set -eu
 
 NAME=ebpflens-lab
-DIR=${LAB_DIR:-/mnt/data/vms/$NAME}
-MEM_MB=${LAB_MEM_MB:-1024} # 小さくしておくと、ホスト全体のメモリ不足(direct reclaim / OOM)を起こしやすい
+DIR=${LAB_DIR:-/var/lib/libvirt/images/$NAME}
+MEM_MB=${LAB_MEM_MB:-1024} # keep it small so a machine-wide shortage (direct reclaim / OOM) is easy to trigger
 CPUS=${LAB_CPUS:-2}
 IMG_URL=https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img
 V="virsh -c qemu:///system"
@@ -27,18 +29,19 @@ wait_ip() {
 		[ -n "$ip" ] && { echo "$ip"; return; }
 		sleep 3
 	done
-	echo "IP が取れない" >&2
+	echo "could not get the VM IP address" >&2
 	exit 1
 }
 
-# 起動直後は前回の DHCP リースの IP がすぐ返るが、sshd はまだ上がっていない。ログインできるまで待つ
+# Right after boot the IP from the previous DHCP lease comes back immediately, but sshd is not up yet.
+# Wait until we can actually log in.
 wait_ssh() {
 	ip=$(wait_ip)
 	for _ in $(seq 1 60); do
 		ssh $SSH_OPTS -o ConnectTimeout=3 "lab@$ip" true 2>/dev/null && { echo "$ip"; return; }
 		sleep 3
 	done
-	echo "ssh できない: $ip" >&2
+	echo "cannot ssh to $ip" >&2
 	exit 1
 }
 
@@ -60,11 +63,11 @@ if $V dominfo "$NAME" >/dev/null 2>&1; then
 	exit 0
 fi
 
-mkdir -p "$DIR"
+[ -d "$DIR" ] || sudo install -d -o "$(id -un)" -g "$(id -gn)" "$DIR"
 cd "$DIR"
 if [ ! -f base.img ]; then
 	curl -s -o base.img "$IMG_URL"
-	# 公式の SHA256SUMS と照合する
+	# Verify against the official SHA256SUMS
 	sum=$(curl -s "${IMG_URL%/*}/SHA256SUMS" | awk '/resolute-server-cloudimg-amd64.img$/ {print $1}')
 	echo "$sum  base.img" | sha256sum -c -
 fi
@@ -86,7 +89,7 @@ EOF
 printf "instance-id: %s-1\nlocal-hostname: %s\n" "$NAME" "$NAME" > meta-data
 cloud-localds seed.iso user-data meta-data
 
-# スワップは付けない(回収できるのはページキャッシュだけになり、direct reclaim が起きやすい)
+# No swap: only the page cache can be reclaimed, which makes direct reclaim easy to trigger
 virt-install --connect qemu:///system --name "$NAME" --memory "$MEM_MB" --vcpus "$CPUS" \
 	--disk path="$DIR/disk.qcow2",format=qcow2,bus=virtio --disk path="$DIR/seed.iso",device=cdrom \
 	--import --osinfo detect=on,require=off --network network=default --graphics none --noautoconsole

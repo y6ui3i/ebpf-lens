@@ -1,4 +1,4 @@
-// Package server は ebpflens-server の HTTP API を提供する。
+// Package server provides the HTTP API of ebpflens-server.
 package server
 
 import (
@@ -14,14 +14,14 @@ import (
 
 const maxSlots = 64
 
-// Register は /api/ 以下のハンドラを mux に登録する。
+// Register registers the handlers under /api/ on mux.
 //
-//	POST /api/ingest                  エージェントからのサンプル受信
-//	GET  /api/hosts                   ホスト一覧
-//	GET  /api/samples?host=&probe=    履歴
-//	POST /api/events                  エージェントからのイベント受信
-//	GET  /api/events?host=            イベントの履歴
-//	GET  /api/stream?host=            新着の SSE(event: sample / events)
+//	POST /api/ingest                  receive samples from agents
+//	GET  /api/hosts                   list hosts
+//	GET  /api/samples?host=&probe=    history
+//	POST /api/events                  receive events from agents
+//	GET  /api/events?host=            event history
+//	GET  /api/stream?host=            SSE of new data (event: sample / events)
 func Register(mux *http.ServeMux, st *store.Store) {
 	mux.HandleFunc("POST /api/ingest", func(w http.ResponseWriter, r *http.Request) {
 		var x model.Sample
@@ -84,7 +84,7 @@ func Register(mux *http.ServeMux, st *store.Store) {
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
-		// 途中のプロキシに切られないよう定期的にコメント行を送る
+		// Send a comment line periodically so intermediate proxies do not cut the connection
 		ping := time.NewTicker(15 * time.Second)
 		defer ping.Stop()
 		for {

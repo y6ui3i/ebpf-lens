@@ -1,10 +1,10 @@
 .PHONY: all vmlinux generate build agent server types web install clean
 
-# フロントのビルド(make web)は Node のあるマシンで行い、
-# Go のビルド(make build)は監視対象と同じ Linux で行う。
+# Build the frontend (make web) on a machine with Node,
+# and build Go (make build) on the same Linux as the monitored host.
 all: web build
 
-# 実行中カーネルの BTF から CO-RE 用ヘッダを作る
+# Generate the CO-RE header from the running kernel's BTF
 bpf/headers/vmlinux.h:
 	mkdir -p bpf/headers
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@
@@ -22,16 +22,16 @@ agent: generate
 server:
 	go build -o bin/ebpflens-server ./cmd/ebpflens-server
 
-# Go の共有型から TS の型を生成する
+# Generate TS types from the shared Go types
 types:
 	go tool tygo generate
 
-# frontend/ をビルドして internal/webui/dist に出す(server に埋め込まれる)
+# Build frontend/ into internal/webui/dist (embedded into the server)
 web: types
 	cd frontend && npm ci && npm run build
 
-# 常駐用のバイナリとユニットを入れる(反映は sudo systemctl restart ebpflens-server ebpflens-agent)。
-# 開発中の bin/ を直接動かさないのは、ビルドし直すたびに常駐中のサービスが差し替わらないようにするため
+# Install the binaries and units for the resident services (apply with sudo systemctl restart ebpflens-server ebpflens-agent).
+# The services do not run bin/ directly so that every rebuild during development does not swap out the running services
 install: build
 	sudo install -d /opt/ebpflens/bin
 	sudo install -m 0755 bin/ebpflens-agent bin/ebpflens-server /opt/ebpflens/bin/

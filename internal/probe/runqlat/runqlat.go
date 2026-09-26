@@ -12,6 +12,7 @@ import (
 	"github.com/cilium/ebpf/link"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe"
 )
 
 // MaxSlots は BPF 側の MAX_SLOTS と揃える。
@@ -77,7 +78,7 @@ func (p *Probe) Procs() ([]model.ProcStat, error) {
 	it := p.objs.Procs.Iterate()
 	for it.Next(&key, &val) {
 		keys = append(keys, key)
-		comm := commString(key.Comm)
+		comm := probe.CString(key.Comm[:])
 		s, ok := byComm[comm]
 		if !ok {
 			s = &model.ProcStat{Comm: comm, Slots: make([]uint64, MaxSlots)}
@@ -111,18 +112,6 @@ func (p *Probe) Procs() ([]model.ProcStat, error) {
 }
 
 const maxPids = 5
-
-func commString(b [16]int8) string {
-	n := 0
-	for n < len(b) && b[n] != 0 {
-		n++
-	}
-	s := make([]byte, n)
-	for i := range n {
-		s[i] = byte(b[i])
-	}
-	return string(s)
-}
 
 // Close はリンクを外して BPF オブジェクトを解放する。
 func (p *Probe) Close() error {

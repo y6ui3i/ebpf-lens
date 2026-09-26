@@ -12,25 +12,35 @@ import (
 
 type key struct{ host, probe string }
 
-// Store はホスト×プローブごとに直近 keep 件のサンプルを持つ。
-type Store struct {
-	mu       sync.RWMutex
-	keep     int
-	series   map[key][]model.Sample
-	lastSeen map[string]time.Time
-	subs     map[chan model.Sample]string // 購読チャネル -> 絞り込むホスト("" なら全部)
+// Message は購読者に配る新着。Name は SSE の event 名になる("sample" / "events")。
+type Message struct {
+	Name string
+	Data any
 }
 
-func New(keep int) *Store {
+// Store はホスト×プローブごとに直近 keep 件のサンプルと、ホストごとに直近 keepEvents 件のイベントを持つ。
+type Store struct {
+	mu         sync.RWMutex
+	keep       int
+	keepEvents int
+	series     map[key][]model.Sample
+	events     map[string][]model.ProcEvent
+	lastSeen   map[string]time.Time
+	subs       map[chan Message]string // 購読チャネル -> 絞り込むホスト("" なら全部)
+}
+
+func New(keep, keepEvents int) *Store {
 	return &Store{
-		keep:     keep,
-		series:   map[key][]model.Sample{},
-		lastSeen: map[string]time.Time{},
-		subs:     map[chan model.Sample]string{},
+		keep:       keep,
+		keepEvents: keepEvents,
+		series:     map[key][]model.Sample{},
+		events:     map[string][]model.ProcEvent{},
+		lastSeen:   map[string]time.Time{},
+		subs:       map[chan Message]string{},
 	}
 }
 
-// Add はサンプルを追加し、購読者に配る。詰まっている購読者には送らない(取りこぼしを許す)。
+// Add はサンプルを追加し、購読者に配る。
 func (s *Store) Add(x model.Sample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -42,13 +52,37 @@ func (s *Store) Add(x model.Sample) {
 	}
 	s.series[k] = buf
 	s.lastSeen[x.Host] = x.Time
+	s.publish(x.Host, Message{"sample", x})
+}
 
-	for ch, host := range s.subs {
-		if host != "" && host != x.Host {
+// AddEvents はイベントを追加し、購読者にまとめて配る。
+func (s *Store) AddEvents(b model.EventBatch) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	buf := append(s.events[b.Host], b.Events...)
+	if len(buf) > s.keepEvents {
+		buf = slices.Clone(buf[len(buf)-s.keepEvents:])
+	}
+	s.events[b.Host] = buf
+	s.publish(b.Host, Message{"events", b})
+}
+
+// Events は保持しているイベントのコピーを古い順に返す。
+func (s *Store) Events(host string) []model.ProcEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return orEmpty(slices.Clone(s.events[host]))
+}
+
+// publish は購読者に配る。詰まっている購読者には送らない(取りこぼしを許す)。呼び出し側でロックを持つ
+func (s *Store) publish(host string, m Message) {
+	for ch, h := range s.subs {
+		if h != "" && h != host {
 			continue
 		}
 		select {
-		case ch <- x:
+		case ch <- m:
 		default:
 		}
 	}
@@ -58,7 +92,7 @@ func (s *Store) Add(x model.Sample) {
 func (s *Store) Samples(host, probe string) []model.Sample {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return slices.Clone(s.series[key{host, probe}])
+	return orEmpty(slices.Clone(s.series[key{host, probe}]))
 }
 
 // Hosts はホスト名順の一覧を返す。
@@ -89,8 +123,8 @@ func (s *Store) Hosts() []model.HostInfo {
 }
 
 // Subscribe は新着サンプルを受け取るチャネルと、購読をやめる関数を返す。
-func (s *Store) Subscribe(host string) (<-chan model.Sample, func()) {
-	ch := make(chan model.Sample, 64)
+func (s *Store) Subscribe(host string) (<-chan Message, func()) {
+	ch := make(chan Message, 64)
 	s.mu.Lock()
 	s.subs[ch] = host
 	s.mu.Unlock()
@@ -99,4 +133,12 @@ func (s *Store) Subscribe(host string) (<-chan model.Sample, func()) {
 		delete(s.subs, ch)
 		s.mu.Unlock()
 	}
+}
+
+// orEmpty は nil を空スライスにする(JSON で null ではなく [] を返すため)。
+func orEmpty[T any](xs []T) []T {
+	if xs == nil {
+		return []T{}
+	}
+	return xs
 }

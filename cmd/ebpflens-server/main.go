@@ -14,9 +14,10 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "待ち受けアドレス")
 	keep := flag.Int("keep", 900, "ホスト×プローブごとに保持するサンプル数")
+	keepEvents := flag.Int("keep-events", 20000, "ホストごとに保持するイベント数")
 	flag.Parse()
 
-	st := store.New(*keep)
+	st := store.New(*keep, *keepEvents)
 	mux := http.NewServeMux()
 	server.Register(mux, st)
 	mux.Handle("/", webui.Handler())

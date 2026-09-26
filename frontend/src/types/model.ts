@@ -19,7 +19,46 @@ export interface Sample {
   slots: number /* uint64 */[];
   intervalMs: number /* int64 */; // 集計区間の長さ
   cpus: number /* int */; // CPU 使用率の分母に使う
+  busyNs: number /* uint64 */; // 全プロセスの CPU 使用時間の合計(eBPF で計測。idle は含まない)
   procs?: ProcStat[];
+}
+/**
+ * ProcEvent はプロセスの起動・終了・OOM kill の 1 件。
+ */
+export interface ProcEvent {
+  time: string /* RFC3339 */;
+  kind: string; // "exec" | "exit" | "oom"
+  pid: number /* uint32 */;
+  ppid: number /* uint32 */;
+  uid: number /* uint32 */;
+  comm: string;
+  /**
+   * exec
+   */
+  filename?: string;
+  /**
+   * exit
+   */
+  exitStatus: number /* int */; // 正常終了時の終了コード
+  signal: number /* int */; // シグナルで終了したときのシグナル番号(0 なら正常終了)
+  coreDump: boolean;
+  lifetimeNs: number /* uint64 */;
+  /**
+   * oom(Pid/Comm は強制終了されたプロセス)
+   */
+  triggerPid?: number /* uint32 */;
+  triggerComm?: string;
+  totalPages?: number /* uint64 */;
+  memcg: boolean; // cgroup のメモリ上限による OOM
+}
+/**
+ * EventBatch はエージェントが 1 区間ごとにまとめて送るイベント。
+ */
+export interface EventBatch {
+  host: string;
+  time: string /* RFC3339 */;
+  events: ProcEvent[];
+  dropped: number /* uint64 */; // 溢れて捨てた件数(カーネル側 + エージェント側)
 }
 /**
  * ProcStat は 1 区間ぶんのプロセス別集計。同じ名前のプロセスはまとめる。

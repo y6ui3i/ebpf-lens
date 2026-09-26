@@ -19,7 +19,9 @@ const maxSlots = 64
 //	POST /api/ingest                  エージェントからのサンプル受信
 //	GET  /api/hosts                   ホスト一覧
 //	GET  /api/samples?host=&probe=    履歴
-//	GET  /api/stream?host=            新着サンプルの SSE(event: sample)
+//	POST /api/events                  エージェントからのイベント受信
+//	GET  /api/events?host=            イベントの履歴
+//	GET  /api/stream?host=            新着の SSE(event: sample / events)
 func Register(mux *http.ServeMux, st *store.Store) {
 	mux.HandleFunc("POST /api/ingest", func(w http.ResponseWriter, r *http.Request) {
 		var x model.Sample
@@ -36,6 +38,24 @@ func Register(mux *http.ServeMux, st *store.Store) {
 		}
 		st.Add(x)
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /api/events", func(w http.ResponseWriter, r *http.Request) {
+		var b model.EventBatch
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&b); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if b.Host == "" {
+			http.Error(w, "host is required", http.StatusBadRequest)
+			return
+		}
+		st.AddEvents(b)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, st.Events(r.URL.Query().Get("host")))
 	})
 
 	mux.HandleFunc("GET /api/hosts", func(w http.ResponseWriter, r *http.Request) {
@@ -73,13 +93,13 @@ func Register(mux *http.ServeMux, st *store.Store) {
 				return
 			case <-ping.C:
 				fmt.Fprint(w, ": ping\n\n")
-			case x := <-ch:
-				b, err := json.Marshal(x)
+			case m := <-ch:
+				b, err := json.Marshal(m.Data)
 				if err != nil {
 					log.Printf("stream: %v", err)
 					continue
 				}
-				fmt.Fprintf(w, "event: sample\ndata: %s\n\n", b)
+				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", m.Name, b)
 			}
 			flusher.Flush()
 		}

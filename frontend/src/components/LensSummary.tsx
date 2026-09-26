@@ -4,18 +4,39 @@ import {
   LEVEL_COLOR, LEVEL_ICON, LEVEL_LABEL, baseline, current, episodes, type Episode, type Level,
 } from "../lib/lens";
 import { explain, formatMs, impact, samplesBetween } from "../lib/impact";
+import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
 
-const HEADLINE: Record<Level, string> = {
+const CPU_HEADLINE: Record<Level, string> = {
   ok: "CPU待ち時間は低い状態です",
   caution: "CPU待ちがやや増えています",
   warning: "CPUの取り合いが起きています",
 };
 
+const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
+
+function lifecycleHeadline(l: Lifecycle): string {
+  if (l.ooms.length > 0) return "メモリ不足でプロセスが強制終了されました";
+  if (l.crashLoops.length > 0) return "クラッシュを繰り返しているプロセスがあります";
+  return "異常終了したプロセスがあります";
+}
+
+// CPU 使用率(eBPF で計測した全プロセスの CPU 時間の合計から出す)
+function cpuUtil(samples: Sample[]): number | null {
+  const xs = samples.slice(-5).filter((s) => s.cpus > 0 && s.intervalMs > 0);
+  if (xs.length === 0) return null;
+  const busy = xs.reduce((a, s) => a + s.busyNs, 0);
+  const cap = xs.reduce((a, s) => a + s.intervalMs * 1e6 * s.cpus, 0);
+  return Math.min(1, busy / cap);
+}
+
 const hm = (d: Date) => d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 
 // 画面の一番上に出す「今どうなっているか」の要約
-export function LensSummary({ samples }: { samples: Sample[] }) {
+export function LensSummary({ samples, life }: { samples: Sample[]; life: Lifecycle }) {
   const now = current(samples);
+  const util = cpuUtil(samples);
+  const overall: Level = RANK[life.level] > RANK[now.level] ? life.level : now.level;
+  const headline = RANK[life.level] > RANK[now.level] ? lifecycleHeadline(life) : CPU_HEADLINE[now.level];
   const base = baseline(samples);
   const eps = episodes(samples);
   const last = eps[0];
@@ -32,6 +53,7 @@ export function LensSummary({ samples }: { samples: Sample[] }) {
     } else {
       detail += "。";
     }
+    if (util != null) detail += ` CPU使用率は ${Math.round(util * 100)}% です。`;
   }
 
   return (
@@ -42,18 +64,26 @@ export function LensSummary({ samples }: { samples: Sample[] }) {
     >
       <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Lens Summary</div>
       <div className="flex items-center gap-2 text-lg font-semibold">
-        <span aria-hidden style={{ color: LEVEL_COLOR[now.level] }}>{LEVEL_ICON[now.level]}</span>
-        <span>{LEVEL_LABEL[now.level]}</span>
+        <span aria-hidden style={{ color: LEVEL_COLOR[overall] }}>{LEVEL_ICON[overall]}</span>
+        <span>{LEVEL_LABEL[overall]}</span>
         <span style={{ color: "var(--text-secondary)" }}>·</span>
-        <span>{HEADLINE[now.level]}</span>
+        <span>{headline}</span>
       </div>
-      <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>{detail}</p>
-      {last && <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>{episodeSentence(last)}</p>}
-      {last && <CauseSentence samples={samples} episode={last} />}
+
+      <dl className="mt-3 space-y-2 text-sm">
+        <Finding area="CPU" level={now.level}>
+          <p>{detail}</p>
+          {last && <p>{episodeSentence(last)}</p>}
+          {last && <CauseSentence samples={samples} episode={last} />}
+        </Finding>
+        <Finding area="プロセス" level={life.level}>
+          <p>{lifecycleSentence(life)}</p>
+        </Finding>
+      </dl>
 
       {eps.length > 0 && (
         <div className="mt-4">
-          <h3 className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>直近の出来事(表示範囲内)</h3>
+          <h3 className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>CPU の直近の出来事(表示範囲内)</h3>
           <table className="w-full text-sm tabular">
             <thead style={{ color: "var(--text-muted)" }}>
               <tr>
@@ -85,6 +115,20 @@ export function LensSummary({ samples }: { samples: Sample[] }) {
   );
 }
 
+// 領域ごとの所見。アイコンとラベルで判定を示し、色だけに頼らない
+function Finding({ area, level, children }: { area: string; level: Level; children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[5.5rem_1fr] gap-2">
+      <dt className="flex items-start gap-1.5 font-semibold">
+        <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]}</span>
+        <span>{area}</span>
+        <span className="sr-only">{LEVEL_LABEL[level]}</span>
+      </dt>
+      <dd className="space-y-0.5" style={{ color: "var(--text-secondary)" }}>{children}</dd>
+    </div>
+  );
+}
+
 // 出来事の間に「誰が CPU を使い、ほかに誰が待たされたか」を一文にする
 function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Episode }) {
   const { culprit, victims } = explain(impact(samplesBetween(samples, episode.start, episode.end)));
@@ -103,11 +147,7 @@ function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Episo
       .join("、");
     parts.push(`${culprit ? "そのほかで" : ""}待たされたのは ${v} です。`);
   }
-  return (
-    <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
-      {parts.join(" ")}
-    </p>
-  );
+  return <p>{parts.join(" ")}</p>;
 }
 
 function episodeSentence(e: Episode): string {

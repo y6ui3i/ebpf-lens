@@ -1,0 +1,5 @@
+packages:
+  - path: "github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+    output_path: "frontend/src/types/model.ts"
+    type_mappings:
+      time.Time: "string /* RFC3339 */"

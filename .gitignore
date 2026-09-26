@@ -4,3 +4,8 @@
 # bpf2go の生成物(make generate)
 *_bpfel.go
 *_bpfel.o
+# フロントのビルド成果物(make web)。embed のために .gitkeep だけ残す
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep
+node_modules/
+*.tsbuildinfo

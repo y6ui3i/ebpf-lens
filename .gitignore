@@ -1,0 +1,6 @@
+/bin/
+# ビルドするマシンのカーネル BTF から生成する(make vmlinux)
+/bpf/headers/vmlinux.h
+# bpf2go の生成物(make generate)
+*_bpfel.go
+*_bpfel.o

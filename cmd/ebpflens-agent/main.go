@@ -19,8 +19,10 @@ import (
 	"time"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/memstall"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/procfs"
 )
 
 func main() {
@@ -47,6 +49,13 @@ func main() {
 		log.Fatalf("runqlat: %v", err)
 	}
 	defer p.Close()
+
+	ms, err := memstall.Open()
+	if err != nil {
+		log.Fatalf("memstall: %v", err)
+	}
+	defer ms.Close()
+	mem := newMemReader()
 
 	pl, err := proclife.Open()
 	if err != nil {
@@ -95,9 +104,16 @@ func main() {
 			}
 			batch.Dropped = kdrop + agentDrops.Swap(0)
 
+			mx, err := memSample(ms, mem, *topN)
+			if err != nil {
+				log.Fatalf("memstall: %v", err)
+			}
+			mx.Host, mx.Time, mx.IntervalMs, mx.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
+
 			if *text {
 				printText(now, slots)
 				printProcs(procs)
+				printMem(mx)
 				printEvents(batch)
 				continue
 			}
@@ -111,6 +127,9 @@ func main() {
 				if err := send(client, *serverURL, "/api/ingest", x); err != nil {
 					log.Printf("send sample: %v", err)
 				}
+				if err := send(client, *serverURL, "/api/ingest", mx); err != nil {
+					log.Printf("send memstall: %v", err)
+				}
 				if len(batch.Events) > 0 || batch.Dropped > 0 {
 					if err := send(client, *serverURL, "/api/events", batch); err != nil {
 						log.Printf("send events: %v", err)
@@ -121,11 +140,66 @@ func main() {
 			if err := enc.Encode(x); err != nil {
 				log.Fatal(err)
 			}
+			if err := enc.Encode(mx); err != nil {
+				log.Fatal(err)
+			}
 			if len(batch.Events) > 0 {
 				if err := enc.Encode(batch); err != nil {
 					log.Fatal(err)
 				}
 			}
+		}
+	}
+}
+
+// memReader は /proc の値を読み、PSI の累計を区間の増分にする。
+type memReader struct{ prev *procfs.PSI }
+
+func newMemReader() *memReader { return &memReader{} }
+
+func (r *memReader) read(stallNs uint64) *model.MemStat {
+	m := &model.MemStat{StallNs: stallNs}
+	if mi, err := procfs.ReadMemInfo(); err == nil {
+		m.TotalBytes, m.AvailableBytes = mi.TotalBytes, mi.AvailableBytes
+	}
+	if psi, err := procfs.ReadPSI("memory"); err == nil {
+		if r.prev != nil {
+			m.PsiSomeUs = psi.SomeTotalUs - r.prev.SomeTotalUs
+			m.PsiFullUs = psi.FullTotalUs - r.prev.FullTotalUs
+		}
+		r.prev = &psi
+	}
+	return m
+}
+
+// memSample は memstall の 1 区間ぶんを作る(ホスト名・時刻などは呼び出し側で埋める)。
+func memSample(ms *memstall.Probe, mem *memReader, topN int) (model.Sample, error) {
+	slots, err := ms.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, err := ms.Procs()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	var stall uint64
+	for _, s := range all {
+		stall += s.WaitNs
+	}
+	return model.Sample{
+		Probe: "memstall", Unit: "usecs", Slots: slots[:],
+		Procs: topProcs(all, topN), Mem: mem.read(stall),
+	}, nil
+}
+
+func printMem(x model.Sample) {
+	m := x.Mem
+	fmt.Printf("memstall: stall=%.2fms psi_some=%dus avail=%.1fGiB/%.1fGiB\n",
+		float64(m.StallNs)/1e6, m.PsiSomeUs, float64(m.AvailableBytes)/(1<<30), float64(m.TotalBytes)/(1<<30))
+	for _, s := range x.Procs {
+		if s.WaitCount > 0 {
+			fmt.Printf("  %-16s x%-3d stalls=%d total=%.2fms max=%.2fms reclaimed=%d memcg=%d\n",
+				s.Comm, s.Procs, s.WaitCount, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6, s.ReclaimedPages, s.MemcgCount)
 		}
 	}
 }

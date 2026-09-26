@@ -21,6 +21,18 @@ export interface Sample {
   cpus: number /* int */; // CPU 使用率の分母に使う
   busyNs: number /* uint64 */; // 全プロセスの CPU 使用時間の合計(eBPF で計測。idle は含まない)
   procs?: ProcStat[];
+  mem?: MemStat; // memstall のみ
+}
+/**
+ * MemStat は memstall のサンプルに付けるメモリの状況。
+ * StallNs が eBPF の計測値(主役)、使用量と PSI は /proc からの答え合わせ。
+ */
+export interface MemStat {
+  totalBytes: number /* uint64 */;
+  availableBytes: number /* uint64 */;
+  stallNs: number /* uint64 */; // 区間内に全プロセスが回収で止まった時間の合計(eBPF)
+  psiSomeUs: number /* uint64 */; // 区間内の PSI memory some の増分(1 つ以上のタスクが止まっていた時間)
+  psiFullUs: number /* uint64 */; // 区間内の PSI memory full の増分(全タスクが止まっていた時間)
 }
 /**
  * ProcEvent はプロセスの起動・終了・OOM kill の 1 件。
@@ -73,6 +85,11 @@ export interface ProcStat {
   waitNs: number /* uint64 */;
   waitMaxNs: number /* uint64 */;
   slots: number /* uint64 */[]; // 待ち時間の log2 ヒストグラム(µs)
+  /**
+   * memstall のみ。memstall では Wait* を「メモリ回収で止まった」の意味で使う
+   */
+  reclaimedPages?: number /* uint64 */;
+  memcgCount?: number /* uint64 */; // うち cgroup の上限による回収の回数
 }
 /**
  * HostInfo はサーバーが把握しているホストの一覧に使う。

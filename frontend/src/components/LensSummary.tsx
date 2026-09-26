@@ -5,6 +5,7 @@ import {
 } from "../lib/lens";
 import { explain, formatMs, impact, samplesBetween } from "../lib/impact";
 import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
+import { currentMem, memorySentence } from "../lib/memory";
 
 const CPU_HEADLINE: Record<Level, string> = {
   ok: "CPU待ち時間は低い状態です",
@@ -13,6 +14,12 @@ const CPU_HEADLINE: Record<Level, string> = {
 };
 
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
+
+const MEM_HEADLINE: Record<Level, string> = {
+  ok: "",
+  caution: "メモリ不足でプロセスが止まり始めています",
+  warning: "メモリ不足でプロセスが大きく止まっています",
+};
 
 function lifecycleHeadline(l: Lifecycle): string {
   if (l.ooms.length > 0) return "メモリ不足でプロセスが強制終了されました";
@@ -32,11 +39,19 @@ function cpuUtil(samples: Sample[]): number | null {
 const hm = (d: Date) => d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 
 // 画面の一番上に出す「今どうなっているか」の要約
-export function LensSummary({ samples, life }: { samples: Sample[]; life: Lifecycle }) {
+export function LensSummary({ samples, memSamples, life }: { samples: Sample[]; memSamples: Sample[]; life: Lifecycle }) {
   const now = current(samples);
   const util = cpuUtil(samples);
-  const overall: Level = RANK[life.level] > RANK[now.level] ? life.level : now.level;
-  const headline = RANK[life.level] > RANK[now.level] ? lifecycleHeadline(life) : CPU_HEADLINE[now.level];
+  const mem = currentMem(memSamples);
+  // 全体の判定は一番悪い領域に合わせ、見出しもその領域の言葉にする(同点なら CPU → メモリ → プロセスの順)
+  const areas: { level: Level; headline: string }[] = [
+    { level: now.level, headline: CPU_HEADLINE[now.level] },
+    { level: mem.level, headline: MEM_HEADLINE[mem.level] },
+    { level: life.level, headline: lifecycleHeadline(life) },
+  ];
+  const worstArea = areas.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a));
+  const overall = worstArea.level;
+  const headline = worstArea.headline;
   const base = baseline(samples);
   const eps = episodes(samples);
   const last = eps[0];
@@ -75,6 +90,9 @@ export function LensSummary({ samples, life }: { samples: Sample[]; life: Lifecy
           <p>{detail}</p>
           {last && <p>{episodeSentence(last)}</p>}
           {last && <CauseSentence samples={samples} episode={last} />}
+        </Finding>
+        <Finding area="メモリ" level={mem.level}>
+          <p>{memorySentence(memSamples)}</p>
         </Finding>
         <Finding area="プロセス" level={life.level}>
           <p>{lifecycleSentence(life)}</p>

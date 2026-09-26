@@ -5,6 +5,7 @@ import type { Lifecycle } from "../lib/lifecycle";
 import type { TimeWindow } from "../lib/timeWindow";
 import { Link } from "../lib/router";
 import { Sparkline } from "./Sparkline";
+import { currentMem, formatBytes, formatMsPerSec, memUsed, stallMsPerSec } from "../lib/memory";
 
 // USE メソッド(Brendan Gregg): 資源ごとに 使用率 / 飽和 / エラー を見る。
 // プローブが増えても升目が埋まっていくだけで、画面は縦に伸びない
@@ -22,7 +23,10 @@ const COLUMNS = [
   { title: "エラー", hint: "失敗や強制終了" },
 ];
 
-export function UseMatrix({ samples, events, life, win }: { samples: Sample[]; events: ProcEvent[]; life: Lifecycle; win: TimeWindow }) {
+export function UseMatrix({ samples, memSamples, events, life, win }: {
+  samples: Sample[]; memSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; win: TimeWindow;
+}) {
+  const mem = currentMem(memSamples);
   const utilSeries = samples.map((s) => (s.cpus && s.intervalMs ? s.busyNs / (s.intervalMs * 1e6 * s.cpus) : null));
   const util = mean(utilSeries.slice(-5));
   const cpuNow = current(samples);
@@ -45,8 +49,14 @@ export function UseMatrix({ samples, events, life, win }: { samples: Sample[]; e
     {
       resource: "メモリ",
       cells: [
-        { kind: "planned", roadmap: "6" },
-        { kind: "planned", roadmap: "6" },
+        {
+          kind: "value", value: mem.used == null ? "–" : `${Math.round(mem.used * 100)}%`,
+          note: mem.mem ? `空き ${formatBytes(mem.mem.availableBytes)}(/proc)` : "", spark: memSamples.map(memUsed), to: "/memory",
+        },
+        {
+          kind: "value", value: formatMsPerSec(mem.stall), note: "回収でプロセスが止まった時間",
+          level: mem.level, spark: memSamples.map(stallMsPerSec), to: "/memory",
+        },
         {
           kind: "value", value: `${life.ooms.length}`, note: "OOM kill(直近5分)",
           level: life.ooms.length > 0 ? "warning" : "ok", to: "/processes",

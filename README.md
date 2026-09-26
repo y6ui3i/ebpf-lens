@@ -16,6 +16,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 - **エージェント**: Go + [cilium/ebpf](https://github.com/cilium/ebpf)(CO-RE)。監視対象にはカーネル BTF だけあればよく、単一バイナリで配れる
   - `runqlat`: CPU 実行待ち時間のヒストグラムと、プロセス別の CPU 使用・待ち
   - `proclife`: exec / exit / OOM kill のイベント(ring buffer)。コマンドライン引数はパスワードを含みうるので取らない
+  - `memstall`: メモリ回収(`mm_vmscan_direct_reclaim_*` / `mm_vmscan_memcg_reclaim_*`)で止まった時間をプロセス別に。答え合わせに /proc/meminfo と /proc/pressure/memory も読む
 - **サーバー**: Go。画面用の直近の窓はメモリ(ホスト×プローブごとに直近 900 件、イベントはホストごとに直近 20000 件)、長く残す分は SQLite。トリガーは後で足す
 - **フロント**: React + Vite + TypeScript の SPA。TanStack Query、Tailwind、uPlot、ヒートマップは canvas 自前描画。型は tygo で Go から生成
 - **概念**: Zabbix に倣ってホスト / アイテム / トリガー / イベント
@@ -84,7 +85,7 @@ sudo systemctl restart ebpflens-server ebpflens-agent
 3. ✅ 原因と影響: プロセス単位の CPU 待ち(誰が待たされたか)と CPU 占有(誰が使っていたか)
 4. ✅ プロセスのライフサイクル: exec / exit(終了コード・シグナル・寿命)/ OOM kill。CPU 使用率も eBPF の計測値から出す
 5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
-6. メモリの詰まり: direct reclaim で止まった時間をプロセス別に(PSI で答え合わせ)
+6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
 7. トリガーと通知: 判定をサーバー側へ移す。材料はすべて eBPF 由来
 8. GPU の基本メトリクス(NVML、例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
 9. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
@@ -137,6 +138,12 @@ GPU 推論は CPU の取り合いをほとんど起こさない。学習(DataLoa
 | victim-app | 16 µs | 1.0 ms | 0.1% |
 
 すぐ寝るタスクは EEVDF が起床時に優遇するので、巻き込まれた側の待ちは占有している側より 1 桁以上小さい。
+
+## メモリ回収の停止と PSI の違い
+
+eBPF の `memstall` は「プロセスが実際に回収で止まっていた時間」をスレッドごとに足したもの。PSI(`/proc/pressure/memory` の some)は、CPU ごとの停止時間をその CPU の稼働時間で重み付けして平均した「ホスト全体として失った生産時間」で、約 2 秒ごとにまとめて更新される。1 つのプロセスだけが止まり、ほかの CPU が動いているときは PSI のほうが小さく出る。
+
+hal での実測(cgroup 上限 32MB の中で 4 つの dd が別々のファイルを読む): eBPF 約 11.5 ms/秒、PSI some 約 3〜5 ms/秒。
 
 ## 実験環境
 

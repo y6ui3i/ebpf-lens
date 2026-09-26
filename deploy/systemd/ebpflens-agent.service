@@ -1,0 +1,25 @@
+[Unit]
+Description=eBPFLens agent (eBPF probes)
+Documentation=https://github.com/yoshiharu-ishii/ebpf-lens
+After=network-online.target ebpflens-server.service
+Wants=network-online.target
+
+[Service]
+# root ではなく専用ユーザーで動かし、eBPF に要る権限だけを渡す
+#   CAP_BPF: BPF プログラムとマップの作成
+#   CAP_PERFMON: tracepoint / fentry へのアタッチ、カーネルメモリの読み取り(bpf_probe_read_kernel)
+User=ebpflens
+Group=ebpflens
+AmbientCapabilities=CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON
+NoNewPrivileges=yes
+ExecStart=/opt/ebpflens/bin/ebpflens-agent -server http://127.0.0.1:8080
+Restart=always
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

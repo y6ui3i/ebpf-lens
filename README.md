@@ -27,6 +27,31 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 - **すべてのパネル(`/all`)は全部並べて見る場所。** 領域ごとの画面にあるパネルを縦に並べる。プローブを足したらここにも足す
 - 生データより先に意味を出す。判定と文章の要約が先、グラフはその根拠
 
+## 常駐(systemd)
+
+`deploy/systemd/` のユニットで常駐させる。hal では画面が http://hal:8080 、検証用の起動は 8001 を使う。
+
+- **エージェントは root で動かさない。** 専用ユーザー `ebpflens` で動かし、`CAP_BPF` と `CAP_PERFMON` だけを渡す(tracepoint / fentry へのアタッチと ring buffer はこの 2 つで足りる)
+- サーバーは特権なし。書き込めるのは DB のディレクトリだけ(`ProtectSystem=strict`)
+- 開発中の `bin/` を直接動かさない。`make install` で `/opt/ebpflens/bin` に入れてから再起動する
+
+初回だけ:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin ebpflens
+sudo usermod -aG ebpflens "$USER"            # sqlite3 で DB を読めるように
+sudo install -d -o ebpflens -g ebpflens -m 2775 /mnt/data/ebpflens
+make install
+sudo systemctl enable --now ebpflens-server ebpflens-agent
+```
+
+更新:
+
+```bash
+make install
+sudo systemctl restart ebpflens-server ebpflens-agent
+```
+
 ## 保存
 
 `-db` を付けると SQLite に保存する(pure Go の modernc.org/sqlite。cgo 不要)。再起動しても画面の履歴が戻る。

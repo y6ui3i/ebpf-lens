@@ -1,0 +1,30 @@
+[Unit]
+Description=eBPFLens server (API, SSE, UI, SQLite)
+Documentation=https://github.com/yoshiharu-ishii/ebpf-lens
+After=network-online.target
+Wants=network-online.target
+# DB を置くディスクがマウントされてから起動する
+RequiresMountsFor=/mnt/data/ebpflens
+
+[Service]
+User=ebpflens
+Group=ebpflens
+# hal ユーザーからも sqlite3 で読めるよう、作るファイルはグループ書き込み可にする(WAL の -shm に書き込み権が要る)
+UMask=0002
+ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /mnt/data/ebpflens/ebpflens.db
+Restart=on-failure
+RestartSec=5
+# SIGTERM でキューを書き切ってから閉じる
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# サーバーは特権が要らないので絞る
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/mnt/data/ebpflens
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

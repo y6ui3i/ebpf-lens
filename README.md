@@ -145,6 +145,21 @@ eBPF の `memstall` は「プロセスが実際に回収で止まっていた時
 
 hal での実測(cgroup 上限 32MB の中で 4 つの dd が別々のファイルを読む): eBPF 約 11.5 ms/秒、PSI some 約 3〜5 ms/秒。
 
+検証用 VM(メモリ 1GB、2 vCPU)で VM 全体を使い切ったとき: 5 秒間で eBPF 127.8 ms、PSI some 134.7 ms とほぼ一致した。CPU が少なく、ほぼ全員が止まっていると重み付けで薄まらない。止まったのはメモリを確保していた python3 だけでなく、systemd-journal、rsyslogd、エージェント自身(最大 9 ms)にも及んだ。最後は OOM kill(`memcg=false`、VM 全体の 244,727 ページ)。
+
+## 検証用 VM
+
+ホスト全体のメモリ不足(direct reclaim)や OOM は、コンテナ(cgroup)では起こせない。cgroup の上限に当たって起きるのは memcg reclaim だけで、direct reclaim はホスト全体の空きが下限を割ったときに起きる。hal を汚さずに起こすため、libvirt / KVM の小さな VM を使う。
+
+```bash
+sh lab/create-vm.sh          # 作成して起動(既にあれば起動)。Ubuntu 26.04 クラウドイメージ、メモリ 1GB、スワップ無し
+sh lab/create-vm.sh push     # bin/ebpflens-agent を VM にコピー
+sh lab/create-vm.sh ssh      # VM に入る
+virsh -c qemu:///system shutdown ebpflens-lab   # 止める(ディスクは /mnt/data/vms/ebpflens-lab に残る)
+```
+
+VM のカーネルは 7.0.0-31、hal は 7.0.0-34。hal でビルドしたエージェントがそのまま動く(CO-RE)。
+
 ## 実験環境
 
 - hal: Ubuntu 26.04.1、カーネル 7.0.0-34-generic、8 コア、RTX 2070

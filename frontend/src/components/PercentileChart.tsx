@@ -7,25 +7,27 @@ import { cssVar } from "../lib/theme";
 import { CAUTION_US, WARNING_US } from "../lib/lens";
 import type { TimeWindow } from "../lib/timeWindow";
 import { CHART_HEIGHT } from "./Heatmap";
+import { formatHMS, formatTime, useI18n, type Key } from "../lib/i18n";
 
-const SERIES = [
-  { label: "p50", legend: "半数のタスク(p50)", q: 0.5, color: "--series-1" },
-  { label: "p99", legend: "99%のタスク(p99)", q: 0.99, color: "--series-2" },
+const SERIES: { label: string; legend: Key; q: number; color: string }[] = [
+  { label: "p50", legend: "cpu.seriesP50", q: 0.5, color: "--series-1" },
+  { label: "p99", legend: "cpu.seriesP99", q: 0.99, color: "--series-2" },
 ];
 
 type Props = {
   samples: Sample[];
   win: TimeWindow;
   schemeKey: string;
-  hoverMs: number | null; // ヒートマップと共有するカーソル時刻
+  hoverMs: number | null; // cursor time shared with the heatmap
   onHover: (ms: number | null) => void;
 };
 
 export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: Props) {
+  const { lang, t } = useI18n();
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const lineRef = useRef<HTMLDivElement | null>(null);
-  // uPlot のコールバックは生成時に固定されるので、最新の値は ref 経由で読む
+  // uPlot callbacks are fixed at creation, so read the latest values through refs
   const winRef = useRef(win);
   winRef.current = win;
   const onHoverRef = useRef(onHover);
@@ -37,7 +39,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
     return [xs, ...ys];
   }, [samples]);
 
-  // テーマが変わったら作り直す(色は生成時に読むため)
+  // Rebuild when the theme or language changes (colors and labels are read at creation)
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -51,11 +53,11 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
     const opts: uPlot.Options = {
       width: el.clientWidth,
       height: CHART_HEIGHT,
-      padding: [8, 40, 0, 0], // 右端に系列名を直接書く余白
+      padding: [8, 40, 0, 0], // room on the right to label the series directly
       scales: {
-        // 横軸はヒートマップと同じ範囲に固定する
+        // pin the x axis to the same range as the heatmap
         x: { time: true, range: () => [winRef.current.startMs / 1000, winRef.current.endMs / 1000] },
-        // 縦軸は 1µs〜100ms に固定する。平常時でもしきい値の帯が見えるように
+        // pin the y axis to 1µs-100ms so the threshold bands are visible even in normal times
         y: { distr: 3, log: 10, range: () => [1, 100_000] },
       },
       axes: [
@@ -63,14 +65,14 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
           ...axis,
           space: 80,
           values: (_u, vals) =>
-            vals.map((v) => new Date(v * 1000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" })),
+            vals.map((v) => formatHMS(lang, v * 1000)),
         },
         { ...axis, size: 56, values: (_u, vals) => vals.map((v) => formatUs(v)) },
       ],
       series: [
-        { label: "時刻", value: (_u, v) => (v == null ? "–" : new Date(v * 1000).toLocaleTimeString("ja-JP")) },
+        { label: t("common.time"), value: (_u, v) => (v == null ? "–" : formatTime(lang, v * 1000)) },
         ...SERIES.map((s) => ({
-          label: s.legend,
+          label: t(s.legend),
           stroke: cssVar(s.color),
           width: 2,
           points: { show: false },
@@ -81,21 +83,21 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
       hooks: {
         setCursor: [
           (u) => {
-            // データ更新でも呼ばれるので、マウスがこのグラフ上にあるときだけ連動させる
+            // Also called on data updates, so only sync while the pointer is over this chart
             if (!pointerInside) return;
             const left = u.cursor.left;
             onHoverRef.current(left == null || left < 0 ? null : u.posToVal(left, "x") * 1000);
           },
         ],
-        // しきい値の帯。軸の後・線の前に描く
+        // Threshold bands, drawn after the axes and before the lines
         drawAxes: [
           (u) => {
             const ctx = u.ctx;
             const { left, width, top } = u.bbox;
             const yOf = (v: number) => u.valToPos(v, "y", true);
             const bands = [
-              { from: CAUTION_US, to: WARNING_US, color: cssVar("--status-warning"), label: `注意 ${formatUs(CAUTION_US)}` },
-              { from: WARNING_US, to: 100_000, color: cssVar("--status-critical"), label: `警告 ${formatUs(WARNING_US)}` },
+              { from: CAUTION_US, to: WARNING_US, color: cssVar("--status-warning"), label: t("chart.caution", { v: formatUs(CAUTION_US) }) },
+              { from: WARNING_US, to: 100_000, color: cssVar("--status-critical"), label: t("chart.warning", { v: formatUs(WARNING_US) }) },
             ];
             ctx.save();
             for (const b of bands) {
@@ -114,7 +116,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
               ctx.globalAlpha = 1;
               ctx.fillStyle = cssVar("--text-muted");
               ctx.font = `${10 * devicePixelRatio}px system-ui, sans-serif`;
-              // uPlot は y 軸の目盛りを右揃えで描いた状態のまま hook を呼ぶので、左揃えに戻す
+              // uPlot calls this hook with the right alignment it used for the y-axis ticks, so switch back to left
               ctx.textAlign = "left";
               ctx.textBaseline = "bottom";
               ctx.fillText(b.label, left + 4 * devicePixelRatio, y0 - 2 * devicePixelRatio);
@@ -124,7 +126,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
         ],
         draw: [
           (u) => {
-            // 系列名を線の右端に直接書く(文字色はインク、線の色は系列の識別に任せる)
+            // Write the series name right at the end of each line (text in ink color; the line color identifies the series)
             const ctx = u.ctx;
             ctx.save();
             ctx.font = `${11 * devicePixelRatio}px system-ui, sans-serif`;
@@ -152,7 +154,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
       pointerInside = false;
       onHoverRef.current(null);
     });
-    // ヒートマップ側でホバーしたときに出す縦線
+    // Vertical line shown when hovering over the heatmap
     const line = document.createElement("div");
     Object.assign(line.style, {
       position: "absolute", top: "0", bottom: "0", width: "1px", display: "none", pointerEvents: "none",
@@ -168,7 +170,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
       plotRef.current = null;
       lineRef.current = null;
     };
-  }, [schemeKey]);
+  }, [schemeKey, lang]);
 
   useEffect(() => {
     plotRef.current?.setData(data);
@@ -191,7 +193,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
       ref={wrapRef}
       className="w-full"
       role="img"
-      aria-label="CPU実行待ち時間の p50 と p99 の推移(対数軸)"
+      aria-label={t("cpu.chartAria")}
     />
   );
 }

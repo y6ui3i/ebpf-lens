@@ -1,4 +1,5 @@
-// log2 ヒストグラムの扱い。slot i は [2^i, 2^(i+1))、slot 0 のみ [0, 2)。
+// log2 histogram helpers. Slot i covers [2^i, 2^(i+1)); only slot 0 covers [0, 2).
+import { translate, type Lang } from "./i18n";
 
 export function slotRange(i: number): [number, number] {
   return i === 0 ? [0, 2] : [2 ** i, 2 ** (i + 1)];
@@ -8,7 +9,7 @@ export function total(slots: number[]): number {
   return slots.reduce((a, b) => a + b, 0);
 }
 
-// 分位点の推定値。該当スロット内は線形補間する(ヒストグラムからの推定なので最大で 2 倍ずれうる)
+// Estimated percentile. Interpolates linearly within the slot (an estimate from a histogram, so it can be off by up to 2x)
 export function percentile(slots: number[], q: number): number | null {
   const n = total(slots);
   if (n === 0) return null;
@@ -32,7 +33,7 @@ export function formatUs(us: number | null | undefined): string {
   return `${(us / 1_000_000).toFixed(1)} s`;
 }
 
-export function formatRange(i: number): string {
+export function formatRange(i: number, lang: Lang): string {
   const [lo, hi] = slotRange(i);
-  return `${formatUs(lo)} 〜 ${formatUs(hi)}`;
+  return `${formatUs(lo)}${translate(lang, "range.sep")}${formatUs(hi)}`;
 }

@@ -1,8 +1,9 @@
-// プロセスの起動・終了・OOM kill のイベントを「監視者にとっての意味」に変換する。
+// Turns process exec / exit / OOM kill events into what they mean for an operator.
 import type { ProcEvent } from "../types/model";
 import type { Level } from "./lens";
+import { formatTime, translate, type Key, type Lang, type Params } from "./i18n";
 
-// クラッシュとみなすシグナル。SIGTERM / SIGKILL / SIGINT などは止められた側の正常な終わり方なので含めない
+// Signals treated as crashes. SIGTERM / SIGKILL / SIGINT etc. are a normal way for a process to be stopped, so they are excluded
 const CRASH_SIGNALS: Record<number, string> = {
   4: "SIGILL", 6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE", 11: "SIGSEGV", 31: "SIGSYS",
 };
@@ -10,10 +11,10 @@ const SIGNAL_NAMES: Record<number, string> = {
   ...CRASH_SIGNALS, 1: "SIGHUP", 2: "SIGINT", 9: "SIGKILL", 13: "SIGPIPE", 15: "SIGTERM",
 };
 
-export const SHORT_LIVED_NS = 1e9; // これ未満で終わったプロセスを「短命」とする
-const CRASH_LOOP_COUNT = 3; // 同じコマンドがこの回数以上クラッシュしたら警告
+export const SHORT_LIVED_NS = 1e9; // processes that end before this are "short-lived"
+const CRASH_LOOP_COUNT = 3; // warn when the same command crashes this many times or more
 
-export const signalName = (n: number) => SIGNAL_NAMES[n] ?? `シグナル ${n}`;
+export const signalName = (n: number, lang: Lang) => SIGNAL_NAMES[n] ?? translate(lang, "life.signal", { n });
 export const isCrash = (e: ProcEvent) => e.kind === "exit" && (e.signal in CRASH_SIGNALS || e.coreDump);
 export const isErrorExit = (e: ProcEvent) => e.kind === "exit" && e.signal === 0 && e.exitStatus !== 0;
 
@@ -74,27 +75,29 @@ function countBy(xs: ProcEvent[]): Map<string, number> {
   return m;
 }
 
-export function formatLifetime(ns: number): string {
+export function formatLifetime(ns: number, lang: Lang): string {
   if (ns < 1e6) return `${Math.round(ns / 1e3)} µs`;
   if (ns < 1e9) return `${(ns / 1e6).toFixed(ns < 1e7 ? 1 : 0)} ms`;
-  if (ns < 60e9) return `${(ns / 1e9).toFixed(1)} 秒`;
-  if (ns < 3600e9) return `${Math.round(ns / 60e9)} 分`;
-  return `${(ns / 3600e9).toFixed(1)} 時間`;
+  if (ns < 60e9) return `${(ns / 1e9).toFixed(1)} ${translate(lang, "unit.s")}`;
+  if (ns < 3600e9) return `${Math.round(ns / 60e9)} ${translate(lang, "unit.min")}`;
+  return `${(ns / 3600e9).toFixed(1)} ${translate(lang, "unit.h")}`;
 }
 
-const hms = (t: string) => new Date(t).toLocaleTimeString("ja-JP");
-
-// 要約に出す一文
-export function lifecycleSentence(l: Lifecycle): string {
+// One-line sentence for the summary. Templates live in i18n.tsx because word order differs per language
+export function lifecycleSentence(l: Lifecycle, lang: Lang): string {
+  const tr = (k: Key, p?: Params) => translate(lang, k, p);
+  const hms = (t: string) => formatTime(lang, t);
   const oom = l.ooms.at(-1);
   if (oom) {
-    const why = oom.memcg ? "cgroup のメモリ上限に達したため" : "ホスト全体のメモリが不足したため";
-    const more = l.ooms.length > 1 ? `(ほか ${l.ooms.length - 1} 件)` : "";
-    return `${hms(oom.time)} に、${why} ${oom.comm}(pid ${oom.pid})が強制終了されました${more}。`;
+    const why = oom.memcg ? tr("life.oomWhyMemcg") : tr("life.oomWhyHost");
+    const more = l.ooms.length > 1 ? tr("life.oomMore", { n: l.ooms.length - 1 }) : "";
+    return tr("life.oom", { time: hms(oom.time), why, comm: oom.comm, pid: oom.pid, more });
   }
   const loop = l.crashLoops[0];
-  if (loop) return `${loop.comm} が直近5分で ${loop.count} 回クラッシュしています。`;
+  if (loop) return tr("life.loop", { comm: loop.comm, count: loop.count });
   const crash = l.crashes.at(-1);
-  if (crash) return `${hms(crash.time)} に ${crash.comm}(pid ${crash.pid})が ${signalName(crash.signal)} で異常終了しました。`;
-  return `異常終了はありません。直近5分で ${l.execs.toLocaleString()} 回起動し、うち ${l.shortLived.toLocaleString()} 件は1秒未満で終わりました。`;
+  if (crash) {
+    return tr("life.crash", { time: hms(crash.time), comm: crash.comm, pid: crash.pid, signal: signalName(crash.signal, lang) });
+  }
+  return tr("life.none", { execs: l.execs.toLocaleString(), short: l.shortLived.toLocaleString() });
 }

@@ -1,29 +1,30 @@
 import { useEffect, useState } from "react";
-import { LEVEL_COLOR, LEVEL_ICON, LEVEL_LABEL, type Level } from "../lib/lens";
+import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
 import { Link, ROUTES } from "../lib/router";
+import { useI18n, type Key } from "../lib/i18n";
 
-// OpenSearch Dashboards 風のメニュー。上部バーの ☰ で左から滑り出し、もう一度押すと滑って消える。
-// 閉じている間も DOM に残して transform で動かす(出入りのアニメーションのため)。閉じている間は inert にする
+// OpenSearch Dashboards style menu. The ☰ in the top bar slides it in from the left; pressing again slides it out.
+// It stays in the DOM while closed and moves with transform (for the enter/leave animation). It is inert while closed
 
-type Group = { title: string; items: { path?: string; label: string }[] };
+type Group = { title: Key; items: { path?: string; label: Key }[] };
 
 const GROUPS: Group[] = [
   {
-    title: "eBPFLens",
+    title: "nav.group.ebpflens",
     items: [
-      { path: "/", label: "ダッシュボード" },
-      { path: "/all", label: "すべてのパネル" },
+      { path: "/", label: "page.dashboard" },
+      { path: "/all", label: "page.all" },
     ],
   },
   {
-    title: "リソース",
+    title: "nav.group.resources",
     items: [
-      { path: "/cpu", label: "CPU実行待ち時間" },
-      { path: "/processes", label: "プロセスの起動と終了" },
-      { path: "/memory", label: "メモリ" },
-      { label: "ディスク" },
-      { label: "ネットワーク" },
-      { label: "GPU" },
+      { path: "/cpu", label: "page.cpu" },
+      { path: "/processes", label: "page.processes" },
+      { path: "/memory", label: "page.memory" },
+      { label: "resource.disk" },
+      { label: "resource.network" },
+      { label: "resource.gpu" },
     ],
   },
 ];
@@ -34,8 +35,9 @@ export function Nav({ path, open, onClose, levels }: {
   path: string;
   open: boolean;
   onClose: () => void;
-  levels: Record<string, Level>; // 画面ごとの判定。異常がある画面だけアイコンを出す
+  levels: Record<string, Level>; // status per screen; only screens with a problem get an icon
 }) {
+  const { t } = useI18n();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const recent = useRecent(path);
 
@@ -48,13 +50,16 @@ export function Nav({ path, open, onClose, levels }: {
 
   const toggle = (title: string) => setCollapsed((c) => ({ ...c, [title]: !c[title] }));
   const recentGroup: Group = {
-    title: "最近見た画面",
-    items: recent.map((p) => ({ path: p, label: ROUTES.find((r) => r.path === p)?.label ?? p })),
+    title: "nav.group.recent",
+    items: recent.flatMap((p) => {
+      const r = ROUTES.find((x) => x.path === p);
+      return r ? [{ path: p, label: r.labelKey }] : [];
+    }),
   };
 
   return (
     <>
-      {/* 背景を少し暗くして、押すと閉じる */}
+      {/* Dim the background slightly; clicking it closes the menu */}
       <div
         aria-hidden
         onClick={onClose}
@@ -64,7 +69,7 @@ export function Nav({ path, open, onClose, levels }: {
       />
       <nav
         id="main-nav"
-        aria-label="メニュー"
+        aria-label={t("nav.aria")}
         inert={!open}
         className={`fixed top-12 bottom-0 left-0 z-30 w-72 max-w-[85vw] overflow-y-auto shadow-xl transition-transform duration-300 ease-out motion-reduce:transition-none ${
           open ? "translate-x-0" : "-translate-x-full"
@@ -79,7 +84,7 @@ export function Nav({ path, open, onClose, levels }: {
                 aria-expanded={!collapsed[g.title]}
                 className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-semibold"
               >
-                <span>{g.title}</span>
+                <span>{t(g.title)}</span>
                 <span
                   aria-hidden
                   className={`text-xs transition-transform duration-200 motion-reduce:transition-none ${collapsed[g.title] ? "-rotate-90" : ""}`}
@@ -93,11 +98,11 @@ export function Nav({ path, open, onClose, levels }: {
                   {g.items.map((it) => (
                     <li key={`${g.title}:${it.label}`}>
                       {it.path ? (
-                        <NavLink path={it.path} label={it.label} active={it.path === path} level={levels[it.path]} onNavigate={onClose} />
+                        <NavLink path={it.path} label={t(it.label)} active={it.path === path} level={levels[it.path]} onNavigate={onClose} />
                       ) : (
                         <span className="flex items-center justify-between px-4 py-1.5 text-sm" style={{ color: "var(--text-muted)" }}>
-                          {it.label}
-                          <span className="text-xs">準備中</span>
+                          {t(it.label)}
+                          <span className="text-xs">{t("nav.soon")}</span>
                         </span>
                       )}
                     </li>
@@ -115,6 +120,7 @@ export function Nav({ path, open, onClose, levels }: {
 function NavLink({ path, label, active, level, onNavigate }: {
   path: string; label: string; active: boolean; level?: Level; onNavigate: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <Link
       to={path}
@@ -129,16 +135,16 @@ function NavLink({ path, label, active, level, onNavigate }: {
     >
       <span>{label}</span>
       {level && level !== "ok" && (
-        <span style={{ color: LEVEL_COLOR[level] }} title={LEVEL_LABEL[level]}>
+        <span style={{ color: LEVEL_COLOR[level] }} title={t(LEVEL_KEY[level])}>
           <span aria-hidden>{LEVEL_ICON[level]}</span>
-          <span className="sr-only">{LEVEL_LABEL[level]}</span>
+          <span className="sr-only">{t(LEVEL_KEY[level])}</span>
         </span>
       )}
     </Link>
   );
 }
 
-// 最近見た画面(今の画面は除く)。ブラウザごとの便利機能なので、保存できなくても動くようにする
+// Recently viewed screens (excluding the current one). A per-browser convenience, so it must work even when it cannot be saved
 function useRecent(path: string): string[] {
   const [recent, setRecent] = useState<string[]>(() => {
     try {
@@ -153,7 +159,7 @@ function useRecent(path: string): string[] {
       try {
         localStorage.setItem("ebpflens.recent", JSON.stringify(next));
       } catch {
-        // 保存できない環境では、このセッションの間だけ覚える
+        // Where saving is not possible, remember only for this session
       }
       return next;
     });
@@ -162,10 +168,11 @@ function useRecent(path: string): string[] {
 }
 
 export function MenuButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const { t } = useI18n();
   return (
     <button
       onClick={onToggle}
-      aria-label={open ? "メニューを閉じる" : "メニューを開く"}
+      aria-label={t(open ? "nav.close" : "nav.open")}
       aria-expanded={open}
       aria-controls="main-nav"
       className="flex h-12 w-12 items-center justify-center text-lg hover:bg-[var(--page)]"

@@ -8,8 +8,8 @@ const MAX_EVENTS = 20000;
 
 type ByProbe = Record<string, Sample[]>;
 
-// 1 本の SSE でサンプル(プローブごと)とイベントの新着を受け、履歴と合わせて保持する。
-// 取りこぼしを防ぐため、履歴の取得より先に SSE を開く。probes は呼び出し側で固定の配列を渡すこと
+// Receives new samples (per probe) and events over a single SSE stream and keeps them merged with history.
+// The SSE stream is opened before fetching history so nothing is missed. Callers must pass a stable `probes` array
 export function useLiveHost(host: string | undefined, probes: readonly string[], limit: number) {
   const [samples, setSamples] = useState<ByProbe>({});
   const [events, setEvents] = useState<ProcEvent[]>([]);
@@ -26,7 +26,7 @@ export function useLiveHost(host: string | undefined, probes: readonly string[],
 
     const es = new EventSource(`/api/stream?host=${encodeURIComponent(host)}`);
     es.onopen = () => setStatus("live");
-    es.onerror = () => setStatus("reconnecting"); // EventSource は自動で再接続する
+    es.onerror = () => setStatus("reconnecting"); // EventSource reconnects automatically
     es.addEventListener("sample", (ev) => {
       const s = JSON.parse((ev as MessageEvent<string>).data) as Sample;
       if (!probes.includes(s.probe)) return;
@@ -75,7 +75,7 @@ function newerThan<T extends { time: string }>(xs: T[], last: string | undefined
   return xs.filter((x) => Date.parse(x.time) > lastMs);
 }
 
-// 直近 5 分・最大件数に切り詰める
+// Trim to the last 5 minutes and the maximum count
 function trim(xs: ProcEvent[]): ProcEvent[] {
   const last = xs.at(-1);
   if (!last) return xs;

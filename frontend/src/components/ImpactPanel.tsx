@@ -3,14 +3,16 @@ import type { Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
 import { episodes } from "../lib/lens";
 import { byCpu, byWait, explain, formatMs, impact, procLabel, samplesBetween } from "../lib/impact";
+import { formatTime, useI18n } from "../lib/i18n";
 
 const RECENT_SECONDS = 10;
 const ROWS = 5;
 
 type Scope = "episode" | "recent";
 
-// 原因(誰が CPU を使っていたか)と影響(誰が待たされたか)
+// Cause (who was using the CPU) and impact (who was kept waiting)
 export function ImpactPanel({ samples }: { samples: Sample[] }) {
+  const { lang, t } = useI18n();
   const ep = episodes(samples)[0];
   const [picked, setPicked] = useState<Scope>();
   const scope: Scope = picked ?? (ep ? "episode" : "recent");
@@ -24,8 +26,10 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
 
   const scopeLabel =
     scope === "episode" && ep
-      ? `出来事 ${ep.start.toLocaleTimeString("ja-JP")} 〜 ${ep.ongoing ? "継続中" : ep.end.toLocaleTimeString("ja-JP")}`
-      : `直近 ${RECENT_SECONDS} 秒`;
+      ? t("impact.scopeEpisode", {
+          range: `${formatTime(lang, ep.start)}${t("range.sep")}${ep.ongoing ? t("common.ongoing") : formatTime(lang, ep.end)}`,
+        })
+      : t("impact.scopeRecent", { n: RECENT_SECONDS });
 
   return (
     <section
@@ -34,13 +38,13 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
     >
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">原因と影響</h2>
+          <h2 className="text-lg font-semibold">{t("page.impact")}</h2>
           <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
-            誰がCPUを使っていて、誰が待たされたか({scopeLabel})
+            {t("impact.desc", { scope: scopeLabel })}
           </p>
         </div>
         {ep && (
-          <div className="flex gap-1 text-xs" role="group" aria-label="集計する範囲">
+          <div className="flex gap-1 text-xs" role="group" aria-label={t("impact.scopeAria")}>
             {(["episode", "recent"] as const).map((s) => (
               <button
                 key={s}
@@ -54,7 +58,7 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
                   fontWeight: scope === s ? 600 : 400,
                 }}
               >
-                {s === "episode" ? "直近の出来事" : `直近 ${RECENT_SECONDS} 秒`}
+                {s === "episode" ? t("impact.btnEpisode") : t("impact.btnRecent", { n: RECENT_SECONDS })}
               </button>
             ))}
           </div>
@@ -63,20 +67,20 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
 
       {xs.length === 0 ? (
         <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-          プロセス別のデータがまだありません(エージェントが古い可能性があります)
+          {t("impact.noData")}
         </p>
       ) : (
         <div className="grid gap-8 md:grid-cols-2">
           <div>
             <h3 className="mb-1 text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-              CPUを使っていたプロセス
+              {t("impact.cpuTitle")}
             </h3>
             <table className="w-full text-sm tabular">
               <thead style={{ color: "var(--text-muted)" }}>
                 <tr>
-                  <th className="py-1 text-left font-normal">プロセス</th>
-                  <th className="py-1 text-left font-normal">CPU全体に占める割合</th>
-                  <th className="py-1 text-right font-normal">CPU時間</th>
+                  <th className="py-1 text-left font-normal">{t("common.process")}</th>
+                  <th className="py-1 text-left font-normal">{t("impact.cpuShare")}</th>
+                  <th className="py-1 text-right font-normal">{t("impact.cpuTime")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -103,16 +107,16 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
 
           <div>
             <h3 className="mb-1 text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-              待たされていたプロセス
+              {t("impact.waitTitle")}
             </h3>
             <table className="w-full text-sm tabular">
               <thead style={{ color: "var(--text-muted)" }}>
                 <tr>
-                  <th className="py-1 text-left font-normal">プロセス</th>
-                  <th className="py-1 text-right font-normal">待ちの合計</th>
-                  <th className="py-1 text-right font-normal">回数</th>
-                  <th className="py-1 text-right font-normal">99%は以内</th>
-                  <th className="py-1 text-right font-normal">最大</th>
+                  <th className="py-1 text-left font-normal">{t("common.process")}</th>
+                  <th className="py-1 text-right font-normal">{t("impact.waitTotal")}</th>
+                  <th className="py-1 text-right font-normal">{t("common.count")}</th>
+                  <th className="py-1 text-right font-normal">{t("impact.p99Within")}</th>
+                  <th className="py-1 text-right font-normal">{t("impact.max")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -121,7 +125,7 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
                     <td className="py-1.5 pr-2">
                       {procLabel(x)}
                       {x.comm === culprit?.comm && (
-                        <span className="ml-1 text-xs" style={{ color: "var(--text-muted)" }}>(原因側)</span>
+                        <span className="ml-1 text-xs" style={{ color: "var(--text-muted)" }}>{t("impact.culpritTag")}</span>
                       )}
                     </td>
                     <td className="py-1.5 text-right">{formatMs(x.waitNs)}</td>
@@ -136,7 +140,7 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
         </div>
       )}
       <p className="mt-4 text-xs" style={{ color: "var(--text-muted)" }}>
-        同じ名前のプロセスはまとめて表示。エージェントは1秒ごとに上位のプロセスだけを送るため、合計は近似値です
+        {t("impact.footer")}
       </p>
     </section>
   );

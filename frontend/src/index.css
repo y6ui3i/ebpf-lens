@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* 色はすべて役割名のトークンで参照する。ダークは同じランプから選び直した値 */
+/* All colors are referenced through role-named tokens. Dark values are re-picked from the same ramps */
 :root {
   color-scheme: light;
   --page: #f9f9f7;
@@ -16,7 +16,7 @@
   --status-good: #0ca30c;
   --status-warning: #fab219;
   --status-critical: #d03b3b;
-  /* 逐次(青)ランプ。heat-0 がゼロに近い側 */
+  /* Sequential (blue) ramp. heat-0 is the end closest to zero */
   --heat-0: #cde2fb; --heat-1: #b7d3f6; --heat-2: #9ec5f4; --heat-3: #86b6ef;
   --heat-4: #6da7ec; --heat-5: #5598e7; --heat-6: #3987e5; --heat-7: #2a78d6;
   --heat-8: #256abf; --heat-9: #1c5cab; --heat-10: #184f95; --heat-11: #104281;
@@ -36,7 +36,7 @@
     --border: rgba(255, 255, 255, 0.1);
     --series-1: #3987e5;
     --series-2: #d95926;
-    /* ダークでは少ない側を暗い面に沈め、多い側を明るくする */
+    /* In dark mode, sink the low end into the dark surface and make the high end brighter */
     --heat-0: #0d366b; --heat-1: #104281; --heat-2: #184f95; --heat-3: #1c5cab;
     --heat-4: #256abf; --heat-5: #2a78d6; --heat-6: #3987e5; --heat-7: #5598e7;
     --heat-8: #6da7ec; --heat-9: #86b6ef; --heat-10: #9ec5f4; --heat-11: #b7d3f6;
@@ -73,7 +73,7 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* uPlot の凡例を本文の文字色に合わせる */
+/* Match the uPlot legend to the body text color */
 .u-legend {
   color: var(--text-secondary);
   font-size: 12px;

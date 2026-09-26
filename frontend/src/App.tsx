@@ -7,6 +7,7 @@ import { current, type Level } from "./lib/lens";
 import { useColorSchemeKey } from "./lib/theme";
 import { timeWindow } from "./lib/timeWindow";
 import { Link, ROUTES, usePath } from "./lib/router";
+import { useI18n, type Key, type Lang } from "./lib/i18n";
 import { MenuButton, Nav } from "./components/Nav";
 import { LensSummary } from "./components/LensSummary";
 import { UseMatrix } from "./components/UseMatrix";
@@ -17,7 +18,7 @@ import { MemoryPanel } from "./components/MemoryPanel";
 import { currentMem } from "./lib/memory";
 import type { Sample } from "./types/model";
 
-const WINDOW = 300; // 直近 5 分(1 秒 1 列)
+const WINDOW = 300; // last 5 minutes (one column per second)
 const PROBES = ["runqlat", "memstall"] as const;
 const EMPTY: Sample[] = [];
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
@@ -26,6 +27,7 @@ const worst = (...xs: Level[]) => xs.reduce((a, b) => (RANK[a] >= RANK[b] ? a : 
 export default function App() {
   const path = usePath();
   const schemeKey = useColorSchemeKey();
+  const { t } = useI18n();
   const [navOpen, setNavOpen] = useState(false);
   const closeNav = useCallback(() => setNavOpen(false), []);
 
@@ -36,22 +38,23 @@ export default function App() {
   });
   const [picked, setPicked] = useState<string>();
   const host = picked ?? hosts.data?.[0]?.name;
-  // 受信は画面の外側で続ける。画面を切り替えてもライブ表示が途切れない
+  // Keep receiving outside the screens, so the live view does not break when switching screens
   const { samples: byProbe, events, dropped, status } = useLiveHost(host, PROBES, WINDOW);
   const samples = byProbe.runqlat ?? EMPTY;
   const memSamples = byProbe.memstall ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
-  // 表示範囲は CPU のサンプルに合わせ、メモリの画面も同じ 5 分を使う
+  // The visible range follows the CPU samples; the memory screen uses the same 5 minutes
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
   const cpuLevel = current(samples).level;
   const memLevel = currentMem(memSamples).level;
   const overall = worst(cpuLevel, memLevel, life.level);
   const levels = { "/": overall, "/all": overall, "/cpu": cpuLevel, "/processes": life.level, "/memory": memLevel };
-  const title = ROUTES.find((r) => r.path === path)?.label ?? "";
+  const routeKey = ROUTES.find((r) => r.path === path)?.labelKey;
+  const title = routeKey ? t(routeKey) : "";
 
   return (
     <div>
-      {/* 上部バー(OpenSearch Dashboards 風): ☰ / ホーム / パンくず、右端にホストと受信状態 */}
+      {/* Top bar (OpenSearch Dashboards style): ☰ / home / breadcrumb, with host, stream status and language on the right */}
       <header
         className="sticky top-0 z-40 flex h-12 items-center"
         style={{ background: "var(--surface-1)", borderBottom: "1px solid var(--border)" }}
@@ -60,7 +63,7 @@ export default function App() {
         <Link
           to="/"
           onNavigate={closeNav}
-          aria-label="ダッシュボードへ"
+          aria-label={t("app.homeAria")}
           className="flex h-12 w-12 items-center justify-center hover:bg-[var(--page)]"
           style={{ borderRight: "1px solid var(--border)" }}
         >
@@ -78,24 +81,25 @@ export default function App() {
             style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
             value={host ?? ""}
             onChange={(e) => setPicked(e.target.value)}
-            aria-label="ホスト"
+            aria-label={t("app.hostAria")}
           >
-            {hosts.data?.length ? null : <option value="">ホストなし</option>}
+            {hosts.data?.length ? null : <option value="">{t("app.noHosts")}</option>}
             {hosts.data?.map((h) => (
               <option key={h.name} value={h.name}>{h.name}</option>
             ))}
           </select>
           {host && <StatusBadge status={status} />}
+          <LangSwitch />
         </div>
       </header>
       <Nav path={path} open={navOpen} onClose={closeNav} levels={levels} />
 
       <main className="mx-auto max-w-6xl px-4 py-6">
-        {/* 画面名は上部バーのパンくずで見せるので、見出しは読み上げ用だけにする */}
+        {/* The screen name is shown in the top-bar breadcrumb, so this heading is for screen readers only */}
         <h1 className="sr-only">{title}</h1>
         {!host ? (
           <p style={{ color: "var(--text-secondary)" }}>
-            エージェントからのデータを待っています。<code>ebpflens-agent -server …</code> を起動してください。
+            {t("app.waitingPre")}<code>ebpflens-agent -server …</code>{t("app.waitingPost")}
           </p>
         ) : path === "/cpu" ? (
           <>
@@ -104,16 +108,16 @@ export default function App() {
           </>
         ) : path === "/all" ? (
           <AllPanels>
-            <PanelSection id="cpu" title="CPU実行待ち時間">
+            <PanelSection id="cpu" title={t("page.cpu")}>
               <CpuLatencyCard samples={samples} win={win} schemeKey={schemeKey} />
             </PanelSection>
-            <PanelSection id="impact" title="原因と影響">
+            <PanelSection id="impact" title={t("page.impact")}>
               <ImpactPanel samples={samples} />
             </PanelSection>
-            <PanelSection id="memory" title="メモリ">
+            <PanelSection id="memory" title={t("page.memory")}>
               <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} />
             </PanelSection>
-            <PanelSection id="processes" title="プロセスの起動と終了">
+            <PanelSection id="processes" title={t("page.processes")}>
               <LifecyclePanel events={events} life={life} dropped={dropped} />
             </PanelSection>
           </AllPanels>
@@ -132,8 +136,8 @@ export default function App() {
   );
 }
 
-// 領域ごとの画面にあるパネルを、1 ページに全部並べる。
-// プローブを足したら、ここにも PanelSection を足す(ダッシュボードは概要のまま縦に伸ばさない)
+// Lays out every panel from the per-area screens on a single page.
+// When adding a probe, add a PanelSection here too (the dashboard stays an overview and does not grow vertically)
 function AllPanels({ children }: { children: React.ReactNode }) {
   return (
     <>
@@ -143,26 +147,27 @@ function AllPanels({ children }: { children: React.ReactNode }) {
   );
 }
 
-const SECTIONS = [
-  { id: "cpu", title: "CPU実行待ち時間" },
-  { id: "impact", title: "原因と影響" },
-  { id: "memory", title: "メモリ" },
-  { id: "processes", title: "プロセスの起動と終了" },
+const SECTIONS: { id: string; titleKey: Key }[] = [
+  { id: "cpu", titleKey: "page.cpu" },
+  { id: "impact", titleKey: "page.impact" },
+  { id: "memory", titleKey: "page.memory" },
+  { id: "processes", titleKey: "page.processes" },
 ];
 
 function PanelSection({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   return (
-    // 上部バー(高さ 48px)の下に隠れないように scroll-margin を取る
+    // scroll-margin so the section is not hidden under the top bar (48px tall)
     <section id={id} aria-label={title} className="scroll-mt-16">
       {children}
     </section>
   );
 }
 
-// 長いページなので、先頭に各パネルへのジャンプリンクを置く
+// The page is long, so put jump links to each panel at the top
 function JumpLinks() {
+  const { t } = useI18n();
   return (
-    <nav aria-label="パネルへ移動" className="mb-4 flex flex-wrap gap-2 text-xs">
+    <nav aria-label={t("app.jumpAria")} className="mb-4 flex flex-wrap gap-2 text-xs">
       {SECTIONS.map((s) => (
         <a
           key={s.id}
@@ -174,7 +179,7 @@ function JumpLinks() {
             document.getElementById(s.id)?.scrollIntoView({ behavior: "smooth" });
           }}
         >
-          {s.title}
+          {t(s.titleKey)}
         </a>
       ))}
     </nav>
@@ -190,14 +195,49 @@ function HomeIcon() {
 }
 
 function StatusBadge({ status }: { status: StreamStatus }) {
+  const { t } = useI18n();
   const live = status === "live";
   return (
     <span className="flex shrink-0 items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
       <span aria-hidden style={{ color: live ? "var(--status-good)" : "var(--status-critical)" }}>
         {live ? "●" : "○"}
       </span>
-      {/* 狭い画面では記号だけにする(読み上げ用の文字は残す) */}
-      <span className="sr-only sm:not-sr-only">{live ? "ライブ" : status === "connecting" ? "接続中" : "再接続中"}</span>
+      {/* On narrow screens show only the symbol (keep the text for screen readers) */}
+      <span className="sr-only sm:not-sr-only">{t(live ? "status.live" : status === "connecting" ? "status.connecting" : "status.reconnecting")}</span>
     </span>
+  );
+}
+
+// EN / Japanese toggle. The choice is saved by I18nProvider (localStorage, if available)
+function LangSwitch() {
+  const { lang, setLang, t } = useI18n();
+  const options: { value: Lang; labelKey: Key }[] = [
+    { value: "en", labelKey: "lang.en" },
+    { value: "ja", labelKey: "lang.ja" },
+  ];
+  return (
+    <div role="group" aria-label={t("lang.aria")} className="flex shrink-0 text-xs">
+      {options.map((o, i) => {
+        const active = lang === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            lang={o.value}
+            aria-pressed={active}
+            onClick={() => setLang(o.value)}
+            className={`px-2 py-1 ${i === 0 ? "rounded-l-md" : "-ml-px rounded-r-md"}`}
+            style={{
+              border: "1px solid var(--border)",
+              background: active ? "var(--page)" : "transparent",
+              color: active ? "var(--text-primary)" : "var(--text-secondary)",
+              fontWeight: active ? 600 : 400,
+            }}
+          >
+            {t(o.labelKey)}
+          </button>
+        );
+      })}
+    </div>
   );
 }

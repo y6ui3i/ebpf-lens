@@ -3,14 +3,15 @@ import type { Sample } from "../types/model";
 import { formatRange } from "../lib/hist";
 import { cssVar } from "../lib/theme";
 import type { TimeWindow } from "../lib/timeWindow";
+import { formatHM, formatTime, useI18n } from "../lib/i18n";
 
-// 表示するスロットは 0..TOP。TOP 行は 2^TOP µs(約 1 秒)以上をまとめる
+// Slots shown are 0..TOP. The TOP row groups everything at or above 2^TOP µs (about 1 second)
 const TOP = 20;
 const ROWS = TOP + 1;
 const HEAT_STEPS = 13;
 const MARGIN = { left: 56, right: 8, top: 8, bottom: 22 };
 export const CHART_HEIGHT = 260;
-// y 軸に出すスロット(1µs, 8µs, 128µs, 1ms, 8ms, 131ms, 1s)
+// Slots labelled on the y axis (1µs, 8µs, 128µs, 1ms, 8ms, 131ms, 1s)
 const Y_TICKS: [number, string][] = [
   [0, "1µs"], [3, "8µs"], [7, "128µs"], [10, "1ms"], [13, "8ms"], [17, "131ms"], [20, "≥1s"],
 ];
@@ -21,20 +22,19 @@ type Props = {
   samples: Sample[];
   win: TimeWindow;
   schemeKey: string;
-  hoverMs: number | null; // もう片方のグラフと共有するカーソル時刻
+  hoverMs: number | null; // cursor time shared with the other chart
   onHover: (ms: number | null) => void;
   ariaLabel?: string;
-  yCaption?: string; // 凡例の「縦軸」の説明
+  yCaption?: string; // description for the "Y axis" entry in the legend
 };
 
 const rowCount = (s: Sample, row: number) =>
   row < TOP ? (s.slots[row] ?? 0) : s.slots.slice(TOP).reduce((a, b) => a + b, 0);
 
 export function Heatmap({
-  samples, win, schemeKey, hoverMs, onHover,
-  ariaLabel = "CPU実行待ち時間のヒートマップ。横軸が時刻、縦軸が待ち時間、色が回数",
-  yCaption = "CPUを待った時間(上ほど長い)",
+  samples, win, schemeKey, hoverMs, onHover, ariaLabel, yCaption,
 }: Props) {
+  const { lang, t } = useI18n();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
@@ -56,12 +56,12 @@ export function Heatmap({
   const colOf = (ms: number) => Math.round((ms - win.startMs) / 1000);
   const xOfMs = (ms: number) => MARGIN.left + ((ms - win.startMs) / 1000 + 0.5) * colW;
 
-  // 列番号 -> サンプル。取りこぼした秒は空き列になる
+  // column index -> sample. Missed seconds become empty columns
   const byCol = useMemo(() => {
     const m = new Map<number, Sample>();
     for (const s of samples) m.set(colOf(Date.parse(s.time)), s);
     return m;
-  }, [samples, win.startMs]); // colOf は win.startMs にだけ依存する
+  }, [samples, win.startMs]); // colOf depends only on win.startMs
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -83,14 +83,14 @@ export function Heatmap({
       const x = MARGIN.left + col * colW;
       for (let r = 0; r < ROWS; r++) {
         const c = rowCount(s, r);
-        if (c === 0) continue; // ゼロは面の色のまま
+        if (c === 0) continue; // zero keeps the surface color
         const t = Math.log1p(c) / logMax;
         ctx.fillStyle = ramp[Math.min(HEAT_STEPS - 1, Math.ceil(t * HEAT_STEPS) - 1)];
         ctx.fillRect(x, MARGIN.top + (TOP - r) * rowH, Math.ceil(colW), Math.ceil(rowH));
       }
     }
 
-    // 軸
+    // Axes
     ctx.font = "11px system-ui, sans-serif";
     ctx.fillStyle = cssVar("--text-muted");
     ctx.textAlign = "right";
@@ -104,14 +104,14 @@ export function Heatmap({
     ctx.lineTo(MARGIN.left + plotW, MARGIN.top + plotH + 0.5);
     ctx.stroke();
 
-    // 1 分ごとの目盛り
+    // Tick every minute
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     for (let m = Math.ceil(win.startMs / 60_000) * 60_000; m <= win.endMs; m += 60_000) {
-      const label = new Date(m).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+      const label = formatHM(lang, m);
       ctx.fillText(label, xOfMs(m), MARGIN.top + plotH + 6);
     }
-  }, [byCol, width, columns, schemeKey]);
+  }, [byCol, width, columns, schemeKey, lang]);
 
   const onMove = (e: React.MouseEvent) => {
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -142,7 +142,7 @@ export function Heatmap({
           onHover(null);
         }}
         role="img"
-        aria-label={ariaLabel}
+        aria-label={ariaLabel ?? t("heat.aria")}
       />
       {cursorX != null && (
         <div
@@ -161,35 +161,36 @@ export function Heatmap({
             border: "1px solid var(--border)",
           }}
         >
-          <div style={{ color: "var(--text-muted)" }}>{new Date(hover.sample.time).toLocaleTimeString("ja-JP")}</div>
+          <div style={{ color: "var(--text-muted)" }}>{formatTime(lang, hover.sample.time)}</div>
           <div style={{ color: "var(--text-secondary)" }}>
-            {hover.row === TOP ? "≥ 1 s" : formatRange(hover.row)}
+            {hover.row === TOP ? "≥ 1 s" : formatRange(hover.row, lang)}
           </div>
           <div style={{ color: "var(--text-primary)" }} className="font-semibold">
-            {hover.count.toLocaleString()} 回
+            {t("heat.count", { n: hover.count.toLocaleString() })}
           </div>
         </div>
       )}
-      <HeatLegend schemeKey={schemeKey} yCaption={yCaption} />
+      <HeatLegend schemeKey={schemeKey} yCaption={yCaption ?? t("heat.yCaption")} />
     </div>
   );
 }
 
-// 軸と色の意味をそのまま書く。runqlat を知らない人が読めることを優先する
+// Spell out what the axes and colors mean. Readability for people who do not know runqlat comes first
 function HeatLegend({ schemeKey, yCaption }: { schemeKey: string; yCaption: string }) {
+  const { t } = useI18n();
   const stops = Array.from({ length: HEAT_STEPS }, (_, i) => `var(--heat-${i})`).join(", ");
-  const more = schemeKey === "dark" ? "明るいほど多い" : "濃いほど多い";
+  const more = t(schemeKey === "dark" ? "heat.brighter" : "heat.darker");
   return (
     <dl
       className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs"
       style={{ color: "var(--text-secondary)", paddingLeft: MARGIN.left }}
     >
-      <div><dt className="inline" style={{ color: "var(--text-muted)" }}>横軸 </dt><dd className="inline">いつ発生したか</dd></div>
-      <div><dt className="inline" style={{ color: "var(--text-muted)" }}>縦軸 </dt><dd className="inline">{yCaption}</dd></div>
+      <div><dt className="inline" style={{ color: "var(--text-muted)" }}>{t("heat.xAxis")} </dt><dd className="inline">{t("heat.xDesc")}</dd></div>
+      <div><dt className="inline" style={{ color: "var(--text-muted)" }}>{t("heat.yAxis")} </dt><dd className="inline">{yCaption}</dd></div>
       <div className="flex items-center gap-2">
-        <dt style={{ color: "var(--text-muted)" }}>色</dt>
+        <dt style={{ color: "var(--text-muted)" }}>{t("heat.color")}</dt>
         <dd className="flex items-center gap-2">
-          <span>その待ち時間が起きた回数({more})</span>
+          <span>{t("heat.colorDesc", { more })}</span>
           <span aria-hidden className="h-2 w-12 shrink-0 rounded-sm" style={{ background: `linear-gradient(to right, ${stops})` }} />
         </dd>
       </div>

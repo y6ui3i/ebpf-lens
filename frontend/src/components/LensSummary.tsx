@@ -1,33 +1,34 @@
 import type { Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
 import {
-  LEVEL_COLOR, LEVEL_ICON, LEVEL_LABEL, baseline, current, episodes, type Episode, type Level,
+  LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, baseline, current, episodes, type Episode, type Level,
 } from "../lib/lens";
 import { explain, formatMs, impact, samplesBetween } from "../lib/impact";
 import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
 import { currentMem, memorySentence } from "../lib/memory";
+import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params } from "../lib/i18n";
 
-const CPU_HEADLINE: Record<Level, string> = {
-  ok: "CPU待ち時間は低い状態です",
-  caution: "CPU待ちがやや増えています",
-  warning: "CPUの取り合いが起きています",
+const CPU_HEADLINE: Record<Level, Key> = {
+  ok: "summary.cpu.ok",
+  caution: "summary.cpu.caution",
+  warning: "summary.cpu.warning",
 };
 
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
 
-const MEM_HEADLINE: Record<Level, string> = {
-  ok: "",
-  caution: "メモリ不足でプロセスが止まり始めています",
-  warning: "メモリ不足でプロセスが大きく止まっています",
+const MEM_HEADLINE: Record<Level, Key> = {
+  ok: "summary.mem.ok",
+  caution: "summary.mem.caution",
+  warning: "summary.mem.warning",
 };
 
-function lifecycleHeadline(l: Lifecycle): string {
-  if (l.ooms.length > 0) return "メモリ不足でプロセスが強制終了されました";
-  if (l.crashLoops.length > 0) return "クラッシュを繰り返しているプロセスがあります";
-  return "異常終了したプロセスがあります";
+function lifecycleHeadline(l: Lifecycle): Key {
+  if (l.ooms.length > 0) return "summary.life.oom";
+  if (l.crashLoops.length > 0) return "summary.life.loop";
+  return "summary.life.crash";
 }
 
-// CPU 使用率(eBPF で計測した全プロセスの CPU 時間の合計から出す)
+// CPU utilization (from the total CPU time of all processes measured with eBPF)
 function cpuUtil(samples: Sample[]): number | null {
   const xs = samples.slice(-5).filter((s) => s.cpus > 0 && s.intervalMs > 0);
   if (xs.length === 0) return null;
@@ -36,39 +37,37 @@ function cpuUtil(samples: Sample[]): number | null {
   return Math.min(1, busy / cap);
 }
 
-const hm = (d: Date) => d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
-
-// 画面の一番上に出す「今どうなっているか」の要約
+// "What is happening right now" summary shown at the top of the screen
 export function LensSummary({ samples, memSamples, life }: { samples: Sample[]; memSamples: Sample[]; life: Lifecycle }) {
+  const { lang, t } = useI18n();
   const now = current(samples);
   const util = cpuUtil(samples);
   const mem = currentMem(memSamples);
-  // 全体の判定は一番悪い領域に合わせ、見出しもその領域の言葉にする(同点なら CPU → メモリ → プロセスの順)
-  const areas: { level: Level; headline: string }[] = [
+  // The overall status follows the worst area, and the headline uses that area's wording (ties: CPU -> memory -> processes)
+  const areas: { level: Level; headline: Key }[] = [
     { level: now.level, headline: CPU_HEADLINE[now.level] },
     { level: mem.level, headline: MEM_HEADLINE[mem.level] },
     { level: life.level, headline: lifecycleHeadline(life) },
   ];
   const worstArea = areas.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a));
   const overall = worstArea.level;
-  const headline = worstArea.headline;
+  const headline = t(worstArea.headline);
   const base = baseline(samples);
   const eps = episodes(samples);
   const last = eps[0];
 
   let detail = "";
   if (now.p99 != null) {
-    detail =
-      now.level === "ok"
-        ? `99%のタスクが ${formatUs(now.p99)} 以内にCPUを獲得しています`
-        : `99%のタスクがCPUを得るまで最大 ${formatUs(now.p99)} 待たされています`;
+    detail = t(now.level === "ok" ? "summary.p99Ok" : "summary.p99Bad", { p99: formatUs(now.p99) });
     if (base != null) {
       const ratio = now.p99 / base;
-      detail += ratio >= 3 ? `(平常時 ${formatUs(base)} の約${Math.round(ratio)}倍)。` : `(平常時 ${formatUs(base)})。`;
+      detail += ratio >= 3
+        ? t("summary.baseRatio", { base: formatUs(base), ratio: Math.round(ratio) })
+        : t("summary.base", { base: formatUs(base) });
     } else {
-      detail += "。";
+      detail += t("summary.period");
     }
-    if (util != null) detail += ` CPU使用率は ${Math.round(util * 100)}% です。`;
+    if (util != null) detail += t("summary.util", { pct: Math.round(util * 100) });
   }
 
   return (
@@ -80,35 +79,35 @@ export function LensSummary({ samples, memSamples, life }: { samples: Sample[]; 
       <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Lens Summary</div>
       <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
         <span aria-hidden style={{ color: LEVEL_COLOR[overall] }}>{LEVEL_ICON[overall]}</span>
-        <span>{LEVEL_LABEL[overall]}</span>
+        <span>{t(LEVEL_KEY[overall])}</span>
         <span style={{ color: "var(--text-secondary)" }}>·</span>
         <span>{headline}</span>
       </div>
 
       <dl className="mt-3 space-y-2 text-sm">
-        <Finding area="CPU" level={now.level}>
+        <Finding area={t("resource.cpu")} level={now.level}>
           <p>{detail}</p>
-          {last && <p>{episodeSentence(last)}</p>}
+          {last && <p>{episodeSentence(last, lang)}</p>}
           {last && <CauseSentence samples={samples} episode={last} />}
         </Finding>
-        <Finding area="メモリ" level={mem.level}>
-          <p>{memorySentence(memSamples)}</p>
+        <Finding area={t("resource.memory")} level={mem.level}>
+          <p>{memorySentence(memSamples, lang)}</p>
         </Finding>
-        <Finding area="プロセス" level={life.level}>
-          <p>{lifecycleSentence(life)}</p>
+        <Finding area={t("resource.processes")} level={life.level}>
+          <p>{lifecycleSentence(life, lang)}</p>
         </Finding>
       </dl>
 
       {eps.length > 0 && (
         <div className="mt-4">
-          <h3 className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>CPU の直近の出来事(表示範囲内)</h3>
+          <h3 className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>{t("summary.recentEpisodes")}</h3>
           <table className="w-full text-sm tabular">
             <thead style={{ color: "var(--text-muted)" }}>
               <tr>
-                <th className="py-1 text-left font-normal">レベル</th>
-                <th className="py-1 text-left font-normal">時間帯</th>
-                <th className="py-1 text-right font-normal">継続</th>
-                <th className="py-1 text-right font-normal">最大待ち(p99)</th>
+                <th className="py-1 text-left font-normal">{t("summary.col.level")}</th>
+                <th className="py-1 text-left font-normal">{t("summary.col.period")}</th>
+                <th className="py-1 text-right font-normal">{t("summary.col.duration")}</th>
+                <th className="py-1 text-right font-normal">{t("summary.col.peak")}</th>
               </tr>
             </thead>
             <tbody>
@@ -116,12 +115,12 @@ export function LensSummary({ samples, memSamples, life }: { samples: Sample[]; 
                 <tr key={e.start.toISOString()} style={{ borderTop: "1px solid var(--grid)" }}>
                   <td className="py-1">
                     <span aria-hidden style={{ color: LEVEL_COLOR[e.level] }}>{LEVEL_ICON[e.level]}</span>{" "}
-                    {LEVEL_LABEL[e.level]}
+                    {t(LEVEL_KEY[e.level])}
                   </td>
                   <td className="py-1" style={{ color: "var(--text-secondary)" }}>
-                    {e.start.toLocaleTimeString("ja-JP")} 〜 {e.ongoing ? "継続中" : e.end.toLocaleTimeString("ja-JP")}
+                    {formatTime(lang, e.start)}{t("range.sep")}{e.ongoing ? t("common.ongoing") : formatTime(lang, e.end)}
                   </td>
-                  <td className="py-1 text-right">{e.seconds} 秒</td>
+                  <td className="py-1 text-right">{t("common.seconds", { n: e.seconds })}</td>
                   <td className="py-1 text-right">{formatUs(e.peakUs)}</td>
                 </tr>
               ))}
@@ -133,45 +132,51 @@ export function LensSummary({ samples, memSamples, life }: { samples: Sample[]; 
   );
 }
 
-// 領域ごとの所見。アイコンとラベルで判定を示し、色だけに頼らない
+// Finding for one area. The status is shown with an icon and a label, not by color alone
 function Finding({ area, level, children }: { area: string; level: Level; children: React.ReactNode }) {
+  const { t } = useI18n();
   return (
     <div className="grid gap-0.5 sm:grid-cols-[5.5rem_1fr] sm:gap-2">
       <dt className="flex items-start gap-1.5 font-semibold">
         <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]}</span>
         <span>{area}</span>
-        <span className="sr-only">{LEVEL_LABEL[level]}</span>
+        <span className="sr-only">{t(LEVEL_KEY[level])}</span>
       </dt>
       <dd className="space-y-0.5" style={{ color: "var(--text-secondary)" }}>{children}</dd>
     </div>
   );
 }
 
-// 出来事の間に「誰が CPU を使い、ほかに誰が待たされたか」を一文にする
+// One sentence on "who used the CPU and who else was kept waiting" during the episode
 function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Episode }) {
+  const { t } = useI18n();
   const { culprit, victims } = explain(impact(samplesBetween(samples, episode.start, episode.end)));
   if (!culprit && victims.length === 0) return null;
-  const tense = episode.ongoing ? "います" : "いました";
   const parts: string[] = [];
   if (culprit) {
-    const who = culprit.procs > 1 ? `${culprit.comm}(${culprit.procs}プロセス)` : culprit.comm;
-    parts.push(`原因: ${who} がCPU全体の${Math.round(culprit.cpuShare * 100)}%を使って${tense}。`);
+    const who = culprit.procs > 1 ? t("cause.who", { comm: culprit.comm, n: culprit.procs }) : culprit.comm;
+    const pct = Math.round(culprit.cpuShare * 100);
+    parts.push(t(episode.ongoing ? "cause.culpritOngoing" : "cause.culpritPast", { who, pct }));
   } else {
-    parts.push("特定のプロセスがCPUを占有していたわけではありません。");
+    parts.push(t("cause.noCulprit"));
   }
   if (victims.length > 0) {
-    const v = victims
-      .map((x) => `${x.comm}(合計 ${formatMs(x.waitNs)}、99%は ${formatUs(x.p99)} 以内)`)
-      .join("、");
-    parts.push(`${culprit ? "そのほかで" : ""}待たされたのは ${v} です。`);
+    const list = victims
+      .map((x) => t("cause.victim", { comm: x.comm, total: formatMs(x.waitNs), p99: formatUs(x.p99) }))
+      .join(t("list.sep"));
+    parts.push(t(culprit ? "cause.victimsOthers" : "cause.victims", { list }));
   }
   return <p>{parts.join(" ")}</p>;
 }
 
-function episodeSentence(e: Episode): string {
+function episodeSentence(e: Episode, lang: Lang): string {
+  const tr = (k: Key, p?: Params) => translate(lang, k, p);
+  const hm = (d: Date) => formatHM(lang, d);
   if (e.ongoing) {
-    return `${hm(e.start)} から ${e.seconds} 秒間、高いCPU待ちが続いています(最大 ${formatUs(e.peakUs)})。`;
+    return tr("episode.ongoing", { start: hm(e.start), seconds: e.seconds, peak: formatUs(e.peakUs) });
   }
-  const span = hm(e.start) === hm(e.end) ? `${hm(e.start)}頃` : `${hm(e.start)}〜${hm(e.end)}`;
-  return `${span}に高いCPU待ちが観測されました(最大 ${formatUs(e.peakUs)}、${e.seconds} 秒間)。`;
+  const span = hm(e.start) === hm(e.end)
+    ? tr("episode.spanAround", { t: hm(e.start) })
+    : tr("episode.spanRange", { a: hm(e.start), b: hm(e.end) });
+  return tr("episode.past", { span, peak: formatUs(e.peakUs), seconds: e.seconds });
 }

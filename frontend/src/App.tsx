@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { HostInfo } from "./types/model";
 import { useLiveSamples, type StreamStatus } from "./lib/useLiveSamples";
@@ -9,6 +9,7 @@ import { PercentileChart } from "./components/PercentileChart";
 import { HistogramTable } from "./components/HistogramTable";
 import { LensSummary } from "./components/LensSummary";
 import { ImpactPanel } from "./components/ImpactPanel";
+import { timeWindow } from "./lib/timeWindow";
 
 const WINDOW = 300; // 直近 5 分(1 秒 1 列)
 
@@ -24,6 +25,8 @@ export default function App() {
   const { samples, status } = useLiveSamples(host, "runqlat", WINDOW);
   const latest = samples.at(-1);
   const [showTable, setShowTable] = useState(false);
+  const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
+  const [hoverMs, setHoverMs] = useState<number | null>(null);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6">
@@ -75,18 +78,25 @@ export default function App() {
             </div>
           </div>
 
-          <h3 className="mb-2 text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-            待ち時間の分布(直近5分・1列 = 1秒)
-          </h3>
-          <Heatmap samples={samples} columns={WINDOW} schemeKey={schemeKey} />
-
-          <h3 className="mt-8 mb-1 text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
-            待ち時間の推移としきい値
-          </h3>
-          <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>
-            p99 の線が帯に入っている間は、CPUの取り合いが起きています(しきい値は仮)
-          </p>
-          <PercentileChart samples={samples} schemeKey={schemeKey} />
+          {/* 広い画面では横に並べ、狭い画面では縦に積む。横軸は同じ 5 分に揃え、カーソルを連動させる */}
+          <div className="grid gap-8 lg:grid-cols-2">
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
+                待ち時間の分布
+              </h3>
+              <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>直近5分・1列 = 1秒</p>
+              <Heatmap samples={samples} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>
+                待ち時間の推移としきい値
+              </h3>
+              <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>
+                p99 の線が帯に入っている間は、CPUの取り合いが起きています(しきい値は仮)
+              </p>
+              <PercentileChart samples={samples} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
+            </div>
+          </div>
 
           <button
             className="mt-4 text-xs underline"

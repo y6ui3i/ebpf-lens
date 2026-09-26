@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
-// canvas や uPlot は CSS 変数を直接使えないので、描画時に値を読む
+// canvas and uPlot cannot use CSS variables directly, so read the values at draw time
 export function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-// OS のライト/ダーク切り替えで再描画するためのキー
+// Key used to redraw when the OS switches between light and dark
 export function useColorSchemeKey(): string {
   const mq = window.matchMedia("(prefers-color-scheme: dark)");
   const [dark, setDark] = useState(mq.matches);

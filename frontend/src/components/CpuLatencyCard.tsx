@@ -5,9 +5,11 @@ import type { TimeWindow } from "../lib/timeWindow";
 import { Heatmap } from "./Heatmap";
 import { PercentileChart } from "./PercentileChart";
 import { HistogramTable } from "./HistogramTable";
+import { useI18n } from "../lib/i18n";
 
-// CPU実行待ち時間のヒートマップと推移グラフ
+// Heatmap and trend chart of CPU run queue latency
 export function CpuLatencyCard({ samples, win, schemeKey }: { samples: Sample[]; win: TimeWindow; schemeKey: string }) {
+  const { t } = useI18n();
   const latest = samples.at(-1);
   const [showTable, setShowTable] = useState(false);
   const [hoverMs, setHoverMs] = useState<number | null>(null);
@@ -16,41 +18,41 @@ export function CpuLatencyCard({ samples, win, schemeKey }: { samples: Sample[];
     <section className="rounded-xl p-5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
       <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold">CPU実行待ち時間</h2>
+          <h2 className="text-lg font-semibold">{t("page.cpu")}</h2>
           <div className="text-xs" style={{ color: "var(--text-muted)" }}>Run Queue Latency · runqlat</div>
           <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
-            実行可能になったプロセスが、CPUに割り当てられるまでの待ち時間
+            {t("cpu.desc")}
           </p>
         </div>
         <div className="text-right text-sm">
-          <div className="text-xs" style={{ color: "var(--text-muted)" }}>直近1秒</div>
+          <div className="text-xs" style={{ color: "var(--text-muted)" }}>{t("cpu.lastSecond")}</div>
           <div>
-            99%のタスクが <span className="text-lg font-semibold">{formatUs(latest && percentile(latest.slots, 0.99))}</span> 以内にCPUを獲得
+            {t("cpu.p99Pre")}<span className="text-lg font-semibold">{formatUs(latest && percentile(latest.slots, 0.99))}</span>{t("cpu.p99Post")}
           </div>
           <div className="text-xs tabular" style={{ color: "var(--text-secondary)" }}>
-            半数は {formatUs(latest && percentile(latest.slots, 0.5))} 以内 · 計 {latest ? total(latest.slots).toLocaleString() : "–"} 回
+            {t("cpu.p50", { p50: formatUs(latest && percentile(latest.slots, 0.5)), n: latest ? total(latest.slots).toLocaleString() : "–" })}
           </div>
         </div>
       </div>
 
-      {/* 広い画面では横に並べ、狭い画面では縦に積む。横軸は同じ 5 分に揃え、カーソルを連動させる */}
+      {/* Side by side on wide screens, stacked on narrow ones. Both x axes cover the same 5 minutes and share the cursor */}
       <div className="grid gap-8 lg:grid-cols-2">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>待ち時間の分布</h3>
-          <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>直近5分・1列 = 1秒</p>
+          <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("cpu.distTitle")}</h3>
+          <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>{t("cpu.distNote")}</p>
           <Heatmap samples={samples} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
         </div>
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>待ち時間の推移としきい値</h3>
+          <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("cpu.trendTitle")}</h3>
           <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>
-            p99 の線が帯に入っている間は、CPUの取り合いが起きています(しきい値は仮)
+            {t("cpu.trendNote")}
           </p>
           <PercentileChart samples={samples} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
         </div>
       </div>
 
       <button className="mt-4 text-xs underline" style={{ color: "var(--text-secondary)" }} onClick={() => setShowTable((v) => !v)}>
-        {showTable ? "表を閉じる" : "直近のヒストグラムを表で見る"}
+        {t(showTable ? "cpu.hideTable" : "cpu.showTable")}
       </button>
       {showTable && <div className="mt-3 max-w-md"><HistogramTable sample={latest} /></div>}
     </section>

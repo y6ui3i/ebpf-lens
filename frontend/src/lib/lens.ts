@@ -1,17 +1,18 @@
-// runqlat の数値を「監視者にとっての意味」に変換する。
-// 判定はまだフロント側の仮実装。サーバー側のトリガーに移すまでの足場。
+// Turns runqlat numbers into what they mean for an operator.
+// The judgement is still a provisional frontend implementation, scaffolding until it moves to server-side triggers.
 import type { Sample } from "../types/model";
+import type { Key } from "./i18n";
 import { percentile } from "./hist";
 
-// しきい値(仮)。hal での実測: 平常時の 1 秒 p99 は約 30µs、GPU 推論(Demucs)中でも最大 476µs、
-// stress-ng で 4 倍過負荷にすると 16ms。平常と過負荷のどちらからも十分離れた値にしている
+// Thresholds (provisional). Measured on hal: the 1-second p99 is about 30µs normally, at most 476µs even during GPU inference (Demucs),
+// and 16ms under 4x overload with stress-ng. Chosen to be well away from both normal and overloaded values
 export const CAUTION_US = 1_000;
 export const WARNING_US = 10_000;
 
-// 一瞬の山で判定を揺らさないための設定
-const CURRENT_WINDOW = 5; // 現在の判定に使う秒数(p99 の中央値を取る)
-const MIN_EPISODE_SECONDS = 3; // これより短い超過はイベントにしない
-const MAX_GAP_SECONDS = 2; // この秒数以内の途切れは同じイベントとみなす
+// Settings that keep a momentary spike from flipping the status
+const CURRENT_WINDOW = 5; // seconds used for the current status (median of p99)
+const MIN_EPISODE_SECONDS = 3; // excursions shorter than this are not reported as episodes
+const MAX_GAP_SECONDS = 2; // gaps up to this many seconds count as the same episode
 
 export type Level = "ok" | "caution" | "warning";
 
@@ -29,13 +30,13 @@ const median = (xs: number[]) => {
 const p99s = (samples: Sample[]) =>
   samples.map((s) => percentile(s.slots, 0.99)).filter((v): v is number => v != null);
 
-// 現在の状態。直近数秒の p99 の中央値で判定する
+// Current status, judged from the median p99 of the last few seconds
 export function current(samples: Sample[]) {
   const p99 = median(p99s(samples.slice(-CURRENT_WINDOW)));
   return { p99, level: levelOf(p99) };
 }
 
-// 平常時の目安。表示範囲のうち、しきい値未満だった秒の p99 の中央値
+// Rough normal level: median p99 of the seconds in view that were below the threshold
 export function baseline(samples: Sample[]) {
   return median(p99s(samples).filter((v) => v < CAUTION_US));
 }
@@ -49,7 +50,7 @@ export type Episode = {
   ongoing: boolean;
 };
 
-// p99 が注意しきい値を超えた区間を拾う。新しい順に返す
+// Finds ranges where p99 exceeded the caution threshold. Returned newest first
 export function episodes(samples: Sample[]): Episode[] {
   const out: Episode[] = [];
   let open: { first: number; last: number; peak: number; warnSecs: number } | null = null;
@@ -63,7 +64,7 @@ export function episodes(samples: Sample[]): Episode[] {
         end: new Date(samples[open.last].time),
         seconds,
         peakUs: open.peak,
-        // 警告しきい値を 3 秒以上超えたら警告、それ以外は注意
+        // warning if above the warning threshold for 3 s or more, otherwise caution
         level: open.warnSecs >= MIN_EPISODE_SECONDS ? "warning" : "caution",
         ongoing: open.last >= samples.length - 1 - MAX_GAP_SECONDS,
       });
@@ -85,7 +86,8 @@ export function episodes(samples: Sample[]): Episode[] {
   return out.reverse();
 }
 
-export const LEVEL_LABEL: Record<Level, string> = { ok: "正常", caution: "注意", warning: "警告" };
+// Translation keys for level labels (look them up with t())
+export const LEVEL_KEY: Record<Level, Key> = { ok: "level.ok", caution: "level.caution", warning: "level.warning" };
 export const LEVEL_ICON: Record<Level, string> = { ok: "●", caution: "▲", warning: "◆" };
 export const LEVEL_COLOR: Record<Level, string> = {
   ok: "var(--status-good)",

@@ -1,6 +1,6 @@
 import type { Sample } from "../types/model";
 
-// ヒートマップと推移グラフで共有する表示範囲。横に並べても同じ時刻が同じ割合の位置に来るようにする
+// Time range shared by the heatmap and the trend chart, so the same time lands at the same relative position when they sit side by side
 export type TimeWindow = { startMs: number; endMs: number };
 
 export function timeWindow(samples: Sample[], seconds: number): TimeWindow {

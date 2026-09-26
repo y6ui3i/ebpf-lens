@@ -1,12 +1,13 @@
-// メモリ回収による停止(memstall)を「監視者にとっての意味」に変換する。
+// Turns memory reclaim stalls (memstall) into what they mean for an operator.
 import type { Sample } from "../types/model";
 import type { Level } from "./lens";
+import { translate, type Key, type Lang, type Params } from "./i18n";
 
-// しきい値(仮)。1 秒あたりに全プロセスが回収で止まった時間の合計。
-// hal の平常時は 0。cgroup 上限 64MB の中で 3GB のファイルを読ませても約 8 ms/秒だった
+// Thresholds (provisional): total time all processes spent stalled on reclaim per second.
+// On hal it is 0 normally; reading a 3GB file inside a 64MB cgroup limit gave about 8 ms/s
 export const CAUTION_MS_PER_S = 10;
 export const WARNING_MS_PER_S = 100;
-const CURRENT_WINDOW = 5; // 直近 5 秒の中央値で判定する(一瞬の山で揺らさない)
+const CURRENT_WINDOW = 5; // judge by the median of the last 5 s (so a momentary spike does not flip it)
 
 export const stallMsPerSec = (s: Sample) =>
   s.mem && s.intervalMs ? s.mem.stallNs / 1e6 / (s.intervalMs / 1000) : null;
@@ -37,7 +38,7 @@ export type StallProc = {
   memcgCount: number;
 };
 
-// 表示範囲の中で回収で止まったプロセス(名前ごと、合計の多い順)
+// Processes that stalled on reclaim in the visible range (per name, largest total first)
 export function stalledProcs(samples: Sample[]): StallProc[] {
   const acc = new Map<string, StallProc>();
   for (const s of samples) {
@@ -62,21 +63,32 @@ export function stalledProcs(samples: Sample[]): StallProc[] {
 export const formatBytes = (b: number) =>
   b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : `${Math.round(b / (1 << 20))} MB`;
 
-export const formatMsPerSec = (v: number | null) =>
-  v == null ? "–" : v < 0.01 ? "0 ms/秒" : `${v < 10 ? v.toFixed(1) : Math.round(v)} ms/秒`;
+export const formatMsPerSec = (v: number | null, lang: Lang) => {
+  const unit = translate(lang, "unit.msPerSec");
+  return v == null ? "–" : v < 0.01 ? `0 ${unit}` : `${v < 10 ? v.toFixed(1) : Math.round(v)} ${unit}`;
+};
 
-// 要約に出す一文
-export function memorySentence(samples: Sample[]): string {
+// One-line sentence for the summary. Templates live in i18n.tsx because word order differs per language
+export function memorySentence(samples: Sample[], lang: Lang): string {
+  const tr = (k: Key, p?: Params) => translate(lang, k, p);
   const now = currentMem(samples);
   const usage =
-    now.used != null && now.mem ? `使用率 ${Math.round(now.used * 100)}%、空き ${formatBytes(now.mem.availableBytes)}` : "";
+    now.used != null && now.mem
+      ? tr("mem.usage", { pct: Math.round(now.used * 100), free: formatBytes(now.mem.availableBytes) })
+      : "";
   const top = stalledProcs(samples)[0];
   if (now.level !== "ok") {
-    return `メモリの回収で、プロセスが合計 ${formatMsPerSec(now.stall)} 止まっています${top ? `(一番は ${top.comm})` : ""}。${usage}。`;
+    return tr("mem.stalling", {
+      stall: formatMsPerSec(now.stall, lang),
+      top: top ? tr("mem.top", { comm: top.comm }) : "",
+      usage,
+    });
   }
   if (top) {
-    const memcg = top.memcgCount === top.count ? "cgroup の上限による回収で" : "メモリの回収で";
-    return `今は止まっていません(${usage})。直近5分では ${top.comm} が${memcg} ${top.count.toLocaleString()} 回、合計 ${(top.totalNs / 1e6).toFixed(1)} ms 止まりました。`;
+    const via = top.memcgCount === top.count ? tr("mem.viaMemcg") : tr("mem.viaReclaim");
+    return tr("mem.recent", {
+      usage, comm: top.comm, via, count: top.count.toLocaleString(), ms: (top.totalNs / 1e6).toFixed(1),
+    });
   }
-  return `メモリの回収で止まったプロセスはありません(${usage})。`;
+  return tr("mem.none", { usage });
 }

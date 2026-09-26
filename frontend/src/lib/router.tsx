@@ -1,15 +1,16 @@
-// 画面数が少ないので、依存を増やさず History API だけで切り替える。
-// サーバーは存在しないパスを index.html に回すので、/cpu などを直接開いても動く。
+// There are only a few screens, so switch them with the History API alone instead of adding a dependency.
+// The server falls back to index.html for unknown paths, so opening /cpu etc. directly works.
 import { useSyncExternalStore, type AnchorHTMLAttributes } from "react";
+import type { Key } from "./i18n";
 
-export type Route = { path: string; label: string };
+export type Route = { path: string; labelKey: Key };
 
 export const ROUTES: Route[] = [
-  { path: "/", label: "ダッシュボード" },
-  { path: "/all", label: "すべてのパネル" },
-  { path: "/cpu", label: "CPU実行待ち時間" },
-  { path: "/processes", label: "プロセスの起動と終了" },
-  { path: "/memory", label: "メモリ" },
+  { path: "/", labelKey: "page.dashboard" },
+  { path: "/all", labelKey: "page.all" },
+  { path: "/cpu", labelKey: "page.cpu" },
+  { path: "/processes", labelKey: "page.processes" },
+  { path: "/memory", labelKey: "page.memory" },
 ];
 
 const subscribe = (cb: () => void) => {
@@ -31,7 +32,7 @@ export function navigate(to: string) {
 
 type LinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; onNavigate?: () => void };
 
-// 通常のクリックだけ横取りする(Cmd/Ctrl クリックは新しいタブで開けるように素通し)
+// Intercept plain clicks only (let Cmd/Ctrl-click through so it can open a new tab)
 export function Link({ to, onNavigate, onClick, ...rest }: LinkProps) {
   return (
     <a

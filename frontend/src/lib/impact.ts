@@ -1,20 +1,20 @@
-// プロセス別の集計から「原因(CPU を使っていた)」と「影響(待たされた)」を組み立てる。
-// エージェントは 1 秒ごとに上位のプロセスしか送らないので、長い区間の合計は近似値。
+// Builds "cause" (who was using the CPU) and "impact" (who was kept waiting) from per-process stats.
+// The agent sends only the top processes each second, so totals over long ranges are approximate.
 import type { Sample } from "../types/model";
 import { percentile } from "./hist";
 
 export type ProcImpact = {
   comm: string;
-  procs: number; // 区間内で見えた最大のプロセス数
+  procs: number; // max number of processes seen in the range
   onCpuNs: number;
-  cpuShare: number; // CPU 全体(区間 × コア数)に占める割合 0..1
+  cpuShare: number; // share of total CPU (range x cores), 0..1
   waitCount: number;
   waitNs: number;
   waitMaxNs: number;
-  p99: number | null; // 待ち時間 p99(µs)
+  p99: number | null; // wait time p99 (µs)
 };
 
-// 原因とみなす CPU 占有率。これ未満なら「特定のプロセスのせい」とは言わない
+// CPU share needed to call a process the cause. Below this we do not blame a specific process
 const CULPRIT_SHARE = 0.3;
 
 export function samplesBetween(samples: Sample[], start: Date, end: Date): Sample[] {
@@ -55,7 +55,7 @@ export function impact(samples: Sample[]): ProcImpact[] {
 export const byCpu = (xs: ProcImpact[]) => [...xs].sort((a, b) => b.onCpuNs - a.onCpuNs);
 export const byWait = (xs: ProcImpact[]) => [...xs].filter((x) => x.waitCount > 0).sort((a, b) => b.waitNs - a.waitNs);
 
-// 要約の文章に使う。原因は CPU を大きく占有していたプロセス、影響はそれ以外で待たされたプロセス
+// Used by the summary sentence. The cause is a process that held a large share of CPU; the impact is the other processes that were kept waiting
 export function explain(xs: ProcImpact[]) {
   const top = byCpu(xs)[0];
   const culprit = top && top.cpuShare >= CULPRIT_SHARE ? top : undefined;

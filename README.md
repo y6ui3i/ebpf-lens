@@ -25,6 +25,10 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 - **UI**: React + Vite + TypeScript SPA with TanStack Query, Tailwind and uPlot; heatmaps are drawn on a canvas. TypeScript types are generated from the Go model with tygo.
 - **Concepts**: borrowed from Zabbix — hosts, items, triggers, events.
 
+## Design decisions
+
+- [ADR 0001: Everyone an SRE — explain incidents so that whoever is on call can act](docs/adr/0001-everyone-an-sre.md)
+
 ## Screen design principles
 
 - **The dashboard (`/`) is an overview of every resource.** The Lens Summary and a USE-method grid (resource × utilization / saturation / errors) fit on one screen and never grow vertically. A new probe fills in cells of the grid.

@@ -1,35 +1,35 @@
-// Package model はエージェント・サーバー・フロントで共有するデータ型。
-// フロントの型は tygo で frontend/src/types/model.ts に生成する(make types)。
+// Package model defines the data types shared by the agent, the server, and the frontend.
+// The frontend types are generated into frontend/src/types/model.ts with tygo (make types).
 package model
 
 import "time"
 
-// Sample は 1 区間ぶんのヒストグラム。Slots[i] は [2^i, 2^(i+1)) の件数
-// (slot 0 のみ [0, 2))。単位は Unit。
+// Sample is a histogram for one interval. Slots[i] is the count in [2^i, 2^(i+1))
+// (slot 0 alone is [0, 2)). Values are in Unit.
 type Sample struct {
 	Host       string     `json:"host"`
 	Time       time.Time  `json:"time"`
 	Probe      string     `json:"probe"`
 	Unit       string     `json:"unit"`
 	Slots      []uint64   `json:"slots"`
-	IntervalMs int64      `json:"intervalMs"` // 集計区間の長さ
-	CPUs       int        `json:"cpus"`       // CPU 使用率の分母に使う
-	BusyNs     uint64     `json:"busyNs"`     // 全プロセスの CPU 使用時間の合計(eBPF で計測。idle は含まない)
+	IntervalMs int64      `json:"intervalMs"` // Length of the aggregation interval
+	CPUs       int        `json:"cpus"`       // Used as the denominator for CPU utilization
+	BusyNs     uint64     `json:"busyNs"`     // Total CPU time used by all processes (measured with eBPF; excludes idle)
 	Procs      []ProcStat `json:"procs,omitempty"`
-	Mem        *MemStat   `json:"mem,omitempty"` // memstall のみ
+	Mem        *MemStat   `json:"mem,omitempty"` // memstall only
 }
 
-// MemStat は memstall のサンプルに付けるメモリの状況。
-// StallNs が eBPF の計測値(主役)、使用量と PSI は /proc からの答え合わせ。
+// MemStat is the memory status attached to a memstall sample.
+// StallNs is the eBPF measurement (the main signal); usage and PSI come from /proc as a cross-check.
 type MemStat struct {
 	TotalBytes     uint64 `json:"totalBytes"`
 	AvailableBytes uint64 `json:"availableBytes"`
-	StallNs        uint64 `json:"stallNs"`   // 区間内に全プロセスが回収で止まった時間の合計(eBPF)
-	PsiSomeUs      uint64 `json:"psiSomeUs"` // 区間内の PSI memory some の増分(1 つ以上のタスクが止まっていた時間)
-	PsiFullUs      uint64 `json:"psiFullUs"` // 区間内の PSI memory full の増分(全タスクが止まっていた時間)
+	StallNs        uint64 `json:"stallNs"`   // Total time all processes were stalled in reclaim during the interval (eBPF)
+	PsiSomeUs      uint64 `json:"psiSomeUs"` // Increase in PSI memory "some" during the interval (time at least one task was stalled)
+	PsiFullUs      uint64 `json:"psiFullUs"` // Increase in PSI memory "full" during the interval (time all tasks were stalled)
 }
 
-// ProcEvent はプロセスの起動・終了・OOM kill の 1 件。
+// ProcEvent is a single process start, exit, or OOM kill.
 type ProcEvent struct {
 	Time time.Time `json:"time"`
 	Kind string    `json:"kind"` // "exec" | "exit" | "oom"
@@ -40,42 +40,42 @@ type ProcEvent struct {
 	// exec
 	Filename string `json:"filename,omitempty"`
 	// exit
-	ExitStatus int    `json:"exitStatus"` // 正常終了時の終了コード
-	Signal     int    `json:"signal"`     // シグナルで終了したときのシグナル番号(0 なら正常終了)
+	ExitStatus int    `json:"exitStatus"` // Exit code on normal exit
+	Signal     int    `json:"signal"`     // Signal number when terminated by a signal (0 means normal exit)
 	CoreDump   bool   `json:"coreDump"`
 	LifetimeNs uint64 `json:"lifetimeNs"`
-	// oom(Pid/Comm は強制終了されたプロセス)
+	// oom (Pid/Comm are the process that was killed)
 	TriggerPid  uint32 `json:"triggerPid,omitempty"`
 	TriggerComm string `json:"triggerComm,omitempty"`
 	TotalPages  uint64 `json:"totalPages,omitempty"`
-	Memcg       bool   `json:"memcg"` // cgroup のメモリ上限による OOM
+	Memcg       bool   `json:"memcg"` // OOM caused by a cgroup memory limit
 }
 
-// EventBatch はエージェントが 1 区間ごとにまとめて送るイベント。
+// EventBatch is the set of events the agent sends together for each interval.
 type EventBatch struct {
 	Host    string      `json:"host"`
 	Time    time.Time   `json:"time"`
 	Events  []ProcEvent `json:"events"`
-	Dropped uint64      `json:"dropped"` // 溢れて捨てた件数(カーネル側 + エージェント側)
+	Dropped uint64      `json:"dropped"` // Number of events dropped on overflow (kernel side + agent side)
 }
 
-// ProcStat は 1 区間ぶんのプロセス別集計。同じ名前のプロセスはまとめる。
-// エージェントは待ち時間と CPU 使用の上位だけを送るので、全プロセスではない。
+// ProcStat is a per-process aggregate for one interval. Processes with the same name are merged.
+// The agent only sends the top processes by wait time and by CPU usage, so this is not every process.
 type ProcStat struct {
 	Comm      string   `json:"comm"`
-	Procs     int      `json:"procs"` // この名前のプロセス数
-	Pids      []uint32 `json:"pids"`  // 先頭の数件
+	Procs     int      `json:"procs"` // Number of processes with this name
+	Pids      []uint32 `json:"pids"`  // The first few PIDs
 	OnCPUNs   uint64   `json:"onCpuNs"`
 	WaitCount uint64   `json:"waitCount"`
 	WaitNs    uint64   `json:"waitNs"`
 	WaitMaxNs uint64   `json:"waitMaxNs"`
-	Slots     []uint64 `json:"slots"` // 待ち時間の log2 ヒストグラム(µs)
-	// memstall のみ。memstall では Wait* を「メモリ回収で止まった」の意味で使う
+	Slots     []uint64 `json:"slots"` // log2 histogram of wait time (µs)
+	// memstall only. In memstall, Wait* means "stalled in memory reclaim"
 	ReclaimedPages uint64 `json:"reclaimedPages,omitempty"`
-	MemcgCount     uint64 `json:"memcgCount,omitempty"` // うち cgroup の上限による回収の回数
+	MemcgCount     uint64 `json:"memcgCount,omitempty"` // Of those, the number of reclaims caused by a cgroup limit
 }
 
-// HostInfo はサーバーが把握しているホストの一覧に使う。
+// HostInfo is used for the list of hosts known to the server.
 type HostInfo struct {
 	Name     string    `json:"name"`
 	LastSeen time.Time `json:"lastSeen"`

@@ -1,4 +1,4 @@
-// Package memstall はメモリ回収(direct reclaim / memcg reclaim)で止まった時間を eBPF で測る。
+// Package memstall measures time stalled in memory reclaim (direct reclaim / memcg reclaim) with eBPF.
 package memstall
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -cc clang -cflags "-O2 -g -Wall" -target amd64 memstall memstall.bpf.c -- -I../../../bpf/headers
@@ -14,7 +14,7 @@ import (
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe"
 )
 
-// MaxSlots は BPF 側の MAX_SLOTS と揃える。slot i は [2^i, 2^(i+1)) マイクロ秒。
+// MaxSlots must match MAX_SLOTS on the BPF side. Slot i is [2^i, 2^(i+1)) microseconds.
 const MaxSlots = 27
 
 const maxPids = 5
@@ -25,7 +25,7 @@ type Probe struct {
 	prev  [MaxSlots]uint64
 }
 
-// Open は BPF プログラムを読み込み、vmscan の tracepoint にアタッチする。
+// Open loads the BPF programs and attaches them to the vmscan tracepoints.
 func Open() (*Probe, error) {
 	p := &Probe{}
 	if err := loadMemstallObjects(&p.objs, nil); err != nil {
@@ -45,7 +45,7 @@ func Open() (*Probe, error) {
 	return p, nil
 }
 
-// Delta は前回から今回までに増えた停止回数を slot ごとに返す。
+// Delta returns, per slot, how many stalls were added since the previous call.
 func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 	var out [MaxSlots]uint64
 	for slot := uint32(0); slot < MaxSlots; slot++ {
@@ -63,8 +63,8 @@ func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 	return out, nil
 }
 
-// Procs はプロセス別の集計を読み出して消し、名前ごとにまとめて返す。
-// runqlat と同じ ProcStat を使い、Wait* を「回収で止まった」の意味で使う。
+// Procs reads and deletes the per-process aggregates and returns them merged by name.
+// It uses the same ProcStat as runqlat, with Wait* meaning "stalled in reclaim".
 func (p *Probe) Procs() ([]model.ProcStat, error) {
 	var (
 		key  memstallProcKey

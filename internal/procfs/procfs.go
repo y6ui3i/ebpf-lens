@@ -1,4 +1,4 @@
-// Package procfs は /proc から答え合わせ用の値を読む(主役は eBPF。ここは比較と文脈のため)。
+// Package procfs reads values from /proc for cross-checking (eBPF is the main source; this is for comparison and context).
 package procfs
 
 import (
@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// MemInfo は /proc/meminfo のうち、使用率の計算に要る 2 つ(バイト)。
+// MemInfo holds the two /proc/meminfo values needed to compute usage (in bytes).
 type MemInfo struct {
 	TotalBytes     uint64
 	AvailableBytes uint64
@@ -24,7 +24,7 @@ func ReadMemInfo() (MemInfo, error) {
 	var m MemInfo
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		fields := strings.Fields(sc.Text()) // 例: "MemAvailable:   24360916 kB"
+		fields := strings.Fields(sc.Text()) // e.g. "MemAvailable:   24360916 kB"
 		if len(fields) < 2 {
 			continue
 		}
@@ -45,14 +45,14 @@ func ReadMemInfo() (MemInfo, error) {
 	return m, sc.Err()
 }
 
-// PSI はカーネルの Pressure Stall Information の累計(マイクロ秒)。
-// some: 1 つ以上のタスクが止まっていた時間、full: 全タスクが止まっていた時間。
+// PSI is the kernel's cumulative Pressure Stall Information (microseconds).
+// some: time at least one task was stalled; full: time all tasks were stalled.
 type PSI struct {
 	SomeTotalUs uint64
 	FullTotalUs uint64
 }
 
-// ReadPSI は /proc/pressure/<resource> を読む(resource は "memory" など)。
+// ReadPSI reads /proc/pressure/<resource> (resource is "memory", etc.).
 func ReadPSI(resource string) (PSI, error) {
 	b, err := os.ReadFile("/proc/pressure/" + resource)
 	if err != nil {
@@ -60,7 +60,7 @@ func ReadPSI(resource string) (PSI, error) {
 	}
 	var p PSI
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		// 例: "some avg10=0.00 avg60=0.00 avg300=0.00 total=217"
+		// e.g. "some avg10=0.00 avg60=0.00 avg300=0.00 total=217"
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue

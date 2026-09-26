@@ -1,4 +1,4 @@
-// Package proclife はプロセスの起動・終了・OOM kill を eBPF でイベントとして拾う。
+// Package proclife captures process start, exit, and OOM kill as events with eBPF.
 package proclife
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -cc clang -cflags "-O2 -g -Wall" -target amd64 -type event proclife proclife.bpf.c -- -I../../../bpf/headers
@@ -29,12 +29,12 @@ type Probe struct {
 	objs  proclifeObjects
 	links []link.Link
 	rd    *ringbuf.Reader
-	// CLOCK_MONOTONIC(BPF 側の時刻)から壁時計への換算
+	// offset for converting CLOCK_MONOTONIC (the BPF-side clock) to wall-clock time
 	monoToWall time.Duration
 	prevDrop   uint64
 }
 
-// Open は BPF プログラムを読み込み、exec / exit の tracepoint と oom_kill_process にアタッチする。
+// Open loads the BPF programs and attaches them to the exec / exit tracepoints and to oom_kill_process.
 func Open() (*Probe, error) {
 	p := &Probe{}
 	if err := loadProclifeObjects(&p.objs, nil); err != nil {
@@ -64,8 +64,8 @@ func Open() (*Probe, error) {
 	return p, nil
 }
 
-// Run は ring buffer を読み続け、イベントを out に送る。Close されると戻る。
-// out が詰まっているときは捨てて onDrop を呼ぶ(収集側を止めないため)。
+// Run keeps reading the ring buffer and sends events to out. It returns once Close is called.
+// When out is full, the event is dropped and onDrop is called (so collection is never blocked).
 func (p *Probe) Run(out chan<- model.ProcEvent, onDrop func()) error {
 	var raw proclifeEvent
 	for {
@@ -101,7 +101,7 @@ func (p *Probe) convert(r *proclifeEvent) model.ProcEvent {
 		e.Filename = probe.CString(r.Filename[:])
 	case kindExit:
 		e.Kind = "exit"
-		// wait(2) と同じ解釈: 下位 7bit がシグナル、0x80 がコアダンプ、上位 8bit が終了コード
+		// Same interpretation as wait(2): the low 7 bits are the signal, 0x80 is core dump, the high 8 bits are the exit code
 		code := r.ExitCode
 		e.Signal = int(code & 0x7f)
 		e.CoreDump = code&0x80 != 0
@@ -117,7 +117,7 @@ func (p *Probe) convert(r *proclifeEvent) model.ProcEvent {
 	return e
 }
 
-// DroppedDelta はカーネル側で ring buffer が溢れて捨てた件数の、前回からの増分を返す。
+// DroppedDelta returns the increase since the previous call in the number of events the kernel dropped because the ring buffer overflowed.
 func (p *Probe) DroppedDelta() (uint64, error) {
 	var perCPU []uint64
 	if err := p.objs.Dropped.Lookup(uint32(0), &perCPU); err != nil {

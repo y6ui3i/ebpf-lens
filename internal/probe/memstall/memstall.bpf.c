@@ -1,8 +1,8 @@
 //go:build ignore
 
-// memstall: メモリが足りないとき、プロセスが自分で空きを作る(回収する)ために止まった時間を測る。
-// 全体の回収(direct reclaim)と cgroup の上限による回収(memcg reclaim)の begin/end の間を、
-// スレッド単位で測ってプロセス別に積む。BCC の drsnoop を集計型にしたもの。
+// memstall: when memory runs short, measures how long processes stall to free memory themselves (reclaim).
+// The time between begin/end of global reclaim (direct reclaim) and of reclaim due to a cgroup limit (memcg reclaim)
+// is measured per thread and accumulated per process. An aggregating version of BCC's drsnoop.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -16,19 +16,19 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct proc_key {
 	u32 tgid;
-	char comm[TASK_COMM_LEN]; // スレッド名ではなくプロセス(group leader)の名前
+	char comm[TASK_COMM_LEN]; // name of the process (group leader), not the thread
 };
 
 struct proc_val {
 	u64 count;
 	u64 total_ns;
 	u64 max_ns;
-	u64 reclaimed;   // 回収できたページ数
-	u64 memcg_count; // うち cgroup の上限による回収
-	u64 slots[MAX_SLOTS]; // 停止時間の log2 ヒストグラム(µs)
+	u64 reclaimed;   // number of pages reclaimed
+	u64 memcg_count; // of which, reclaims due to a cgroup limit
+	u64 slots[MAX_SLOTS]; // log2 histogram of stall time (µs)
 };
 
-// スレッド ID -> 回収を始めた時刻(ns)。begin と end は同じスレッドの中で起きる
+// thread ID -> time reclaim started (ns). begin and end happen on the same thread
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 10240);
@@ -36,7 +36,7 @@ struct {
 	__type(value, u64);
 } start SEC(".maps");
 
-// プロセスごとの集計。ユーザー空間が区間ごとに読んで消す
+// Per-process aggregates. User space reads and deletes them every interval
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
@@ -44,7 +44,7 @@ struct {
 	__type(value, struct proc_val);
 } procs SEC(".maps");
 
-// 停止時間のヒストグラム(ホスト全体)
+// Histogram of stall time (whole host)
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, MAX_SLOTS);
@@ -90,7 +90,7 @@ static __always_inline void on_end(unsigned long nr_reclaimed, bool memcg)
 	u32 slot;
 
 	tsp = bpf_map_lookup_elem(&start, &tid);
-	if (!tsp) // アタッチ前に始まった回収
+	if (!tsp) // reclaim that started before we attached
 		return;
 	delta = bpf_ktime_get_ns() - *tsp;
 	bpf_map_delete_elem(&start, &tid);
@@ -108,7 +108,7 @@ static __always_inline void on_end(unsigned long nr_reclaimed, bool memcg)
 	if (!v) {
 		bpf_map_update_elem(&procs, &k, &zero, BPF_NOEXIST);
 		v = bpf_map_lookup_elem(&procs, &k);
-		if (!v) // 満杯なら諦める(次の区間でユーザー空間が空にする)
+		if (!v) // if the map is full, give up (user space empties it at the next interval)
 			return;
 	}
 	__sync_fetch_and_add(&v->count, 1);
@@ -116,10 +116,10 @@ static __always_inline void on_end(unsigned long nr_reclaimed, bool memcg)
 	__sync_fetch_and_add(&v->reclaimed, nr_reclaimed);
 	if (memcg)
 		__sync_fetch_and_add(&v->memcg_count, 1);
-	if (delta > v->max_ns) // 競合で取りこぼしうるが最大値の目安には十分
+	if (delta > v->max_ns) // may miss an update under contention, but good enough as an indication of the max
 		v->max_ns = delta;
-	// 途中の関数呼び出しで verifier が slot の範囲を見失うので、使う直前に確かめ直す。
-	// コンパイラは上の clamp から「不要な比較」として消してしまうので、barrier_var で残させる
+	// The verifier loses track of slot's range across the function calls in between, so check it again right before use.
+	// The compiler would drop this as a redundant comparison given the clamp above, so barrier_var keeps it
 	barrier_var(slot);
 	if (slot >= MAX_SLOTS)
 		return;

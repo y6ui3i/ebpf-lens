@@ -1,4 +1,4 @@
-// ebpflens-server はエージェントからサンプルを受け取り、API・SSE・フロントを配信する。
+// ebpflens-server receives samples from agents and serves the API, SSE, and the frontend.
 package main
 
 import (
@@ -17,12 +17,12 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "待ち受けアドレス")
-	keep := flag.Int("keep", 900, "ホスト×プローブごとに保持するサンプル数")
-	keepEvents := flag.Int("keep-events", 20000, "ホストごとに保持するイベント数")
-	dbPath := flag.String("db", "", "SQLite の保存先(空なら保存しない)。監視対象のローカルディスクに置く")
-	retention := flag.Duration("retention", 24*time.Hour, "サンプルを DB に残す期間")
-	eventRetention := flag.Duration("event-retention", 7*24*time.Hour, "イベントを DB に残す期間")
+	addr := flag.String("addr", ":8080", "listen address")
+	keep := flag.Int("keep", 900, "number of samples to keep per host × probe")
+	keepEvents := flag.Int("keep-events", 20000, "number of events to keep per host")
+	dbPath := flag.String("db", "", "SQLite file path (empty disables persistence). Place it on a local disk of the monitored machine")
+	retention := flag.Duration("retention", 24*time.Hour, "how long to keep samples in the DB")
+	eventRetention := flag.Duration("event-retention", 7*24*time.Hour, "how long to keep events in the DB")
 	flag.Parse()
 
 	st := store.New(*keep, *keepEvents)
@@ -31,15 +31,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("sqlite: %v", err)
 		}
-		// 画面の窓(直近 keep 秒)ぶんの履歴を戻してから、保存を始める
+		// Restore enough history to fill the UI window (the last keep seconds), then start persisting
 		since := time.Now().Add(-time.Duration(*keep) * time.Second)
 		n, m, err := db.LoadInto(context.Background(), st, since)
 		if err != nil {
 			log.Fatalf("sqlite: load: %v", err)
 		}
-		log.Printf("sqlite: %s から履歴を戻した(サンプル %d 件、イベント %d 件)", *dbPath, n, m)
+		log.Printf("sqlite: restored history from %s (%d samples, %d events)", *dbPath, n, m)
 		st.SetPersister(db)
-		// 終了時にキューの残りを書き切る
+		// On shutdown, flush whatever is left in the queue
 		go func() {
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

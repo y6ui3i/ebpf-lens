@@ -1,8 +1,8 @@
 //go:build ignore
 
-// proclife: プロセスの起動(exec)・終了(exit)・OOM kill をイベントとして ring buffer に流す。
-// ポーリング型の監視では取得間隔より短命なプロセスが見えないが、ここでは 1 件ずつ拾う。
-// コマンドライン引数はパスワードなどを含みうるので取らない(実行ファイルのパスと名前だけ)。
+// proclife: streams process start (exec), exit, and OOM kill as events into a ring buffer.
+// Polling-based monitoring cannot see processes that live shorter than the polling interval, but here we catch each one.
+// Command-line arguments are not captured because they can contain passwords and the like (only the executable path and name).
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -24,18 +24,18 @@ struct event {
 	u32 pid;
 	u32 ppid;
 	u32 uid;
-	s32 exit_code; // exit: task->exit_code そのまま(上位 8bit が終了ステータス、下位 7bit がシグナル)
-	u32 trigger_pid; // oom: メモリを要求して OOM を引き起こしたプロセス
-	u64 lifetime_ns; // exit: fork からの経過時間
-	u64 total_pages; // oom: 対象範囲のページ数
-	u32 memcg; // oom: cgroup の上限による OOM なら 1
+	s32 exit_code; // exit: task->exit_code as is (the high 8 bits are the exit status, the low 7 bits the signal)
+	u32 trigger_pid; // oom: the process whose memory request triggered the OOM
+	u64 lifetime_ns; // exit: time elapsed since fork
+	u64 total_pages; // oom: number of pages in the constrained scope
+	u32 memcg; // oom: 1 if the OOM was caused by a cgroup limit
 	u32 _pad;
 	char comm[TASK_COMM_LEN];
 	char trigger_comm[TASK_COMM_LEN];
 	char filename[FILENAME_LEN];
 };
 
-// bpf2go が Go の型を生成できるよう、struct event を BTF に確実に載せる
+// Make sure struct event is emitted into BTF so bpf2go can generate the Go type
 const struct event *unused_event __attribute__((unused));
 
 struct {
@@ -43,7 +43,7 @@ struct {
 	__uint(max_entries, 1 << 20);
 } events SEC(".maps");
 
-// ring buffer が溢れて捨てた件数。ユーザー空間が読んで画面に出す
+// Number of events dropped because the ring buffer overflowed. User space reads it and shows it in the UI
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
@@ -95,7 +95,7 @@ int BPF_PROG(handle_exit, struct task_struct *p, bool group_dead)
 {
 	struct event *e;
 
-	// スレッドの終了は無視し、プロセス全体が終わったときだけ拾う
+	// Ignore thread exits; only capture when the whole process has exited
 	if (!group_dead)
 		return 0;
 	e = reserve(KIND_EXIT, p);

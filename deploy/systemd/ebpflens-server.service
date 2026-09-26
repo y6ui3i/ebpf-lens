@@ -3,27 +3,29 @@ Description=eBPFLens server (API, SSE, UI, SQLite)
 Documentation=https://github.com/yoshiharu-ishii/ebpf-lens
 After=network-online.target
 Wants=network-online.target
-# DB を置くディスクがマウントされてから起動する
-RequiresMountsFor=/mnt/data/ebpflens
 
 [Service]
 User=ebpflens
 Group=ebpflens
-# hal ユーザーからも sqlite3 で読めるよう、作るファイルはグループ書き込み可にする(WAL の -shm に書き込み権が要る)
+# systemd creates /var/lib/ebpflens owned by the service user.
+# To keep the DB elsewhere, override ExecStart and ReadWritePaths with a drop-in (see README).
+StateDirectory=ebpflens
+StateDirectoryMode=2775
+# Files are group-writable so members of the ebpflens group can read the DB with sqlite3
+# (readers of a WAL database need write access to the -shm file).
 UMask=0002
-ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /mnt/data/ebpflens/ebpflens.db
+ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /var/lib/ebpflens/ebpflens.db
 Restart=on-failure
 RestartSec=5
-# SIGTERM でキューを書き切ってから閉じる
+# On SIGTERM the server flushes its write queue before closing the DB.
 KillSignal=SIGTERM
 TimeoutStopSec=15
 
-# サーバーは特権が要らないので絞る
+# The server needs no privileges.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/mnt/data/ebpflens
 CapabilityBoundingSet=
 
 [Install]

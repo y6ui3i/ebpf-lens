@@ -1,13 +1,13 @@
 /bin/
-# ビルドするマシンのカーネル BTF から生成する(make vmlinux)
+# Generated from the build machine's kernel BTF (make vmlinux)
 /bpf/headers/vmlinux.h
-# bpf2go の生成物(make generate)
+# bpf2go output (make generate)
 *_bpfel.go
 *_bpfel.o
-# フロントのビルド成果物(make web)。embed のために .gitkeep だけ残す
+# Frontend build output (make web). Only .gitkeep is kept, for embed
 /internal/webui/dist/*
 !/internal/webui/dist/.gitkeep
 node_modules/
 *.tsbuildinfo
-# 検証用のローカル設定
+# Local settings for verification
 /.claude/

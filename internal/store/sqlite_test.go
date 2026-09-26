@@ -9,7 +9,7 @@ import (
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
 )
 
-// 保存して閉じ、開き直すと、画面の窓ぶんの履歴が Store に戻ること。
+// After saving, closing, and reopening, the history for the UI window is restored into the Store.
 func TestSQLiteRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ebpflens.db")
 	now := time.Now().Truncate(time.Millisecond)
@@ -27,9 +27,9 @@ func TestSQLiteRoundTrip(t *testing.T) {
 		{Time: now.Add(-2 * time.Second), Kind: "exec", Pid: 10, Comm: "true", Filename: "/bin/true"},
 		{Time: now.Add(-time.Second), Kind: "exit", Pid: 10, Comm: "true", LifetimeNs: 880_000},
 	}})
-	// 同じ時刻のサンプルは二重に入らない
+	// A sample with the same timestamp is not inserted twice
 	st.Add(model.Sample{Host: "h", Probe: "runqlat", Time: now.Add(-3 * time.Second), Slots: []uint64{9}})
-	if err := db.Close(); err != nil { // Close でキューの残りを書き切る
+	if err := db.Close(); err != nil { // Close flushes the rest of the queue
 		t.Fatal(err)
 	}
 
@@ -58,7 +58,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 	}
 }
 
-// 保持期間を過ぎた行は、開いたときの prune で消えること。
+// Rows past the retention period are removed by the prune that runs on open.
 func TestSQLitePrune(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ebpflens.db")
 	db, err := OpenSQLite(path, time.Hour, time.Hour)
@@ -72,7 +72,7 @@ func TestSQLitePrune(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db2, err := OpenSQLite(path, time.Hour, time.Hour) // 開いた直後に prune が走る
+	db2, err := OpenSQLite(path, time.Hour, time.Hour) // prune runs right after opening
 	if err != nil {
 		t.Fatal(err)
 	}

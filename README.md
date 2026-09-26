@@ -1,165 +1,187 @@
 # eBPFLens
 
-Zabbix 風の Linux ダッシュボードを eBPF で再発明する実験。
+[日本語](README.ja.md)
 
-**設計思想: eBPF を知らない人でも「Linux で今何が起きているか」が分かること。**
-ポーリングで取る平均値では見えないもの(レイテンシの分布、プロセス単位の原因と影響、プロセス起動や OOM などのイベント)を eBPF で拾い、生データではなく「監視者にとっての意味」に変換して見せる。画面の一番上には判定と文章の要約(Lens Summary)を出し、ヒートマップなどの詳細はその根拠として置く。
+An experiment in reinventing a Zabbix-style Linux dashboard with eBPF.
 
-## 構成
+**Design goal: someone who has never heard of eBPF should still be able to tell what is happening on a Linux box right now.**
+eBPFLens uses eBPF to capture what polling-based averages hide — latency distributions, per-process cause and impact, and events such as process launches and OOM kills — and turns them into *meaning for the operator* rather than raw data. The top of the screen shows a verdict and a plain-language summary (the Lens Summary); heatmaps and tables sit below as the evidence.
+
+> Status: experimental. Built and tested on one machine (Ubuntu 26.04, kernel 7.0). There is no authentication yet — run it only on a trusted network.
+
+## Architecture
 
 ```
-[各ホスト]                    [サーバー]                    [ブラウザ]
-ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API──▶ フロント (React + TS)
- eBPF + /proc 収集             保存・トリガー・API             サーバーに埋め込んで配信
+[each host]                    [server]                      [browser]
+ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API──▶ UI (React + TS)
+ eBPF probes (+ /proc)          storage, API                   embedded in the server
 ```
 
-- **エージェント**: Go + [cilium/ebpf](https://github.com/cilium/ebpf)(CO-RE)。監視対象にはカーネル BTF だけあればよく、単一バイナリで配れる
-  - `runqlat`: CPU 実行待ち時間のヒストグラムと、プロセス別の CPU 使用・待ち
-  - `proclife`: exec / exit / OOM kill のイベント(ring buffer)。コマンドライン引数はパスワードを含みうるので取らない
-  - `memstall`: メモリ回収(`mm_vmscan_direct_reclaim_*` / `mm_vmscan_memcg_reclaim_*`)で止まった時間をプロセス別に。答え合わせに /proc/meminfo と /proc/pressure/memory も読む
-- **サーバー**: Go。画面用の直近の窓はメモリ(ホスト×プローブごとに直近 900 件、イベントはホストごとに直近 20000 件)、長く残す分は SQLite。トリガーは後で足す
-- **フロント**: React + Vite + TypeScript の SPA。TanStack Query、Tailwind、uPlot、ヒートマップは canvas 自前描画。型は tygo で Go から生成
-- **概念**: Zabbix に倣ってホスト / アイテム / トリガー / イベント
+- **Agent**: Go + [cilium/ebpf](https://github.com/cilium/ebpf) (CO-RE). A monitored host only needs kernel BTF; the agent ships as a single binary.
+  - `runqlat`: CPU run-queue latency histogram, plus per-process CPU time and run-queue wait
+  - `proclife`: exec / exit / OOM-kill events via a ring buffer. Command-line arguments are deliberately **not** captured because they can contain passwords.
+  - `memstall`: per-process time stalled in memory reclaim (`mm_vmscan_direct_reclaim_*` / `mm_vmscan_memcg_reclaim_*`). `/proc/meminfo` and `/proc/pressure/memory` are read only to cross-check.
+- **Server**: Go. Keeps the recent window for the UI in memory (last 900 samples per host × probe, last 20,000 events per host) and persists to SQLite.
+- **UI**: React + Vite + TypeScript SPA with TanStack Query, Tailwind and uPlot; heatmaps are drawn on a canvas. TypeScript types are generated from the Go model with tygo.
+- **Concepts**: borrowed from Zabbix — hosts, items, triggers, events.
 
-## 画面設計の原則
+## Screen design principles
 
-- **ダッシュボード(`/`)は全資源の概要。** Lens Summary と USE メソッドの升目(資源 × 使用率 / 飽和 / エラー)で 1 画面に収め、縦に伸ばさない。プローブを足したら升目を埋める
-- **領域ごとの画面は詳細。** プローブを足したら、メニューの「リソース」に画面を 1 つ足す(例: `/cpu`、`/processes`)
-- **すべてのパネル(`/all`)は全部並べて見る場所。** 領域ごとの画面にあるパネルを縦に並べる。プローブを足したらここにも足す
-- 生データより先に意味を出す。判定と文章の要約が先、グラフはその根拠
+- **The dashboard (`/`) is an overview of every resource.** The Lens Summary and a USE-method grid (resource × utilization / saturation / errors) fit on one screen and never grow vertically. A new probe fills in cells of the grid.
+- **Per-resource pages hold the details.** A new probe adds one page under "Resources" in the menu (e.g. `/cpu`, `/processes`, `/memory`).
+- **All panels (`/all`) shows everything at once.** It stacks the panels from every per-resource page. A new probe adds its panel here too.
+- Meaning before raw data: the verdict and the summary come first, charts are the evidence.
 
-## 常駐(systemd)
+## Build and run
 
-`deploy/systemd/` のユニットで常駐させる。hal では画面が http://hal:8080 、検証用の起動は 8001 を使う。
+Build the Go binaries on the same kind of Linux you monitor (`vmlinux.h` is generated from the running kernel's BTF). Build the UI on any machine with Node; the output in `internal/webui/dist` is embedded into the server.
 
-- **エージェントは root で動かさない。** 専用ユーザー `ebpflens` で動かし、`CAP_BPF` と `CAP_PERFMON` だけを渡す(tracepoint / fentry へのアタッチと ring buffer はこの 2 つで足りる)
-- サーバーは特権なし。書き込めるのは DB のディレクトリだけ(`ProtectSystem=strict`)
-- 開発中の `bin/` を直接動かさない。`make install` で `/opt/ebpflens/bin` に入れてから再起動する
+Requirements: Go 1.25+, clang, llvm, libbpf-dev, bpftool (and Node for the UI).
 
-初回だけ:
+```bash
+make web      # generate TS types + build the UI (on a machine with Node)
+make build    # agent and server (on Linux)
+
+./bin/ebpflens-server -addr :8080 -db ./ebpflens.db
+sudo ./bin/ebpflens-agent -server http://127.0.0.1:8080
+```
+
+The agent also runs standalone:
+
+```bash
+sudo ./bin/ebpflens-agent            # JSON Lines every second
+sudo ./bin/ebpflens-agent -text      # runqlat-style text histograms
+```
+
+`slots[i]` is the count in `[2^i, 2^(i+1))` microseconds for that interval.
+
+UI development: `cd frontend && EBPFLENS_API=http://<server>:8080 npm run dev`.
+
+## Running as a service (systemd)
+
+Units live in `deploy/systemd/`.
+
+- **The agent does not run as root.** It runs as the dedicated `ebpflens` user with only `CAP_BPF` and `CAP_PERFMON`, which are enough to attach to tracepoints / fentry and read ring buffers.
+- The server has no privileges and can write only to its state directory (`ProtectSystem=strict`).
+- The services never run the development `bin/`. `make install` copies binaries to `/opt/ebpflens/bin`, then restart the services.
+
+First time:
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin ebpflens
-sudo usermod -aG ebpflens "$USER"            # sqlite3 で DB を読めるように
-sudo install -d -o ebpflens -g ebpflens -m 2775 /mnt/data/ebpflens
+sudo usermod -aG ebpflens "$USER"            # to read the DB with sqlite3
 make install
 sudo systemctl enable --now ebpflens-server ebpflens-agent
 ```
 
-更新:
+Update:
 
 ```bash
 make install
 sudo systemctl restart ebpflens-server ebpflens-agent
 ```
 
-## 保存
+The DB goes to `/var/lib/ebpflens/ebpflens.db` (systemd `StateDirectory`). To keep it elsewhere, add a drop-in:
 
-`-db` を付けると SQLite に保存する(pure Go の modernc.org/sqlite。cgo 不要)。再起動しても画面の履歴が戻る。
+```ini
+# /etc/systemd/system/ebpflens-server.service.d/10-local-db.conf
+[Unit]
+RequiresMountsFor=/mnt/data/ebpflens
 
-```bash
-./bin/ebpflens-server -addr :8080 -db /mnt/data/ebpflens/ebpflens.db   # hal での置き場所
+[Service]
+ExecStart=
+ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /mnt/data/ebpflens/ebpflens.db
+ReadWritePaths=/mnt/data/ebpflens
 ```
 
-- 保持期間: サンプル 24 時間(`-retention`)、イベント 7 日(`-event-retention`)。10 分ごとに古い行を消す
-- 書き込みはキューに積み、1 秒ごとに 1 トランザクションでまとめて書く。受信は止めない
-- 目安: hal 1 台でサンプル 1 件あたり約 4KB(1 日約 350MB)、イベントは平常時 0.7 件/秒
-- **DB ファイルは監視対象のローカルディスクに置く。** hal の `/mnt/data` は LAN に NFS で公開しているが、SQLite は NFS 越しではロックが当てにならず壊れうるので、Mac から NFS 経由で開かない
+## Storage
 
-### 大きくなったら PostgreSQL
+With `-db`, samples and events are stored in SQLite (pure-Go modernc.org/sqlite, no cgo). History survives restarts.
 
-次のどれかを超えたら PostgreSQL に移し、さらに苦しくなったら TimescaleDB を足す(本家 Zabbix と同じ道筋)。
+- Retention: samples 24 hours (`-retention`), events 7 days (`-event-retention`). Old rows are deleted every 10 minutes.
+- Writes are queued and committed once per second in a single transaction, so ingestion never blocks on the DB.
+- Rough size on the test machine: about 4 KB per sample (about 350 MB per day per host); events about 0.7 per second when idle.
+- **Keep the DB file on a local disk.** SQLite file locking is not reliable over NFS and the database can be corrupted.
 
-- 監視するホストが 10 台を超えた
-- 秒単位のデータを 1 週間以上残したい
-- ホストをまたいだ集計が要る
+### Moving to PostgreSQL when it grows
 
-移行を安くするため、SQL は両方で動く書き方に限っている(時刻は Unix ミリ秒の整数、本体は JSON テキスト、`ON CONFLICT`)。保存処理は `internal/store` の `Persister` の後ろに閉じているので、差し替えはそこだけで済む。Prometheus 系はプロセスの起動・終了のようなイベントを持てず、プロセス別のヒストグラムで系列数も膨らむので選ばない。
+Move to PostgreSQL when any of these is true, and add TimescaleDB if it still struggles (the same path Zabbix itself takes):
 
-## ロードマップ
+- more than 10 monitored hosts
+- per-second data needs to be kept longer than a week
+- cross-host aggregation is needed
 
-方針: **GPU 以外は eBPF を主役にする。** /proc や PSI は答え合わせに使う。
+To keep that move cheap, the SQL is limited to what both engines accept (Unix-millisecond integers for time, JSON text for bodies, `ON CONFLICT`). Storage sits behind the `Persister` interface in `internal/store`, so only that package changes. Prometheus-style TSDBs are not a good fit: they cannot hold events such as process exits, and per-process histograms explode the series count.
 
-1. ✅ runqlat を Go で動かし、ヒストグラムを JSON で出す
-2. ✅ サーバー + フロント。CPU実行待ち時間のヒートマップ、しきい値の帯、Lens Summary、直近の出来事
-3. ✅ 原因と影響: プロセス単位の CPU 待ち(誰が待たされたか)と CPU 占有(誰が使っていたか)
-4. ✅ プロセスのライフサイクル: exec / exit(終了コード・シグナル・寿命)/ OOM kill。CPU 使用率も eBPF の計測値から出す
-5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
-6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
-7. トリガーと通知: 判定をサーバー側へ移す。材料はすべて eBPF 由来
-8. GPU の基本メトリクス(NVML、例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
-9. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
-10. ディスクとネットワーク: biolatency / tcpconnect / tcpretrans
+## Roadmap
 
-## ビルドと実行
+Policy: **eBPF is the primary source for everything except the GPU.** `/proc` and PSI are for cross-checking.
 
-Go のビルドは監視対象と同じ Linux 上で行う(`vmlinux.h` を実行中カーネルの BTF から生成するため)。フロントは Node のあるマシンでビルドし、`internal/webui/dist` に出したものをサーバーに埋め込む。
+1. ✅ runqlat in Go, histograms as JSON
+2. ✅ Server + UI: run-queue latency heatmap, threshold bands, Lens Summary, recent incidents
+3. ✅ Cause and impact: per-process run-queue wait (who waited) and CPU time (who used the CPU)
+4. ✅ Process lifecycle: exec / exit (exit code, signal, lifetime) / OOM kill; CPU utilization from eBPF measurements
+5. ✅ Layout: overview page (Lens Summary + USE grid) and per-resource pages, responsive menu
+6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
+7. Triggers and notifications: move the verdicts to the server; all inputs come from eBPF
+8. VM monitoring: watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest
+9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
+10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
+11. Disk and network: biolatency / tcpconnect / tcpretrans
 
-必要なもの: Go 1.25+、clang、llvm、libbpf-dev、bpftool(フロントのビルドには Node)
+## Thresholds (provisional)
 
-```bash
-make web      # 型生成 + フロントのビルド(Node のあるマシン)
-make build    # エージェントとサーバー(Linux)
+CPU run-queue latency p99: caution at 1 ms, warning at 10 ms, judged on the median of the last 5 seconds of per-second p99. An excursion that lasts 3 seconds or more becomes an incident.
 
-./bin/ebpflens-server -addr :8080
-sudo ./bin/ebpflens-agent -server http://127.0.0.1:8080
-```
+Measured on the test machine (2026-09-26):
 
-エージェント単体でも動く。
-
-```bash
-sudo ./bin/ebpflens-agent            # 1 秒ごとに JSON Lines
-sudo ./bin/ebpflens-agent -text      # runqlat 風のテキストヒストグラム
-```
-
-`slots[i]` は `[2^i, 2^(i+1))` マイクロ秒の件数(区間ごとの差分)。
-
-フロントの開発は `cd frontend && EBPFLENS_API=http://<server>:8080 npm run dev`。
-
-## 判定のしきい値(仮)
-
-CPU実行待ち時間の p99 で、注意 1ms / 警告 10ms。直近 5 秒の p99 の中央値で判定し、3 秒以上続いた超過を「出来事」にする。
-
-hal での実測(2026-09-26):
-
-| 状態 | 1 秒 p99 の中央値 | 1 秒 p99 の最大 |
+| State | median of per-second p99 | max of per-second p99 |
 |---|---|---|
-| 平常時 | 29 µs | 167 µs |
-| Demucs(PyTorch GPU 推論、GPU 平均 76%) | 27 µs | 476 µs |
-| stress-ng 4 倍過負荷 | 16 ms | 30 ms |
+| idle | 29 µs | 167 µs |
+| Demucs (PyTorch GPU inference, GPU 76% on average) | 27 µs | 476 µs |
+| stress-ng, 4× CPU oversubscription | 16 ms | 30 ms |
 
-GPU 推論は CPU の取り合いをほとんど起こさない。学習(DataLoader のワーカーで CPU を埋める構成)は未計測。
+GPU inference hardly creates CPU contention. Training (DataLoader workers filling the CPUs) has not been measured.
 
-プロセス別(stress-ng 4 倍過負荷中、1ms ごとに起きる victim-app を同居させた場合):
+Per process (4× oversubscription with stress-ng, plus a `victim-app` that wakes every 1 ms):
 
-| プロセス | 平常時 p99 | 過負荷時 p99 | CPU 使用 |
+| Process | idle p99 | overloaded p99 | CPU |
 |---|---|---|---|
 | stress-ng-cpu ×32 | – | 16 ms | 99.5% |
 | victim-app | 16 µs | 1.0 ms | 0.1% |
 
-すぐ寝るタスクは EEVDF が起床時に優遇するので、巻き込まれた側の待ちは占有している側より 1 桁以上小さい。
+EEVDF favors tasks that sleep often when they wake up, so the bystander waits an order of magnitude less than the CPU hog.
 
-## メモリ回収の停止と PSI の違い
+Memory reclaim stall (sum over all processes): caution at 10 ms/s, warning at 100 ms/s.
 
-eBPF の `memstall` は「プロセスが実際に回収で止まっていた時間」をスレッドごとに足したもの。PSI(`/proc/pressure/memory` の some)は、CPU ごとの停止時間をその CPU の稼働時間で重み付けして平均した「ホスト全体として失った生産時間」で、約 2 秒ごとにまとめて更新される。1 つのプロセスだけが止まり、ほかの CPU が動いているときは PSI のほうが小さく出る。
+## Reclaim stall vs. PSI
 
-hal での実測(cgroup 上限 32MB の中で 4 つの dd が別々のファイルを読む): eBPF 約 11.5 ms/秒、PSI some 約 3〜5 ms/秒。
+`memstall` adds up the time each thread actually spent stalled in reclaim. PSI (`some` in `/proc/pressure/memory`) weights each CPU's stall time by that CPU's non-idle time and averages them — "productive time lost by the machine" — and is aggregated roughly every 2 seconds. When a single process stalls while other CPUs keep working, PSI comes out smaller.
 
-検証用 VM(メモリ 1GB、2 vCPU)で VM 全体を使い切ったとき: 5 秒間で eBPF 127.8 ms、PSI some 134.7 ms とほぼ一致した。CPU が少なく、ほぼ全員が止まっていると重み付けで薄まらない。止まったのはメモリを確保していた python3 だけでなく、systemd-journal、rsyslogd、エージェント自身(最大 9 ms)にも及んだ。最後は OOM kill(`memcg=false`、VM 全体の 244,727 ページ)。
+- Test machine (four `dd` processes, each reading its own file inside a 32 MB cgroup): eBPF about 11.5 ms/s, PSI some about 3–5 ms/s.
+- Test VM (1 GB, 2 vCPUs, memory exhausted): over 5 seconds eBPF 127.8 ms and PSI some 134.7 ms — almost equal, because with few CPUs and nearly everyone stalled there is nothing to dilute the average. Besides the `python3` that was allocating, `systemd-journal`, `rsyslogd` and the agent itself (up to 9 ms) stalled too. It ended with an OOM kill (`memcg=false`, all 244,727 pages of the VM).
 
-## 検証用 VM
+## Test VM
 
-ホスト全体のメモリ不足(direct reclaim)や OOM は、コンテナ(cgroup)では起こせない。cgroup の上限に当たって起きるのは memcg reclaim だけで、direct reclaim はホスト全体の空きが下限を割ったときに起きる。hal を汚さずに起こすため、libvirt / KVM の小さな VM を使う。
+A machine-wide memory shortage (direct reclaim) or a global OOM cannot be triggered from a container: hitting a cgroup limit only causes memcg reclaim, while direct reclaim happens when free memory of the whole machine drops below the watermark. A small libvirt / KVM VM lets you trigger it without disturbing the host.
 
 ```bash
-sh lab/create-vm.sh          # 作成して起動(既にあれば起動)。Ubuntu 26.04 クラウドイメージ、メモリ 1GB、スワップ無し
-sh lab/create-vm.sh push     # bin/ebpflens-agent を VM にコピー
-sh lab/create-vm.sh ssh      # VM に入る
-virsh -c qemu:///system shutdown ebpflens-lab   # 止める(ディスクは /mnt/data/vms/ebpflens-lab に残る)
+sh lab/create-vm.sh          # create and start (or just start). Ubuntu 26.04 cloud image, 1 GB RAM, no swap
+sh lab/create-vm.sh push     # copy bin/ebpflens-agent into the VM
+sh lab/create-vm.sh ssh      # log in
+virsh -c qemu:///system shutdown ebpflens-lab   # stop (the disk is kept)
 ```
 
-VM のカーネルは 7.0.0-31、hal は 7.0.0-34。hal でビルドしたエージェントがそのまま動く(CO-RE)。
+VM files go to `/var/lib/libvirt/images/ebpflens-lab` unless `LAB_DIR` is set. The VM ran kernel 7.0.0-31 while the host ran 7.0.0-34, and the agent built on the host ran unchanged in the VM (CO-RE).
 
-## 実験環境
+## Test machine
 
-- hal: Ubuntu 26.04.1、カーネル 7.0.0-34-generic、8 コア、RTX 2070
+- Ubuntu 26.04.1, kernel 7.0.0-34-generic, 8 cores, 30 GB RAM, RTX 2070
+
+## Further reading
+
+- Blog post (Japanese): [平均値の裏を覗く — eBPFとは何か、Zabbixと比べて何が見えるのか](https://pocraft.net/2026/09/26/ebpf-intro-vs-zabbix/)
+
+## License
+
+[Apache License 2.0](LICENSE). The BPF programs under `internal/probe/*/*.bpf.c` are dual-licensed BSD/GPL, as required to use GPL-only kernel helpers.

@@ -1,5 +1,5 @@
-// Package store はサンプルとイベントをメモリ上に保持し、新着を購読者に配る。
-// 永続化は Persister に任せる(今は SQLite。大きくなったら PostgreSQL に差し替える)。
+// Package store keeps samples and events in memory and delivers new data to subscribers.
+// Persistence is delegated to a Persister (SQLite for now; swap in PostgreSQL once it grows).
 package store
 
 import (
@@ -12,20 +12,20 @@ import (
 
 type key struct{ host, probe string }
 
-// Message は購読者に配る新着。Name は SSE の event 名になる("sample" / "events")。
+// Message is new data delivered to subscribers. Name becomes the SSE event name ("sample" / "events").
 type Message struct {
 	Name string
 	Data any
 }
 
-// Persister は保存先。Store はこの形にだけ依存する。受信を止めないよう、実装側は非同期で書くこと。
+// Persister is the storage backend. Store depends only on this interface. Implementations must write asynchronously so ingestion is never blocked.
 type Persister interface {
 	SaveSample(model.Sample)
 	SaveEvents(model.EventBatch)
 }
 
-// Store はホスト×プローブごとに直近 keep 件のサンプルと、ホストごとに直近 keepEvents 件のイベントを持つ。
-// メモリ上の分は画面用の直近の窓で、長く残す分は Persister が持つ。
+// Store holds the latest keep samples per host × probe and the latest keepEvents events per host.
+// The in-memory data is the recent window for the UI; the Persister holds what is kept longer.
 type Store struct {
 	persist    Persister
 	mu         sync.RWMutex
@@ -34,7 +34,7 @@ type Store struct {
 	series     map[key][]model.Sample
 	events     map[string][]model.ProcEvent
 	lastSeen   map[string]time.Time
-	subs       map[chan Message]string // 購読チャネル -> 絞り込むホスト("" なら全部)
+	subs       map[chan Message]string // subscriber channel -> host filter ("" means all hosts)
 }
 
 func New(keep, keepEvents int) *Store {
@@ -48,14 +48,14 @@ func New(keep, keepEvents int) *Store {
 	}
 }
 
-// SetPersister は保存先を設定する。LoadInto で履歴を戻した後に呼ぶ(戻した分を書き直さないため)。
+// SetPersister sets the storage backend. Call it after restoring history with LoadInto (so the restored data is not written again).
 func (s *Store) SetPersister(p Persister) {
 	s.mu.Lock()
 	s.persist = p
 	s.mu.Unlock()
 }
 
-// Add はサンプルを追加し、保存して、購読者に配る。
+// Add adds a sample, persists it, and delivers it to subscribers.
 func (s *Store) Add(x model.Sample) { s.add(x, true) }
 
 func (s *Store) add(x model.Sample, save bool) {
@@ -77,7 +77,7 @@ func (s *Store) add(x model.Sample, save bool) {
 	s.publish(x.Host, Message{"sample", x})
 }
 
-// AddEvents はイベントを追加し、保存して、購読者にまとめて配る。
+// AddEvents adds events, persists them, and delivers them to subscribers as one batch.
 func (s *Store) AddEvents(b model.EventBatch) { s.addEvents(b, true) }
 
 func (s *Store) addEvents(b model.EventBatch, save bool) {
@@ -95,14 +95,14 @@ func (s *Store) addEvents(b model.EventBatch, save bool) {
 	s.publish(b.Host, Message{"events", b})
 }
 
-// Events は保持しているイベントのコピーを古い順に返す。
+// Events returns a copy of the stored events, oldest first.
 func (s *Store) Events(host string) []model.ProcEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return orEmpty(slices.Clone(s.events[host]))
 }
 
-// publish は購読者に配る。詰まっている購読者には送らない(取りこぼしを許す)。呼び出し側でロックを持つ
+// publish delivers to subscribers. Subscribers that are backed up are skipped (dropping is allowed). The caller must hold the lock
 func (s *Store) publish(host string, m Message) {
 	for ch, h := range s.subs {
 		if h != "" && h != host {
@@ -115,14 +115,14 @@ func (s *Store) publish(host string, m Message) {
 	}
 }
 
-// Samples は保持している履歴のコピーを古い順に返す。
+// Samples returns a copy of the stored history, oldest first.
 func (s *Store) Samples(host, probe string) []model.Sample {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return orEmpty(slices.Clone(s.series[key{host, probe}]))
 }
 
-// Hosts はホスト名順の一覧を返す。
+// Hosts returns the list of hosts sorted by name.
 func (s *Store) Hosts() []model.HostInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -149,7 +149,7 @@ func (s *Store) Hosts() []model.HostInfo {
 	return out
 }
 
-// Subscribe は新着サンプルを受け取るチャネルと、購読をやめる関数を返す。
+// Subscribe returns a channel that receives new samples and a function that cancels the subscription.
 func (s *Store) Subscribe(host string) (<-chan Message, func()) {
 	ch := make(chan Message, 64)
 	s.mu.Lock()
@@ -162,7 +162,7 @@ func (s *Store) Subscribe(host string) (<-chan Message, func()) {
 	}
 }
 
-// orEmpty は nil を空スライスにする(JSON で null ではなく [] を返すため)。
+// orEmpty turns nil into an empty slice (so JSON returns [] instead of null).
 func orEmpty[T any](xs []T) []T {
 	if xs == nil {
 		return []T{}

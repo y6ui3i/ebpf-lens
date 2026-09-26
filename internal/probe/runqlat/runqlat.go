@@ -1,5 +1,5 @@
-// Package runqlat は run queue レイテンシ(起床から CPU に載るまで)の
-// log2 ヒストグラムを eBPF で集める。
+// Package runqlat collects a log2 histogram of run queue latency
+// (from wakeup until the task gets on a CPU) with eBPF.
 package runqlat
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -cc clang -cflags "-O2 -g -Wall" -target amd64 runqlat runqlat.bpf.c -- -I../../../bpf/headers
@@ -15,18 +15,18 @@ import (
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe"
 )
 
-// MaxSlots は BPF 側の MAX_SLOTS と揃える。
-// slot i は [2^i, 2^(i+1)) マイクロ秒(slot 0 のみ 0〜1µs)。
+// MaxSlots must match MAX_SLOTS on the BPF side.
+// Slot i is [2^i, 2^(i+1)) microseconds (slot 0 alone is 0-1µs).
 const MaxSlots = 27
 
-// Probe は読み込み済みの BPF オブジェクトとアタッチ済みリンクを持つ。
+// Probe holds the loaded BPF objects and the attached links.
 type Probe struct {
 	objs  runqlatObjects
 	links []link.Link
 	prev  [MaxSlots]uint64
 }
 
-// Open は BPF プログラムを読み込み、sched 系 tracepoint にアタッチする。
+// Open loads the BPF programs and attaches them to the sched tracepoints.
 func Open() (*Probe, error) {
 	p := &Probe{}
 	if err := loadRunqlatObjects(&p.objs, nil); err != nil {
@@ -47,8 +47,8 @@ func Open() (*Probe, error) {
 	return p, nil
 }
 
-// Delta は前回呼び出しから今回までに増えた件数を slot ごとに返す。
-// BPF 側は累積で数えているので、差分はユーザー空間で取る。
+// Delta returns, per slot, how many counts were added since the previous call.
+// The BPF side counts cumulatively, so the delta is taken in user space.
 func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 	var out [MaxSlots]uint64
 	for slot := uint32(0); slot < MaxSlots; slot++ {
@@ -66,8 +66,8 @@ func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 	return out, nil
 }
 
-// Procs はプロセス別の集計を読み出して BPF マップから消し、名前ごとにまとめて返す。
-// 読んでから消すまでの間に積まれた分は失われるが、1 区間に対してごく僅か。
+// Procs reads the per-process aggregates, deletes them from the BPF map, and returns them merged by name.
+// Anything added between the read and the delete is lost, but that is tiny relative to one interval.
 func (p *Probe) Procs() ([]model.ProcStat, error) {
 	var (
 		key  runqlatProcKey
@@ -100,7 +100,7 @@ func (p *Probe) Procs() ([]model.ProcStat, error) {
 		return nil, fmt.Errorf("iterate procs: %w", err)
 	}
 	for i := range keys {
-		// 途中で終了したプロセスなどで既に無いことがあるので、エラーは無視する
+		// Entries may already be gone (e.g. the process exited in the meantime), so ignore errors
 		_ = p.objs.Procs.Delete(&keys[i])
 	}
 
@@ -113,7 +113,7 @@ func (p *Probe) Procs() ([]model.ProcStat, error) {
 
 const maxPids = 5
 
-// Close はリンクを外して BPF オブジェクトを解放する。
+// Close detaches the links and releases the BPF objects.
 func (p *Probe) Close() error {
 	var errs []error
 	for _, l := range p.links {

@@ -9,6 +9,7 @@ export const ROUTES: Route[] = [
   { path: "/all", label: "すべてのパネル" },
   { path: "/cpu", label: "CPU実行待ち時間" },
   { path: "/processes", label: "プロセスの起動と終了" },
+  { path: "/memory", label: "メモリ" },
 ];
 
 const subscribe = (cb: () => void) => {

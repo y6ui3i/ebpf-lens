@@ -13,10 +13,15 @@ import { UseMatrix } from "./components/UseMatrix";
 import { ImpactPanel } from "./components/ImpactPanel";
 import { CpuLatencyCard } from "./components/CpuLatencyCard";
 import { LifecyclePanel } from "./components/LifecyclePanel";
+import { MemoryPanel } from "./components/MemoryPanel";
+import { currentMem } from "./lib/memory";
+import type { Sample } from "./types/model";
 
 const WINDOW = 300; // 直近 5 分(1 秒 1 列)
+const PROBES = ["runqlat", "memstall"] as const;
+const EMPTY: Sample[] = [];
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
-const worst = (a: Level, b: Level) => (RANK[a] >= RANK[b] ? a : b);
+const worst = (...xs: Level[]) => xs.reduce((a, b) => (RANK[a] >= RANK[b] ? a : b), "ok");
 
 export default function App() {
   const path = usePath();
@@ -32,11 +37,16 @@ export default function App() {
   const [picked, setPicked] = useState<string>();
   const host = picked ?? hosts.data?.[0]?.name;
   // 受信は画面の外側で続ける。画面を切り替えてもライブ表示が途切れない
-  const { samples, events, dropped, status } = useLiveHost(host, "runqlat", WINDOW);
+  const { samples: byProbe, events, dropped, status } = useLiveHost(host, PROBES, WINDOW);
+  const samples = byProbe.runqlat ?? EMPTY;
+  const memSamples = byProbe.memstall ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
+  // 表示範囲は CPU のサンプルに合わせ、メモリの画面も同じ 5 分を使う
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
   const cpuLevel = current(samples).level;
-  const levels = { "/": worst(cpuLevel, life.level), "/all": worst(cpuLevel, life.level), "/cpu": cpuLevel, "/processes": life.level };
+  const memLevel = currentMem(memSamples).level;
+  const overall = worst(cpuLevel, memLevel, life.level);
+  const levels = { "/": overall, "/all": overall, "/cpu": cpuLevel, "/processes": life.level, "/memory": memLevel };
   const title = ROUTES.find((r) => r.path === path)?.label ?? "";
 
   return (
@@ -100,16 +110,21 @@ export default function App() {
             <PanelSection id="impact" title="原因と影響">
               <ImpactPanel samples={samples} />
             </PanelSection>
+            <PanelSection id="memory" title="メモリ">
+              <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} />
+            </PanelSection>
             <PanelSection id="processes" title="プロセスの起動と終了">
               <LifecyclePanel events={events} life={life} dropped={dropped} />
             </PanelSection>
           </AllPanels>
+        ) : path === "/memory" ? (
+          <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} />
         ) : path === "/processes" ? (
           <LifecyclePanel events={events} life={life} dropped={dropped} />
         ) : (
           <>
-            <LensSummary samples={samples} life={life} />
-            <UseMatrix samples={samples} events={events} life={life} win={win} />
+            <LensSummary samples={samples} memSamples={memSamples} life={life} />
+            <UseMatrix samples={samples} memSamples={memSamples} events={events} life={life} win={win} />
           </>
         )}
       </main>
@@ -131,6 +146,7 @@ function AllPanels({ children }: { children: React.ReactNode }) {
 const SECTIONS = [
   { id: "cpu", title: "CPU実行待ち時間" },
   { id: "impact", title: "原因と影響" },
+  { id: "memory", title: "メモリ" },
   { id: "processes", title: "プロセスの起動と終了" },
 ];
 

@@ -6,10 +6,12 @@ export type StreamStatus = "connecting" | "live" | "reconnecting";
 const EVENT_WINDOW_MS = 5 * 60 * 1000;
 const MAX_EVENTS = 20000;
 
-// 1 本の SSE でサンプルとイベントの新着を受け、履歴と合わせて保持する。
-// 取りこぼしを防ぐため、履歴の取得より先に SSE を開く。
-export function useLiveHost(host: string | undefined, probe: string, limit: number) {
-  const [samples, setSamples] = useState<Sample[]>([]);
+type ByProbe = Record<string, Sample[]>;
+
+// 1 本の SSE でサンプル(プローブごと)とイベントの新着を受け、履歴と合わせて保持する。
+// 取りこぼしを防ぐため、履歴の取得より先に SSE を開く。probes は呼び出し側で固定の配列を渡すこと
+export function useLiveHost(host: string | undefined, probes: readonly string[], limit: number) {
+  const [samples, setSamples] = useState<ByProbe>({});
   const [events, setEvents] = useState<ProcEvent[]>([]);
   const [dropped, setDropped] = useState(0);
   const [status, setStatus] = useState<StreamStatus>("connecting");
@@ -17,7 +19,7 @@ export function useLiveHost(host: string | undefined, probe: string, limit: numb
   useEffect(() => {
     if (!host) return;
     let cancelled = false;
-    setSamples([]);
+    setSamples({});
     setEvents([]);
     setDropped(0);
     setStatus("connecting");
@@ -27,8 +29,8 @@ export function useLiveHost(host: string | undefined, probe: string, limit: numb
     es.onerror = () => setStatus("reconnecting"); // EventSource は自動で再接続する
     es.addEventListener("sample", (ev) => {
       const s = JSON.parse((ev as MessageEvent<string>).data) as Sample;
-      if (s.probe !== probe) return;
-      setSamples((prev) => [...prev, s].slice(-limit));
+      if (!probes.includes(s.probe)) return;
+      setSamples((prev) => ({ ...prev, [s.probe]: [...(prev[s.probe] ?? []), s].slice(-limit) }));
     });
     es.addEventListener("events", (ev) => {
       const b = JSON.parse((ev as MessageEvent<string>).data) as EventBatch;
@@ -37,14 +39,19 @@ export function useLiveHost(host: string | undefined, probe: string, limit: numb
     });
 
     const q = `host=${encodeURIComponent(host)}`;
-    fetch(`/api/samples?${q}&probe=${encodeURIComponent(probe)}`)
-      .then((r) => r.json() as Promise<Sample[] | null>)
-      .then((h) => {
-        const history = h ?? [];
-        if (cancelled) return;
-        setSamples((live) => [...history, ...newerThan(live, history.at(-1)?.time)].slice(-limit));
-      })
-      .catch(() => {});
+    for (const probe of probes) {
+      fetch(`/api/samples?${q}&probe=${encodeURIComponent(probe)}`)
+        .then((r) => r.json() as Promise<Sample[] | null>)
+        .then((h) => {
+          const history = h ?? [];
+          if (cancelled) return;
+          setSamples((live) => ({
+            ...live,
+            [probe]: [...history, ...newerThan(live[probe] ?? [], history.at(-1)?.time)].slice(-limit),
+          }));
+        })
+        .catch(() => {});
+    }
     fetch(`/api/events?${q}`)
       .then((r) => r.json() as Promise<ProcEvent[] | null>)
       .then((h) => {
@@ -58,7 +65,7 @@ export function useLiveHost(host: string | undefined, probe: string, limit: numb
       cancelled = true;
       es.close();
     };
-  }, [host, probe, limit]);
+  }, [host, probes, limit]);
 
   return { samples, events, dropped, status };
 }

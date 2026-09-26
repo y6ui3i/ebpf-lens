@@ -20,7 +20,7 @@ const GROUPS: Group[] = [
     items: [
       { path: "/cpu", label: "CPU実行待ち時間" },
       { path: "/processes", label: "プロセスの起動と終了" },
-      { label: "メモリ" },
+      { path: "/memory", label: "メモリ" },
       { label: "ディスク" },
       { label: "ネットワーク" },
       { label: "GPU" },

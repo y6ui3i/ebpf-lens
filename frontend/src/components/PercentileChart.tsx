@@ -114,6 +114,8 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
               ctx.globalAlpha = 1;
               ctx.fillStyle = cssVar("--text-muted");
               ctx.font = `${10 * devicePixelRatio}px system-ui, sans-serif`;
+              // uPlot は y 軸の目盛りを右揃えで描いた状態のまま hook を呼ぶので、左揃えに戻す
+              ctx.textAlign = "left";
               ctx.textBaseline = "bottom";
               ctx.fillText(b.label, left + 4 * devicePixelRatio, y0 - 2 * devicePixelRatio);
             }
@@ -127,6 +129,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
             ctx.save();
             ctx.font = `${11 * devicePixelRatio}px system-ui, sans-serif`;
             ctx.fillStyle = cssVar("--text-secondary");
+            ctx.textAlign = "left";
             ctx.textBaseline = "middle";
             SERIES.forEach((s, i) => {
               const ys = u.data[i + 1];

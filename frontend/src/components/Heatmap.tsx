@@ -23,12 +23,18 @@ type Props = {
   schemeKey: string;
   hoverMs: number | null; // もう片方のグラフと共有するカーソル時刻
   onHover: (ms: number | null) => void;
+  ariaLabel?: string;
+  yCaption?: string; // 凡例の「縦軸」の説明
 };
 
 const rowCount = (s: Sample, row: number) =>
   row < TOP ? (s.slots[row] ?? 0) : s.slots.slice(TOP).reduce((a, b) => a + b, 0);
 
-export function Heatmap({ samples, win, schemeKey, hoverMs, onHover }: Props) {
+export function Heatmap({
+  samples, win, schemeKey, hoverMs, onHover,
+  ariaLabel = "CPU実行待ち時間のヒートマップ。横軸が時刻、縦軸が待ち時間、色が回数",
+  yCaption = "CPUを待った時間(上ほど長い)",
+}: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
@@ -136,7 +142,7 @@ export function Heatmap({ samples, win, schemeKey, hoverMs, onHover }: Props) {
           onHover(null);
         }}
         role="img"
-        aria-label="CPU実行待ち時間のヒートマップ。横軸が時刻、縦軸が待ち時間、色が回数"
+        aria-label={ariaLabel}
       />
       {cursorX != null && (
         <div
@@ -164,13 +170,13 @@ export function Heatmap({ samples, win, schemeKey, hoverMs, onHover }: Props) {
           </div>
         </div>
       )}
-      <HeatLegend schemeKey={schemeKey} />
+      <HeatLegend schemeKey={schemeKey} yCaption={yCaption} />
     </div>
   );
 }
 
 // 軸と色の意味をそのまま書く。runqlat を知らない人が読めることを優先する
-function HeatLegend({ schemeKey }: { schemeKey: string }) {
+function HeatLegend({ schemeKey, yCaption }: { schemeKey: string; yCaption: string }) {
   const stops = Array.from({ length: HEAT_STEPS }, (_, i) => `var(--heat-${i})`).join(", ");
   const more = schemeKey === "dark" ? "明るいほど多い" : "濃いほど多い";
   return (
@@ -179,7 +185,7 @@ function HeatLegend({ schemeKey }: { schemeKey: string }) {
       style={{ color: "var(--text-secondary)", paddingLeft: MARGIN.left }}
     >
       <div><dt className="inline" style={{ color: "var(--text-muted)" }}>横軸 </dt><dd className="inline">いつ発生したか</dd></div>
-      <div><dt className="inline" style={{ color: "var(--text-muted)" }}>縦軸 </dt><dd className="inline">CPUを待った時間(上ほど長い)</dd></div>
+      <div><dt className="inline" style={{ color: "var(--text-muted)" }}>縦軸 </dt><dd className="inline">{yCaption}</dd></div>
       <div className="flex items-center gap-2">
         <dt style={{ color: "var(--text-muted)" }}>色</dt>
         <dd className="flex items-center gap-2">

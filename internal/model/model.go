@@ -16,6 +16,17 @@ type Sample struct {
 	CPUs       int        `json:"cpus"`       // CPU 使用率の分母に使う
 	BusyNs     uint64     `json:"busyNs"`     // 全プロセスの CPU 使用時間の合計(eBPF で計測。idle は含まない)
 	Procs      []ProcStat `json:"procs,omitempty"`
+	Mem        *MemStat   `json:"mem,omitempty"` // memstall のみ
+}
+
+// MemStat は memstall のサンプルに付けるメモリの状況。
+// StallNs が eBPF の計測値(主役)、使用量と PSI は /proc からの答え合わせ。
+type MemStat struct {
+	TotalBytes     uint64 `json:"totalBytes"`
+	AvailableBytes uint64 `json:"availableBytes"`
+	StallNs        uint64 `json:"stallNs"`   // 区間内に全プロセスが回収で止まった時間の合計(eBPF)
+	PsiSomeUs      uint64 `json:"psiSomeUs"` // 区間内の PSI memory some の増分(1 つ以上のタスクが止まっていた時間)
+	PsiFullUs      uint64 `json:"psiFullUs"` // 区間内の PSI memory full の増分(全タスクが止まっていた時間)
 }
 
 // ProcEvent はプロセスの起動・終了・OOM kill の 1 件。
@@ -59,6 +70,9 @@ type ProcStat struct {
 	WaitNs    uint64   `json:"waitNs"`
 	WaitMaxNs uint64   `json:"waitMaxNs"`
 	Slots     []uint64 `json:"slots"` // 待ち時間の log2 ヒストグラム(µs)
+	// memstall のみ。memstall では Wait* を「メモリ回収で止まった」の意味で使う
+	ReclaimedPages uint64 `json:"reclaimedPages,omitempty"`
+	MemcgCount     uint64 `json:"memcgCount,omitempty"` // うち cgroup の上限による回収の回数
 }
 
 // HostInfo はサーバーが把握しているホストの一覧に使う。

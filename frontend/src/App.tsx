@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { HostInfo } from "./types/model";
-import { useLiveSamples, type StreamStatus } from "./lib/useLiveSamples";
+import { useLiveHost, type StreamStatus } from "./lib/useLiveHost";
+import { analyze } from "./lib/lifecycle";
+import { LifecyclePanel } from "./components/LifecyclePanel";
 import { useColorSchemeKey } from "./lib/theme";
 import { formatUs, percentile, total } from "./lib/hist";
 import { Heatmap } from "./components/Heatmap";
@@ -22,7 +24,8 @@ export default function App() {
   });
   const [picked, setPicked] = useState<string>();
   const host = picked ?? hosts.data?.[0]?.name;
-  const { samples, status } = useLiveSamples(host, "runqlat", WINDOW);
+  const { samples, events, dropped, status } = useLiveHost(host, "runqlat", WINDOW);
+  const life = useMemo(() => analyze(events), [events]);
   const latest = samples.at(-1);
   const [showTable, setShowTable] = useState(false);
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
@@ -53,7 +56,7 @@ export default function App() {
         </p>
       ) : (
         <>
-        <LensSummary samples={samples} />
+        <LensSummary samples={samples} life={life} />
         <ImpactPanel samples={samples} />
         <section
           className="rounded-xl p-5"
@@ -107,6 +110,7 @@ export default function App() {
           </button>
           {showTable && <div className="mt-3 max-w-md"><HistogramTable sample={latest} /></div>}
         </section>
+        <LifecyclePanel events={events} life={life} dropped={dropped} />
         </>
       )}
     </div>

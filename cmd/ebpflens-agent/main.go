@@ -1,4 +1,4 @@
-// ebpflens-agent は eBPF プローブの値を一定間隔で集め、ebpflens-server に送る
+// ebpflens-agent は eBPF プローブの値とイベントを一定間隔で集め、ebpflens-server に送る
 // (-server 未指定なら JSON Lines として標準出力に書く)。
 package main
 
@@ -14,10 +14,12 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
 )
 
@@ -46,6 +48,20 @@ func main() {
 	}
 	defer p.Close()
 
+	pl, err := proclife.Open()
+	if err != nil {
+		log.Fatalf("proclife: %v", err)
+	}
+	defer pl.Close()
+	// ring buffer の読み出しは別 goroutine で回し、区間ごとにまとめて送る
+	events := make(chan model.ProcEvent, eventBuffer)
+	var agentDrops atomic.Uint64
+	go func() {
+		if err := pl.Run(events, func() { agentDrops.Add(1) }); err != nil {
+			log.Fatalf("proclife: %v", err)
+		}
+	}()
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	tick := time.NewTicker(*interval)
@@ -62,32 +78,89 @@ func main() {
 			if err != nil {
 				log.Fatalf("runqlat: %v", err)
 			}
-			procs, err := p.Procs()
+			all, err := p.Procs()
 			if err != nil {
 				log.Fatalf("runqlat: %v", err)
 			}
-			procs = topProcs(procs, *topN)
+			var busy uint64
+			for _, s := range all {
+				busy += s.OnCPUNs
+			}
+			procs := topProcs(all, *topN)
+
+			batch := model.EventBatch{Host: host, Time: now, Events: drain(events, maxEventsPerBatch)}
+			kdrop, err := pl.DroppedDelta()
+			if err != nil {
+				log.Printf("proclife dropped: %v", err)
+			}
+			batch.Dropped = kdrop + agentDrops.Swap(0)
+
 			if *text {
 				printText(now, slots)
 				printProcs(procs)
+				printEvents(batch)
 				continue
 			}
 			x := model.Sample{
 				Host: host, Time: now, Probe: "runqlat", Unit: "usecs", Slots: slots[:],
-				IntervalMs: now.Sub(prev).Milliseconds(), CPUs: runtime.NumCPU(), Procs: procs,
+				IntervalMs: now.Sub(prev).Milliseconds(), CPUs: runtime.NumCPU(), BusyNs: busy, Procs: procs,
 			}
 			prev = now
 			if *serverURL != "" {
-				// サーバーが落ちていても収集は続ける。その区間のサンプルは捨てる
-				if err := send(client, *serverURL, x); err != nil {
-					log.Printf("send: %v", err)
+				// サーバーが落ちていても収集は続ける。その区間のデータは捨てる
+				if err := send(client, *serverURL, "/api/ingest", x); err != nil {
+					log.Printf("send sample: %v", err)
+				}
+				if len(batch.Events) > 0 || batch.Dropped > 0 {
+					if err := send(client, *serverURL, "/api/events", batch); err != nil {
+						log.Printf("send events: %v", err)
+					}
 				}
 				continue
 			}
 			if err := enc.Encode(x); err != nil {
 				log.Fatal(err)
 			}
+			if len(batch.Events) > 0 {
+				if err := enc.Encode(batch); err != nil {
+					log.Fatal(err)
+				}
+			}
 		}
+	}
+}
+
+const (
+	eventBuffer       = 16384
+	maxEventsPerBatch = 2000 // これを超えた分は次の区間に回る
+)
+
+func drain(ch <-chan model.ProcEvent, max int) []model.ProcEvent {
+	out := []model.ProcEvent{}
+	for len(out) < max {
+		select {
+		case e := <-ch:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+	return out
+}
+
+func printEvents(b model.EventBatch) {
+	for _, e := range b.Events {
+		switch e.Kind {
+		case "exec":
+			fmt.Printf("exec %-7d %-16s %s\n", e.Pid, e.Comm, e.Filename)
+		case "exit":
+			fmt.Printf("exit %-7d %-16s status=%d signal=%d core=%v life=%s\n", e.Pid, e.Comm, e.ExitStatus, e.Signal, e.CoreDump, time.Duration(e.LifetimeNs))
+		case "oom":
+			fmt.Printf("oom  %-7d %-16s trigger=%s(%d) memcg=%v pages=%d\n", e.Pid, e.Comm, e.TriggerComm, e.TriggerPid, e.Memcg, e.TotalPages)
+		}
+	}
+	if b.Dropped > 0 {
+		fmt.Printf("dropped %d events\n", b.Dropped)
 	}
 }
 
@@ -129,12 +202,12 @@ func printProcs(procs []model.ProcStat) {
 	}
 }
 
-func send(client *http.Client, serverURL string, x model.Sample) error {
-	b, err := json.Marshal(x)
+func send(client *http.Client, serverURL, path string, v any) error {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Post(strings.TrimRight(serverURL, "/")+"/api/ingest", "application/json", bytes.NewReader(b))
+	resp, err := client.Post(strings.TrimRight(serverURL, "/")+path, "application/json", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}

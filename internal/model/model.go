@@ -14,7 +14,38 @@ type Sample struct {
 	Slots      []uint64   `json:"slots"`
 	IntervalMs int64      `json:"intervalMs"` // 集計区間の長さ
 	CPUs       int        `json:"cpus"`       // CPU 使用率の分母に使う
+	BusyNs     uint64     `json:"busyNs"`     // 全プロセスの CPU 使用時間の合計(eBPF で計測。idle は含まない)
 	Procs      []ProcStat `json:"procs,omitempty"`
+}
+
+// ProcEvent はプロセスの起動・終了・OOM kill の 1 件。
+type ProcEvent struct {
+	Time time.Time `json:"time"`
+	Kind string    `json:"kind"` // "exec" | "exit" | "oom"
+	Pid  uint32    `json:"pid"`
+	Ppid uint32    `json:"ppid"`
+	UID  uint32    `json:"uid"`
+	Comm string    `json:"comm"`
+	// exec
+	Filename string `json:"filename,omitempty"`
+	// exit
+	ExitStatus int    `json:"exitStatus"` // 正常終了時の終了コード
+	Signal     int    `json:"signal"`     // シグナルで終了したときのシグナル番号(0 なら正常終了)
+	CoreDump   bool   `json:"coreDump"`
+	LifetimeNs uint64 `json:"lifetimeNs"`
+	// oom(Pid/Comm は強制終了されたプロセス)
+	TriggerPid  uint32 `json:"triggerPid,omitempty"`
+	TriggerComm string `json:"triggerComm,omitempty"`
+	TotalPages  uint64 `json:"totalPages,omitempty"`
+	Memcg       bool   `json:"memcg"` // cgroup のメモリ上限による OOM
+}
+
+// EventBatch はエージェントが 1 区間ごとにまとめて送るイベント。
+type EventBatch struct {
+	Host    string      `json:"host"`
+	Time    time.Time   `json:"time"`
+	Events  []ProcEvent `json:"events"`
+	Dropped uint64      `json:"dropped"` // 溢れて捨てた件数(カーネル側 + エージェント側)
 }
 
 // ProcStat は 1 区間ぶんのプロセス別集計。同じ名前のプロセスはまとめる。

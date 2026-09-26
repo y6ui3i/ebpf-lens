@@ -14,20 +14,26 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 ```
 
 - **エージェント**: Go + [cilium/ebpf](https://github.com/cilium/ebpf)(CO-RE)。監視対象にはカーネル BTF だけあればよく、単一バイナリで配れる
-- **サーバー**: Go。今はメモリ保持(ホスト×プローブごとに直近 900 件)。保存(SQLite)とトリガーは後で足す
+  - `runqlat`: CPU 実行待ち時間のヒストグラムと、プロセス別の CPU 使用・待ち
+  - `proclife`: exec / exit / OOM kill のイベント(ring buffer)。コマンドライン引数はパスワードを含みうるので取らない
+- **サーバー**: Go。今はメモリ保持(ホスト×プローブごとに直近 900 件、イベントはホストごとに直近 20000 件)。保存(SQLite)とトリガーは後で足す
 - **フロント**: React + Vite + TypeScript の SPA。TanStack Query、Tailwind、uPlot、ヒートマップは canvas 自前描画。型は tygo で Go から生成
 - **概念**: Zabbix に倣ってホスト / アイテム / トリガー / イベント
 
 ## ロードマップ
 
+方針: **GPU 以外は eBPF を主役にする。** /proc や PSI は答え合わせに使う。
+
 1. ✅ runqlat を Go で動かし、ヒストグラムを JSON で出す
 2. ✅ サーバー + フロント。CPU実行待ち時間のヒートマップ、しきい値の帯、Lens Summary、直近の出来事
 3. ✅ 原因と影響: プロセス単位の CPU 待ち(誰が待たされたか)と CPU 占有(誰が使っていたか)
-4. /proc メトリクスと execsnoop / oomkill のイベントログ
-5. トリガーをサーバー側へ移し、通知する。しきい値を設定可能にする
-6. GPU の基本メトリクス(NVML): 使用率・VRAM・温度・電力、プロセスごとの VRAM
-7. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」(CPU 待ち / 転送待ち)を出す
-8. 他のプローブ: biolatency / tcpconnect / tcpretrans
+4. ✅ プロセスのライフサイクル: exec / exit(終了コード・シグナル・寿命)/ OOM kill。CPU 使用率も eBPF の計測値から出す
+5. 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ
+6. メモリの詰まり: direct reclaim で止まった時間をプロセス別に(PSI で答え合わせ)
+7. トリガーと通知: 判定をサーバー側へ移す。材料はすべて eBPF 由来
+8. GPU の基本メトリクス(NVML、例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
+9. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
+10. ディスクとネットワーク: biolatency / tcpconnect / tcpretrans
 
 ## ビルドと実行
 

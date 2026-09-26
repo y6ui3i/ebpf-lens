@@ -28,7 +28,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 2. ✅ サーバー + フロント。CPU実行待ち時間のヒートマップ、しきい値の帯、Lens Summary、直近の出来事
 3. ✅ 原因と影響: プロセス単位の CPU 待ち(誰が待たされたか)と CPU 占有(誰が使っていたか)
 4. ✅ プロセスのライフサイクル: exec / exit(終了コード・シグナル・寿命)/ OOM kill。CPU 使用率も eBPF の計測値から出す
-5. 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ
+5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
 6. メモリの詰まり: direct reclaim で止まった時間をプロセス別に(PSI で答え合わせ)
 7. トリガーと通知: 判定をサーバー側へ移す。材料はすべて eBPF 由来
 8. GPU の基本メトリクス(NVML、例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM

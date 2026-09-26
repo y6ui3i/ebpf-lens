@@ -63,7 +63,7 @@ export function LensSummary({ samples, life }: { samples: Sample[]; life: Lifecy
       aria-live="polite"
     >
       <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Lens Summary</div>
-      <div className="flex items-center gap-2 text-lg font-semibold">
+      <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
         <span aria-hidden style={{ color: LEVEL_COLOR[overall] }}>{LEVEL_ICON[overall]}</span>
         <span>{LEVEL_LABEL[overall]}</span>
         <span style={{ color: "var(--text-secondary)" }}>·</span>
@@ -118,7 +118,7 @@ export function LensSummary({ samples, life }: { samples: Sample[]; life: Lifecy
 // 領域ごとの所見。アイコンとラベルで判定を示し、色だけに頼らない
 function Finding({ area, level, children }: { area: string; level: Level; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[5.5rem_1fr] gap-2">
+    <div className="grid gap-0.5 sm:grid-cols-[5.5rem_1fr] sm:gap-2">
       <dt className="flex items-start gap-1.5 font-semibold">
         <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]}</span>
         <span>{area}</span>

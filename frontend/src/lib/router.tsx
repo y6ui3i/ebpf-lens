@@ -6,6 +6,7 @@ export type Route = { path: string; label: string };
 
 export const ROUTES: Route[] = [
   { path: "/", label: "ダッシュボード" },
+  { path: "/all", label: "すべてのパネル" },
   { path: "/cpu", label: "CPU実行待ち時間" },
   { path: "/processes", label: "プロセスの起動と終了" },
 ];

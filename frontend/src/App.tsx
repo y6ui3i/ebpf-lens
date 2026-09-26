@@ -36,7 +36,7 @@ export default function App() {
   const life = useMemo(() => analyze(events), [events]);
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
   const cpuLevel = current(samples).level;
-  const levels = { "/": worst(cpuLevel, life.level), "/cpu": cpuLevel, "/processes": life.level };
+  const levels = { "/": worst(cpuLevel, life.level), "/all": worst(cpuLevel, life.level), "/cpu": cpuLevel, "/processes": life.level };
   const title = ROUTES.find((r) => r.path === path)?.label ?? "";
 
   return (
@@ -92,6 +92,18 @@ export default function App() {
             <CpuLatencyCard samples={samples} win={win} schemeKey={schemeKey} />
             <div className="mt-6"><ImpactPanel samples={samples} /></div>
           </>
+        ) : path === "/all" ? (
+          <AllPanels>
+            <PanelSection id="cpu" title="CPU実行待ち時間">
+              <CpuLatencyCard samples={samples} win={win} schemeKey={schemeKey} />
+            </PanelSection>
+            <PanelSection id="impact" title="原因と影響">
+              <ImpactPanel samples={samples} />
+            </PanelSection>
+            <PanelSection id="processes" title="プロセスの起動と終了">
+              <LifecyclePanel events={events} life={life} dropped={dropped} />
+            </PanelSection>
+          </AllPanels>
         ) : path === "/processes" ? (
           <LifecyclePanel events={events} life={life} dropped={dropped} />
         ) : (
@@ -102,6 +114,54 @@ export default function App() {
         )}
       </main>
     </div>
+  );
+}
+
+// 領域ごとの画面にあるパネルを、1 ページに全部並べる。
+// プローブを足したら、ここにも PanelSection を足す(ダッシュボードは概要のまま縦に伸ばさない)
+function AllPanels({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <JumpLinks />
+      <div className="space-y-6">{children}</div>
+    </>
+  );
+}
+
+const SECTIONS = [
+  { id: "cpu", title: "CPU実行待ち時間" },
+  { id: "impact", title: "原因と影響" },
+  { id: "processes", title: "プロセスの起動と終了" },
+];
+
+function PanelSection({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
+  return (
+    // 上部バー(高さ 48px)の下に隠れないように scroll-margin を取る
+    <section id={id} aria-label={title} className="scroll-mt-16">
+      {children}
+    </section>
+  );
+}
+
+// 長いページなので、先頭に各パネルへのジャンプリンクを置く
+function JumpLinks() {
+  return (
+    <nav aria-label="パネルへ移動" className="mb-4 flex flex-wrap gap-2 text-xs">
+      {SECTIONS.map((s) => (
+        <a
+          key={s.id}
+          href={`#${s.id}`}
+          className="rounded-md px-2 py-1 hover:bg-[var(--surface-1)]"
+          style={{ border: "1px solid var(--border)", color: "var(--text-secondary)" }}
+          onClick={(e) => {
+            e.preventDefault();
+            document.getElementById(s.id)?.scrollIntoView({ behavior: "smooth" });
+          }}
+        >
+          {s.title}
+        </a>
+      ))}
+    </nav>
   );
 }
 

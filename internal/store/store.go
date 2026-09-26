@@ -1,5 +1,5 @@
-// Package store はサンプルをメモリ上に保持し、新着を購読者に配る。
-// 永続化(SQLite)は後の PR で足す。
+// Package store はサンプルとイベントをメモリ上に保持し、新着を購読者に配る。
+// 永続化は Persister に任せる(今は SQLite。大きくなったら PostgreSQL に差し替える)。
 package store
 
 import (
@@ -18,8 +18,16 @@ type Message struct {
 	Data any
 }
 
+// Persister は保存先。Store はこの形にだけ依存する。受信を止めないよう、実装側は非同期で書くこと。
+type Persister interface {
+	SaveSample(model.Sample)
+	SaveEvents(model.EventBatch)
+}
+
 // Store はホスト×プローブごとに直近 keep 件のサンプルと、ホストごとに直近 keepEvents 件のイベントを持つ。
+// メモリ上の分は画面用の直近の窓で、長く残す分は Persister が持つ。
 type Store struct {
+	persist    Persister
 	mu         sync.RWMutex
 	keep       int
 	keepEvents int
@@ -40,8 +48,17 @@ func New(keep, keepEvents int) *Store {
 	}
 }
 
-// Add はサンプルを追加し、購読者に配る。
-func (s *Store) Add(x model.Sample) {
+// SetPersister は保存先を設定する。LoadInto で履歴を戻した後に呼ぶ(戻した分を書き直さないため)。
+func (s *Store) SetPersister(p Persister) {
+	s.mu.Lock()
+	s.persist = p
+	s.mu.Unlock()
+}
+
+// Add はサンプルを追加し、保存して、購読者に配る。
+func (s *Store) Add(x model.Sample) { s.add(x, true) }
+
+func (s *Store) add(x model.Sample, save bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -51,12 +68,19 @@ func (s *Store) Add(x model.Sample) {
 		buf = slices.Clone(buf[len(buf)-s.keep:])
 	}
 	s.series[k] = buf
-	s.lastSeen[x.Host] = x.Time
+	if x.Time.After(s.lastSeen[x.Host]) {
+		s.lastSeen[x.Host] = x.Time
+	}
+	if save && s.persist != nil {
+		s.persist.SaveSample(x)
+	}
 	s.publish(x.Host, Message{"sample", x})
 }
 
-// AddEvents はイベントを追加し、購読者にまとめて配る。
-func (s *Store) AddEvents(b model.EventBatch) {
+// AddEvents はイベントを追加し、保存して、購読者にまとめて配る。
+func (s *Store) AddEvents(b model.EventBatch) { s.addEvents(b, true) }
+
+func (s *Store) addEvents(b model.EventBatch, save bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -65,6 +89,9 @@ func (s *Store) AddEvents(b model.EventBatch) {
 		buf = slices.Clone(buf[len(buf)-s.keepEvents:])
 	}
 	s.events[b.Host] = buf
+	if save && s.persist != nil {
+		s.persist.SaveEvents(b)
+	}
 	s.publish(b.Host, Message{"events", b})
 }
 

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +27,7 @@ func main() {
 	text := flag.Bool("text", false, "JSON の代わりに runqlat 風のテキストヒストグラムを出す")
 	serverURL := flag.String("server", "", "送信先の ebpflens-server(例: http://127.0.0.1:8080)")
 	hostFlag := flag.String("host", "", "ホスト名(省略時は os.Hostname)")
+	topN := flag.Int("top", 8, "送るプロセス数(待ち時間の上位と CPU 使用の上位それぞれ)")
 	flag.Parse()
 
 	host := *hostFlag
@@ -49,6 +52,7 @@ func main() {
 	defer tick.Stop()
 
 	enc := json.NewEncoder(os.Stdout)
+	prev := time.Now()
 	for n := 0; *count == 0 || n < *count; n++ {
 		select {
 		case <-sig:
@@ -58,11 +62,21 @@ func main() {
 			if err != nil {
 				log.Fatalf("runqlat: %v", err)
 			}
+			procs, err := p.Procs()
+			if err != nil {
+				log.Fatalf("runqlat: %v", err)
+			}
+			procs = topProcs(procs, *topN)
 			if *text {
 				printText(now, slots)
+				printProcs(procs)
 				continue
 			}
-			x := model.Sample{Host: host, Time: now, Probe: "runqlat", Unit: "usecs", Slots: slots[:]}
+			x := model.Sample{
+				Host: host, Time: now, Probe: "runqlat", Unit: "usecs", Slots: slots[:],
+				IntervalMs: now.Sub(prev).Milliseconds(), CPUs: runtime.NumCPU(), Procs: procs,
+			}
+			prev = now
 			if *serverURL != "" {
 				// サーバーが落ちていても収集は続ける。その区間のサンプルは捨てる
 				if err := send(client, *serverURL, x); err != nil {
@@ -74,6 +88,44 @@ func main() {
 				log.Fatal(err)
 			}
 		}
+	}
+}
+
+// topProcs は待たされた時間の上位 n 件と CPU を使った時間の上位 n 件を合わせて返す。
+func topProcs(all []model.ProcStat, n int) []model.ProcStat {
+	pick := map[string]bool{}
+	for _, cmp := range []func(a, b model.ProcStat) int{
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.OnCPUNs, b.OnCPUNs) },
+	} {
+		slices.SortFunc(all, cmp)
+		for _, s := range all[:min(n, len(all))] {
+			pick[s.Comm] = true
+		}
+	}
+	out := make([]model.ProcStat, 0, len(pick))
+	for _, s := range all {
+		if pick[s.Comm] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func cmpDesc(a, b uint64) int {
+	switch {
+	case a > b:
+		return -1
+	case a < b:
+		return 1
+	}
+	return 0
+}
+
+func printProcs(procs []model.ProcStat) {
+	fmt.Printf("%-16s %5s %12s %10s %12s\n", "comm", "procs", "oncpu(ms)", "waits", "wait(ms)")
+	for _, s := range procs {
+		fmt.Printf("%-16s %5d %12.1f %10d %12.2f\n", s.Comm, s.Procs, float64(s.OnCPUNs)/1e6, s.WaitCount, float64(s.WaitNs)/1e6)
 	}
 }
 

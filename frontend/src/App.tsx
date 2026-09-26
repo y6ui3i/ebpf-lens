@@ -8,6 +8,7 @@ import { Heatmap } from "./components/Heatmap";
 import { PercentileChart } from "./components/PercentileChart";
 import { HistogramTable } from "./components/HistogramTable";
 import { LensSummary } from "./components/LensSummary";
+import { ImpactPanel } from "./components/ImpactPanel";
 
 const WINDOW = 300; // 直近 5 分(1 秒 1 列)
 
@@ -50,6 +51,7 @@ export default function App() {
       ) : (
         <>
         <LensSummary samples={samples} />
+        <ImpactPanel samples={samples} />
         <section
           className="rounded-xl p-5"
           style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}

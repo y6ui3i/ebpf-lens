@@ -79,7 +79,7 @@ export default function App() {
   const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel, diskLevel, netLevel);
   const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel, "/disk": diskLevel, "/network": netLevel };
   // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level
-  const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs).map((v) => ({ name: v.name, running: v.running, level: v.level }));
+  const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs).map((v) => ({ name: v.name, running: v.running, level: v.level, phase: v.phase }));
   const match = matchRoute(path);
   const vmName = match?.params.name;
   const title = match ? t(match.labelKey, match.params) : "";

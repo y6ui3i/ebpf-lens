@@ -604,3 +604,32 @@ func TestNetRetransOpensAtTenPerSecond(t *testing.T) {
 		t.Fatalf("expected a net_retrans caution at 12/s, got %+v", r.got)
 	}
 }
+
+// NetworkManager's connectivity check on a host without an IPv6 route: a dozen addresses of one /64, one failure
+// each. No address:port reaches 10 %, so the group is formed per /64 instead of saying nothing.
+func TestNetConnectFailGroupsByPrefixWhenNoDestinationStandsOut(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	var dests []model.NetDest
+	for i := 0; i < 8; i++ {
+		dests = append(dests, model.NetDest{Addr: fmt.Sprintf("2620:2d:4000:1::%d", 0x1000+i), Port: 443, Fails: 1})
+	}
+	for i := 0; i < 4; i++ {
+		dests = append(dests, model.NetDest{Addr: fmt.Sprintf("2620:2d:4002:1::%d", 0x1000+i), Port: 80, Fails: 1})
+	}
+	x := netSample(0, -1, dests)
+	h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
+	e.OnSample(x)
+	if len(r.got) != 1 {
+		t.Fatalf("expected one incident (12 failures in 10 s), got %+v", r.got)
+	}
+	c := r.last().Culprits
+	if len(c) != 2 || c[0].Name != "2620:2d:4000:1::/64" || c[0].Share < 0.66 || c[0].Share > 0.67 || c[1].Name != "2620:2d:4002:1::/64" {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if destBlock("10.0.0.5:5432") != "10.0.0.5" || destBlock("clients at 192.168.10.4") != "192.168.10.4" {
+		t.Fatalf("destBlock v4: %q %q", destBlock("10.0.0.5:5432"), destBlock("clients at 192.168.10.4"))
+	}
+}

@@ -8,6 +8,15 @@ import type { Level } from "./lens";
 const SLOTS = 27; // log2 histogram size the agent sends (µs, 2^0 .. 2^26)
 const RECENT = 5; // seconds used for the "current" numbers in the list and the USE row
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// A VM's life after it stops, as the host sees it (it cannot tell a stopped VM from a deleted one):
+//   attention  the stop is fresh (or the VM is waiting for host CPU right now): in the menu with its level mark
+//   stopped    stopped within STOPPED_MS: folded under "Stopped (N)" in the menu, in the list's stopped section
+//   past       stopped within PAST_MS: only in the list; its page stays reachable
+//   forgotten  older than PAST_MS: not listed. The DB keeps its incidents 30 days, so /vms/<name> still answers
+// The bounds will move to the settings screen; until then they are constants
+export const LIFECYCLE = { attentionMs: 5 * 60 * 1000, stoppedMs: 60 * 60 * 1000, pastMs: DAY_MS };
+export type VmPhase = "running" | "attention" | "stopped" | "past";
 // Incident kinds that belong to a VM. The area level of the VM group (dashboard, nav, USE row) is judged over VM_AREA_KINDS
 const VM_KINDS = ["vm_down", "oom_kill", "vm_cpu_wait"] as const;
 export const VM_AREA_KINDS = ["vm_down", "vm_cpu_wait"] as const;
@@ -23,6 +32,7 @@ export type VmState = {
   cpuWait?: Incident; // ongoing vm_cpu_wait of this VM (it is waiting for host CPU right now)
   level: Level; // worst level of this VM's incidents that still count (vm_down lingers 5 minutes, vm_cpu_wait while ongoing)
   incidents: Incident[]; // vm_down / oom_kill / vm_cpu_wait of this VM, newest first
+  phase: VmPhase;
 };
 
 // The VMs on the host right now (from the latest "vms" sample). undefined when no vms sample has arrived yet
@@ -67,7 +77,7 @@ export function knownVms(vmSamples: Sample[], incidents: Incident[], nowMs: numb
     names.add(v.name);
   }
   for (const x of incidents) {
-    if (x.vm && (VM_KINDS as readonly string[]).includes(x.kind) && nowMs - Date.parse(x.start) <= DAY_MS) names.add(x.vm);
+    if (x.vm && (VM_KINDS as readonly string[]).includes(x.kind) && nowMs - Date.parse(x.start) <= LIFECYCLE.pastMs) names.add(x.vm);
   }
   const out: VmState[] = [...names].map((name) => vmState(name, running.get(name), incidents, nowMs));
   const rank = (v: VmState) => (v.level !== "ok" ? 0 : v.running ? 1 : 2);
@@ -76,14 +86,20 @@ export function knownVms(vmSamples: Sample[], incidents: Incident[], nowMs: numb
 
 export function vmState(name: string, info: VMInfo | undefined, incidents: Incident[], nowMs: number): VmState {
   const own = vmIncidents(incidents, name);
+  const lastDown = own.find((x) => x.kind === "vm_down");
+  const level = areaLevel(own, VM_KINDS, nowMs);
+  const running = info != null;
+  const sinceStop = lastDown ? nowMs - Date.parse(lastDown.start) : Infinity;
+  const phase: VmPhase = running ? "running" : level !== "ok" || sinceStop <= LIFECYCLE.attentionMs ? "attention" : sinceStop <= LIFECYCLE.stoppedMs ? "stopped" : "past";
   return {
     name,
-    running: info != null,
+    running,
     info,
-    lastDown: own.find((x) => x.kind === "vm_down"),
+    lastDown,
     cpuWait: own.find((x) => x.kind === "vm_cpu_wait" && isOngoing(x)),
-    level: areaLevel(own, VM_KINDS, nowMs),
+    level,
     incidents: own,
+    phase,
   };
 }
 

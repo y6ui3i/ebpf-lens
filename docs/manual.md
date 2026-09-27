@@ -98,6 +98,8 @@ Build the new binaries, then on the server `make install && sudo systemctl resta
 
 ![The dashboard: Lens Summary, recent incidents, and the USE grid (ten VMs, three of them busy)](img/en-dashboard.png)
 
+![The dashboard in Japanese on the GPU host: the GPU line names the OCR worker and where its time goes; the incident list holds the gpu_starved warning from the page-rendering phase](img/ja-dashboard-gpu.png)
+
 
 ### Levels
 

@@ -191,6 +191,7 @@ Measured on the test host (RTX 2070, driver 595):
 |---|---|---|---|
 | PyTorch loop: 4096² matmul + a 256 MB host→GPU copy from pageable memory each step | 30–78 % | 5.1 GB/s to the GPU, 982 ms/s inside `cuMemcpyHtoDAsync`, sync calls only 64–128 µs | transfer-bound. The blocking happens in the copy call, not in synchronize — pinned memory would fix it |
 | YomiToku OCR of a 1200 dpi scanned book (paperlake, in a container) | 64 % | 4,800 kernel launches/s, 48 MB/s to the GPU, 23 % of its time in sync, 112 % of a CPU; clocks held back by the power cap | GPU and CPU: the rest of the time goes to CPU-side work, which is the next limit |
+| The same job's page-rendering phase (PDF → 1200 dpi JPEG, before OCR starts) | 0 % | no CUDA call for 42 s while the worker used 97 % of a CPU | CPU-bound; a `gpu_starved` warning opened after 10 s and closed when OCR began |
 | lakebed (embedding model loaded, no requests) | 0 % | 1.8 GB of VRAM, no CUDA call | idle |
 
 The GPU screen (`/gpu`) shows the tiles, GPU busy and VRAM over time with the idle and VRAM lines, a heatmap of how long each copy or sync call waited, and the per-process table with the verdicts; the dashboard has a **GPU** row in the USE grid (busy, VRAM, clock throttling) and a **GPU** line in the Lens Summary. A host without an NVIDIA driver sends no GPU samples and shows no GPU row. Only the first GPU is watched; per-process GPU utilization is not available on GeForce (NVML returns Not Found), which is why the verdict reasons from what the process was doing instead.

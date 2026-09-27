@@ -98,6 +98,8 @@ curl -s http://SERVER:8080/api/hosts          # 各ホストと最終サンプ�
 
 ![ダッシュボード: Lens Summary、直近の出来事、USE の升目(VM 10 台、うち 3 台が busy)](img/ja-dashboard.png)
 
+![GPU のあるホストのダッシュボード: GPU の行が OCR のワーカーと時間の行き先を言い、出来事の一覧にはページ画像化の段階で開いた gpu_starved の警告が残っている](img/ja-dashboard-gpu.png)
+
 
 ### レベル
 

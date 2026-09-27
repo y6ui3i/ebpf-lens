@@ -193,6 +193,8 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 
 Then the VM's own CPU-wait heatmap and trend (host side — this is steal time with a distribution), its reclaim stalls, and its incidents.
 
+![VM page while the VM is waiting for host CPU: the headline, the three neighbours that took the CPU (81 % together), and the next step](img/en-vm-steal.png)
+
 *Reading it.* A running VM whose wait p99 sits above 1 ms while its own CPU share is small is a **victim of noisy neighbours**; its `vm_cpu_wait` incident and the *Who took this VM's CPU* table name them. A VM that stalled in reclaim before dying was thrashing against a limit — with swap on the host, a limit makes a VM crawl rather than die.
 
 ### All panels (`/all`)
@@ -213,6 +215,8 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **Agent stopped reporting** (`agent_down`) | no sample for 30 s | warning | the host reports again | The host, the network, or the agent is down — nothing else on this host is fresh. Check the host first. |
 | **VM waiting for CPU** (`vm_cpu_wait`) | a VM's host-side wait p99 ≥ 1 ms for 3 s | caution; warning once ≥ 10 ms for 3 s | below 1 ms for more than 2 s | The VM is losing time to neighbours. The incident names who took the CPU (a group, see below); the VM page says what to do. |
 | **VM stopped** (`vm_down`) | a VM's QEMU process exited | warning for OOM / crash; caution for killed / clean exit | instant | Open the VM page: cause, evidence and next step are there. |
+
+![Dashboard (Japanese) during the same minute: the headline says a VM is waiting for host CPU, the CPU line names the three-VM group and its 76 %, and every incident row says who took the CPU](img/ja-dashboard-steal.png)
 
 **Who took the CPU.** `cpu_wait` and `vm_cpu_wait` incidents carry the *culprit group*: the processes or VMs using ≥ 10 % of the host each, largest first, at most five, and only if together they used ≥ 50 % (a waiting VM is never its own culprit). One hog is a group of one; three neighbours at ~25 % are a group of three; a CPU shared evenly by many is "no single process or small group" — the incident then says how busy the host was instead of guessing.
 

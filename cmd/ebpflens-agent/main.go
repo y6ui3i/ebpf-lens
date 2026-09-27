@@ -1,4 +1,4 @@
-// ebpflens-agent collects eBPF probe values and events at a fixed interval and sends them to ebpflens-server
+// ebpflens-agent collects eBPF probe values, events and the list of running VMs at a fixed interval and sends them to ebpflens-server
 // (if -server is not given, it writes them to stdout as JSON Lines).
 package main
 
@@ -23,6 +23,7 @@ import (
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/procfs"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/vm"
 )
 
 func main() {
@@ -57,6 +58,11 @@ func main() {
 	defer ms.Close()
 	mem := newMemReader()
 
+	// VMs: file QEMU processes under their VM name, and tag their events so the server can explain "VM X stopped"
+	vms := vm.NewMap()
+	vms.Scan()
+	lastScan := time.Now()
+
 	pl, err := proclife.Open()
 	if err != nil {
 		log.Fatalf("proclife: %v", err)
@@ -87,7 +93,11 @@ func main() {
 			if err != nil {
 				log.Fatalf("runqlat: %v", err)
 			}
-			all, err := p.Procs()
+			if now.Sub(lastScan) >= vmScanInterval {
+				vms.Scan()
+				lastScan = now
+			}
+			all, err := p.Procs(vms.Label)
 			if err != nil {
 				log.Fatalf("runqlat: %v", err)
 			}
@@ -97,18 +107,21 @@ func main() {
 			}
 			procs := topProcs(all, *topN)
 
-			batch := model.EventBatch{Host: host, Time: now, Events: drain(events, maxEventsPerBatch)}
+			// Aggregate memstall (and list the VMs) before draining events: an exit event removes its VM from the
+			// map, and the second in which a VM dies is exactly the one whose reclaim stalls must still be filed under it
+			mx, err := memSample(ms, mem, vms, *topN)
+			if err != nil {
+				log.Fatalf("memstall: %v", err)
+			}
+			mx.Host, mx.Time, mx.IntervalMs, mx.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
+			vx := model.Sample{Host: host, Time: now, Probe: "vms", Slots: []uint64{0}, IntervalMs: now.Sub(prev).Milliseconds(), VMs: vms.List()}
+
+			batch := model.EventBatch{Host: host, Time: now, Events: tagVMs(vms, drain(events, maxEventsPerBatch))}
 			kdrop, err := pl.DroppedDelta()
 			if err != nil {
 				log.Printf("proclife dropped: %v", err)
 			}
 			batch.Dropped = kdrop + agentDrops.Swap(0)
-
-			mx, err := memSample(ms, mem, *topN)
-			if err != nil {
-				log.Fatalf("memstall: %v", err)
-			}
-			mx.Host, mx.Time, mx.IntervalMs, mx.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
 
 			if *text {
 				printText(now, slots)
@@ -130,6 +143,9 @@ func main() {
 				if err := send(client, *serverURL, "/api/ingest", mx); err != nil {
 					log.Printf("send memstall: %v", err)
 				}
+				if err := send(client, *serverURL, "/api/ingest", vx); err != nil {
+					log.Printf("send vms: %v", err)
+				}
 				if len(batch.Events) > 0 || batch.Dropped > 0 {
 					if err := send(client, *serverURL, "/api/events", batch); err != nil {
 						log.Printf("send events: %v", err)
@@ -142,6 +158,11 @@ func main() {
 			}
 			if err := enc.Encode(mx); err != nil {
 				log.Fatal(err)
+			}
+			if len(vx.VMs) > 0 {
+				if err := enc.Encode(vx); err != nil {
+					log.Fatal(err)
+				}
 			}
 			if len(batch.Events) > 0 {
 				if err := enc.Encode(batch); err != nil {
@@ -173,12 +194,12 @@ func (r *memReader) read(stallNs uint64) *model.MemStat {
 }
 
 // memSample builds one interval of memstall data (the caller fills in host name, time, etc.).
-func memSample(ms *memstall.Probe, mem *memReader, topN int) (model.Sample, error) {
+func memSample(ms *memstall.Probe, mem *memReader, vms *vm.Map, topN int) (model.Sample, error) {
 	slots, err := ms.Delta()
 	if err != nil {
 		return model.Sample{}, err
 	}
-	all, err := ms.Procs()
+	all, err := ms.Procs(vms.Label)
 	if err != nil {
 		return model.Sample{}, err
 	}
@@ -207,7 +228,24 @@ func printMem(x model.Sample) {
 const (
 	eventBuffer       = 16384
 	maxEventsPerBatch = 2000 // anything beyond this carries over to the next interval
+	vmScanInterval    = 10 * time.Second
 )
+
+// tagVMs learns new QEMU processes from exec events and tags every event of a known VM with its name.
+// A VM's exit is tagged before the pid is forgotten, so the server sees "VM web-02 stopped", not just "qemu exited".
+func tagVMs(vms *vm.Map, events []model.ProcEvent) []model.ProcEvent {
+	for i := range events {
+		e := &events[i]
+		if e.Kind == "exec" && vm.IsQEMU(e.Comm) {
+			vms.AddPid(e.Pid)
+		}
+		e.VM = vms.Lookup(e.Pid)
+		if e.Kind == "exit" && e.VM != "" {
+			vms.Remove(e.Pid)
+		}
+	}
+	return events
+}
 
 func drain(ch <-chan model.ProcEvent, max int) []model.ProcEvent {
 	out := []model.ProcEvent{}
@@ -231,6 +269,8 @@ func printEvents(b model.EventBatch) {
 			fmt.Printf("exit %-7d %-16s status=%d signal=%d core=%v life=%s\n", e.Pid, e.Comm, e.ExitStatus, e.Signal, e.CoreDump, time.Duration(e.LifetimeNs))
 		case "oom":
 			fmt.Printf("oom  %-7d %-16s trigger=%s(%d) memcg=%v pages=%d\n", e.Pid, e.Comm, e.TriggerComm, e.TriggerPid, e.Memcg, e.TotalPages)
+		case "signal":
+			fmt.Printf("sig  %-7d %-16s signal=%d from=%s(%d)\n", e.Pid, e.Comm, e.Signal, e.TriggerComm, e.TriggerPid)
 		}
 	}
 	if b.Dropped > 0 {
@@ -252,7 +292,7 @@ func topProcs(all []model.ProcStat, n int) []model.ProcStat {
 	}
 	out := make([]model.ProcStat, 0, len(pick))
 	for _, s := range all {
-		if pick[s.Comm] {
+		if pick[s.Comm] || strings.HasPrefix(s.Comm, vm.Prefix) { // VMs are always sent, top or not
 			out = append(out, s)
 		}
 	}

@@ -68,7 +68,9 @@ func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 
 // Procs reads the per-process aggregates, deletes them from the BPF map, and returns them merged by name.
 // Anything added between the read and the delete is lost, but that is tiny relative to one interval.
-func (p *Probe) Procs() ([]model.ProcStat, error) {
+// Procs reads and clears the per-process aggregates and merges them by name. label decides the name a process
+// is filed under (the agent uses it to file QEMU processes under "vm:<name>"); nil keeps the kernel's comm.
+func (p *Probe) Procs(label func(tgid uint32, comm string) string) ([]model.ProcStat, error) {
 	var (
 		key  runqlatProcKey
 		val  runqlatProcVal
@@ -79,6 +81,9 @@ func (p *Probe) Procs() ([]model.ProcStat, error) {
 	for it.Next(&key, &val) {
 		keys = append(keys, key)
 		comm := probe.CString(key.Comm[:])
+		if label != nil {
+			comm = label(key.Tgid, comm)
+		}
 		s, ok := byComm[comm]
 		if !ok {
 			s = &model.ProcStat{Comm: comm, Slots: make([]uint64, MaxSlots)}

@@ -139,6 +139,8 @@ function describe(e: ProcEvent, lang: Lang): string {
       if (e.signal) return `${signalName(e.signal, lang)}${e.coreDump ? translate(lang, "lp.coreDump") : ""} · ${life}`;
       return e.exitStatus ? `${translate(lang, "lp.exitCode", { n: e.exitStatus })} · ${life}` : life;
     }
+    case "signal":
+      return translate(lang, "lp.signalDesc", { sig: signalName(e.signal, lang), comm: String(e.triggerComm), pid: String(e.triggerPid) });
     case "oom": {
       const mb = Math.round(((e.totalPages ?? 0) * 4096) / 1024 / 1024);
       const scope = translate(lang, e.memcg ? "lp.scopeMemcg" : "lp.scopeHost", { mb });

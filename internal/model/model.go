@@ -17,6 +17,14 @@ type Sample struct {
 	BusyNs     uint64     `json:"busyNs"`     // Total CPU time used by all processes (measured with eBPF; excludes idle)
 	Procs      []ProcStat `json:"procs,omitempty"`
 	Mem        *MemStat   `json:"mem,omitempty"` // memstall only
+	VMs        []VMInfo   `json:"vms,omitempty"` // probe "vms" only: the VMs running on this host
+}
+
+// VMInfo is one virtual machine (a QEMU process) running on the host.
+type VMInfo struct {
+	Name  string    `json:"name"`
+	Pid   uint32    `json:"pid"`
+	Since time.Time `json:"since"`
 }
 
 // MemStat is the memory status attached to a memstall sample.
@@ -32,11 +40,12 @@ type MemStat struct {
 // ProcEvent is a single process start, exit, or OOM kill.
 type ProcEvent struct {
 	Time time.Time `json:"time"`
-	Kind string    `json:"kind"` // "exec" | "exit" | "oom"
+	Kind string    `json:"kind"` // "exec" | "exit" | "oom" | "signal" (a terminating signal sent to Pid; Signal and Trigger* say which and by whom)
 	Pid  uint32    `json:"pid"`
 	Ppid uint32    `json:"ppid"`
 	UID  uint32    `json:"uid"`
 	Comm string    `json:"comm"`
+	VM   string    `json:"vm,omitempty"` // set when the process is a VM (QEMU), so its exit can be explained as "VM <name> stopped"
 	// exec
 	Filename string `json:"filename,omitempty"`
 	// exit
@@ -103,6 +112,12 @@ type Incident struct {
 	Memcg       bool   `json:"memcg,omitempty"`
 	TriggerComm string `json:"triggerComm,omitempty"`
 	TriggerPid  uint32 `json:"triggerPid,omitempty"`
+	// vm_down: why the VM stopped, and what its QEMU process went through in the minute before
+	VM               string  `json:"vm,omitempty"`
+	Cause            string  `json:"cause,omitempty"` // "host_oom" | "cgroup_oom" | "crash" | "killed" | "shutdown"
+	ExitStatus       int     `json:"exitStatus,omitempty"`
+	ContextStallMs   float64 `json:"contextStallMs,omitempty"`   // time the VM stalled in memory reclaim in the last 60 s
+	ContextWaitP99Us float64 `json:"contextWaitP99Us,omitempty"` // run-queue wait p99 of the VM in the last 60 s
 }
 
 // Ongoing reports whether the incident is still open.

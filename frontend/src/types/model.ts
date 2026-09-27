@@ -22,6 +22,15 @@ export interface Sample {
   busyNs: number /* uint64 */; // Total CPU time used by all processes (measured with eBPF; excludes idle)
   procs?: ProcStat[];
   mem?: MemStat; // memstall only
+  vms?: VMInfo[]; // probe "vms" only: the VMs running on this host
+}
+/**
+ * VMInfo is one virtual machine (a QEMU process) running on the host.
+ */
+export interface VMInfo {
+  name: string;
+  pid: number /* uint32 */;
+  since: string /* RFC3339 */;
 }
 /**
  * MemStat is the memory status attached to a memstall sample.
@@ -39,11 +48,12 @@ export interface MemStat {
  */
 export interface ProcEvent {
   time: string /* RFC3339 */;
-  kind: string; // "exec" | "exit" | "oom"
+  kind: string; // "exec" | "exit" | "oom" | "signal" (a terminating signal sent to Pid; Signal and Trigger* say which and by whom)
   pid: number /* uint32 */;
   ppid: number /* uint32 */;
   uid: number /* uint32 */;
   comm: string;
+  vm?: string; // set when the process is a VM (QEMU), so its exit can be explained as "VM <name> stopped"
   /**
    * exec
    */
@@ -124,4 +134,12 @@ export interface Incident {
   memcg?: boolean;
   triggerComm?: string;
   triggerPid?: number /* uint32 */;
+  /**
+   * vm_down: why the VM stopped, and what its QEMU process went through in the minute before
+   */
+  vm?: string;
+  cause?: string; // "host_oom" | "cgroup_oom" | "crash" | "killed" | "shutdown"
+  exitStatus?: number /* int */;
+  contextStallMs?: number /* float64 */; // time the VM stalled in memory reclaim in the last 60 s
+  contextWaitP99Us?: number /* float64 */; // run-queue wait p99 of the VM in the last 60 s
 }

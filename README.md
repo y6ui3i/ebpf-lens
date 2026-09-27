@@ -132,6 +132,27 @@ Thresholds are a JSON file over the defaults (`-print-triggers` shows them; a fi
 
 Delivery is asynchronous with one retry; a dead webhook never blocks ingestion.
 
+## Why did this VM stop?
+
+On a KVM host the agent recognises QEMU processes from `/proc` (comm `qemu-system-*`, name from `-name guest=…` as libvirt passes it, or `-name …` as Proxmox does; no libvirt dependency), files their CPU wait and reclaim stalls under `vm:<name>`, tags their events, and sends the list of running VMs once a second (`probe=vms`). When a VM's QEMU exits, the server raises a `vm_down` incident whose cause comes from the evidence at hand, in this order:
+
+| Evidence | Cause | Level |
+|---|---|---|
+| an OOM kill of that pid just before, inside the VM's cgroup | `cgroup_oom` (with the process that asked for memory) | warning |
+| an OOM kill of that pid just before, machine-wide | `host_oom` (with the trigger process) | warning |
+| exit by a crash signal or with a core dump | `crash` | warning |
+| a terminating signal sent to that pid just before, or a signal exit | `killed` (with who sent it) | caution |
+| none of the above: exit 0 | `shutdown` | caution |
+
+The incident also carries what the VM went through in the minute before: time stalled in memory reclaim and its run-queue wait p99, both from the per-process eBPF stats (in the lab's cgroup OOM: 1,188 ms stalled in reclaim, 929 ms of it in the final second).
+
+Two things the lab taught us, both now handled:
+
+- **QEMU handles SIGTERM and exits 0**, so the exit alone cannot show that anyone killed it. The `signal_generate` tracepoint records who sent SIGTERM / SIGKILL / SIGINT / SIGHUP / SIGQUIT to which process (only signals that were actually queued, never a process signalling itself). That is what turns "exit 0" into "stopped by libvirtd (pid 2002)". Volume is negligible: about ten such signals in ten minutes on the test host, mostly udev reaping its workers.
+- **libvirt runs QEMU with `-no-shutdown`** and sends SIGTERM itself after the guest halts, so a `virsh shutdown` and a `virsh destroy` end identically from the host's point of view. The text says so ("a managed shutdown or a virsh destroy"); telling them apart needs libvirt's own stop reason, which is a later step.
+
+Reproduced on the test host with the lab VM: `virsh destroy` → killed by libvirtd (SIGTERM); `virsh shutdown` → the same, as explained; `kill -SEGV` on QEMU → crash; `virsh memtune --hard-limit 256M` plus a 700 MB allocation inside the guest → `cgroup_oom`, matching the kernel's "Memory cgroup out of memory: Killed process … (qemu-system-x86)". A host-wide OOM of a VM cannot be triggered safely on the test host; the rule is covered by unit tests against the recorded event shapes.
+
 ## Storage
 
 With `-db`, samples and events are stored in SQLite (pure-Go modernc.org/sqlite, no cgo). History survives restarts.
@@ -162,7 +183,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 5. ✅ Layout: overview page (Lens Summary + USE grid) and per-resource pages, responsive menu
 6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
 7. ✅ Triggers and notifications: verdicts run on the server as incidents, with a webhook; all inputs come from eBPF
-8. VM monitoring: watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
+8. 🔶 VM monitoring (first step done: why a VM stopped; VM screens next): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
 9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
 10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
 11. Disk and network: biolatency / tcpconnect / tcpretrans

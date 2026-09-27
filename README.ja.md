@@ -132,6 +132,27 @@ ReadWritePaths=/mnt/data/ebpflens
 
 通知の文面は英語のみ(画面には日英の訳がある)。送信は非同期で 1 回だけ再試行し、webhook が死んでいても受信は止まらない。
 
+## なぜこの VM は止まったのか
+
+KVM ホストでは、エージェントが /proc から QEMU プロセスを見つけ(comm が `qemu-system-*`、名前は libvirt の `-name guest=…` か Proxmox の `-name …` から。libvirt には依存しない)、その CPU 待ちと回収の停止を `vm:<名前>` として集計し、イベントに VM 名を付け、動いている VM の一覧を毎秒送る(`probe=vms`)。VM の QEMU が終了すると、サーバーは手元の証拠から次の順で原因を決めて `vm_down` の出来事を作る。
+
+| 証拠 | 原因 | レベル |
+|---|---|---|
+| 直前にその pid が OOM kill され、VM 自身の cgroup の中だった | `cgroup_oom`(メモリを要求したプロセス付き) | 警告 |
+| 直前にその pid が OOM kill され、ホスト全体の不足だった | `host_oom`(引き金のプロセス付き) | 警告 |
+| クラッシュのシグナルかコアダンプ付きの終了 | `crash` | 警告 |
+| 直前にその pid へ終了シグナルが送られた、またはシグナルで終了 | `killed`(誰が送ったか付き) | 注意 |
+| どれでもなく exit 0 | `shutdown` | 注意 |
+
+出来事には、止まる前の 1 分間にその VM がどうだったか(メモリ回収で止まった時間と CPU 待ちの p99。どちらもプロセス別の eBPF の値)も付く(lab の cgroup OOM では回収で 1,188 ms 止まり、うち 929 ms は最後の 1 秒)。
+
+検証で分かって、対応したことが 2 つある。
+
+- **QEMU は SIGTERM を自分で処理して exit 0 で終わる。** 終了イベントだけでは誰かに殺されたと分からない。`signal_generate` の tracepoint で、SIGTERM / SIGKILL / SIGINT / SIGHUP / SIGQUIT を誰がどのプロセスに送ったかを記録する(実際にキューに入ったものだけ。自分自身へのシグナルは除く)。これで「exit 0」が「libvirtd(pid 2002)に止められた」になる。量はごくわずかで、検証機では 10 分に約 10 件(ほとんど udev がワーカーを片付けるもの)。
+- **libvirt は QEMU を `-no-shutdown` で動かし、ゲストが止まった後に自分で SIGTERM を送る。** そのため `virsh shutdown` と `virsh destroy` はホストから見ると同じに見える。文面はそう書く(「管理された shutdown か virsh destroy」)。見分けるには libvirt 自身の停止理由が要り、それは後の段階。
+
+検証機の lab VM で再現: `virsh destroy` → libvirtd の SIGTERM で killed、`virsh shutdown` → 上の理由で同じ、QEMU に `kill -SEGV` → crash、`virsh memtune --hard-limit 256M` とゲスト内の 700MB 確保 → `cgroup_oom`(カーネルの「Memory cgroup out of memory: Killed process … (qemu-system-x86)」と一致)。ホスト全体の OOM で VM を落とすのは検証機では安全にできないので、記録したイベントの形に対する単体テストで押さえている。
+
 ## 保存
 
 `-db` を付けると SQLite に保存する(pure Go の modernc.org/sqlite。cgo 不要)。再起動しても履歴が戻る。
@@ -162,7 +183,7 @@ ReadWritePaths=/mnt/data/ebpflens
 5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
 6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
 7. ✅ トリガーと通知: 判定をサーバー側で行い、出来事(incident)として記録・webhook で通知。材料はすべて eBPF 由来
-8. VM 監視: ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる。VM は独立した画面群にする: メニューを **ホスト**(今の資源)と **VM**(一覧と、VM ごとのページ。それぞれに Lens Summary)に分ける。VM を動かしている人が知りたいのはサーバー全体ではなく「自分の VM」だから
+8. 🔶 VM 監視(第一歩「なぜ VM が止まったか」まで完了。VM の画面は次): ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる。VM は独立した画面群にする: メニューを **ホスト**(今の資源)と **VM**(一覧と、VM ごとのページ。それぞれに Lens Summary)に分ける。VM を動かしている人が知りたいのはサーバー全体ではなく「自分の VM」だから
 9. GPU の基本メトリクス(NVML。例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
 10. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
 11. ディスクとネットワーク: biolatency / tcpconnect / tcpretrans

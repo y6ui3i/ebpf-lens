@@ -65,7 +65,9 @@ func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 
 // Procs reads and deletes the per-process aggregates and returns them merged by name.
 // It uses the same ProcStat as runqlat, with Wait* meaning "stalled in reclaim".
-func (p *Probe) Procs() ([]model.ProcStat, error) {
+// Procs reads and clears the per-process aggregates and merges them by name. label decides the name a process
+// is filed under (the agent uses it to file QEMU processes under "vm:<name>"); nil keeps the kernel's comm.
+func (p *Probe) Procs(label func(tgid uint32, comm string) string) ([]model.ProcStat, error) {
 	var (
 		key  memstallProcKey
 		val  memstallProcVal
@@ -76,6 +78,9 @@ func (p *Probe) Procs() ([]model.ProcStat, error) {
 	for it.Next(&key, &val) {
 		keys = append(keys, key)
 		comm := probe.CString(key.Comm[:])
+		if label != nil {
+			comm = label(key.Tgid, comm)
+		}
 		s, ok := byComm[comm]
 		if !ok {
 			s = &model.ProcStat{Comm: comm, Slots: make([]uint64, MaxSlots)}

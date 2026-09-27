@@ -18,6 +18,13 @@ const (
 	KindCrash     = "crash"
 	KindCrashLoop = "crash_loop"
 	KindAgentDown = "agent_down"
+	KindVMDown    = "vm_down"
+
+	CauseHostOOM   = "host_oom"
+	CauseCgroupOOM = "cgroup_oom"
+	CauseCrash     = "crash"
+	CauseKilled    = "killed"
+	CauseShutdown  = "shutdown"
 
 	LevelCaution = "caution"
 	LevelWarning = "warning"
@@ -33,10 +40,17 @@ type Sink interface {
 
 // Evaluator holds the rule state per host. It is fed by the store (OnSample / OnEvents) and by a clock (Tick).
 type Evaluator struct {
-	cfg  Config
-	sink Sink
-	mu   sync.Mutex
-	host map[string]*hostState
+	cfg     Config
+	sink    Sink
+	history History
+	mu      sync.Mutex
+	host    map[string]*hostState
+}
+
+// History gives the rules access to recent samples, for the context an incident is judged in
+// (what a VM went through in the minute before it died). The store implements it; nil disables context.
+type History interface {
+	Samples(host, probe string) []model.Sample
 }
 
 type hostState struct {
@@ -45,6 +59,8 @@ type hostState struct {
 	crashLoop map[string]*model.Incident // open crash-loop incidents by command
 	lastSeen  time.Time
 	down      *model.Incident
+	ooms      map[uint32]model.ProcEvent // pid -> OOM kill seen recently, matched to the exit that follows
+	signals   map[uint32]model.ProcEvent // pid -> last terminating signal sent to it, matched to the exit that follows
 }
 
 // excursion tracks one value that may be above its threshold. It exists before the incident opens
@@ -63,10 +79,13 @@ func New(cfg Config, sink Sink) *Evaluator {
 	return &Evaluator{cfg: cfg, sink: sink, host: map[string]*hostState{}}
 }
 
+// SetHistory enables context lookups (see History).
+func (e *Evaluator) SetHistory(h History) { e.history = h }
+
 func (e *Evaluator) state(host string) *hostState {
 	h := e.host[host]
 	if h == nil {
-		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}}
+		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}}
 		e.host[host] = h
 	}
 	return h
@@ -102,9 +121,14 @@ func (e *Evaluator) OnEvents(b model.EventBatch) {
 	for _, ev := range b.Events {
 		switch {
 		case ev.Kind == "oom":
+			h.ooms[ev.Pid] = ev // the exit of the killed process arrives right after; vm_down uses this to name the cause
 			e.sink.AddIncident(instant(b.Host, KindOOMKill, LevelWarning, ev, func(i *model.Incident) {
-				i.Memcg, i.TriggerComm, i.TriggerPid = ev.Memcg, ev.TriggerComm, ev.TriggerPid
+				i.Memcg, i.TriggerComm, i.TriggerPid, i.VM = ev.Memcg, ev.TriggerComm, ev.TriggerPid, ev.VM
 			}))
+		case ev.Kind == "signal":
+			h.signals[ev.Pid] = ev
+		case ev.Kind == "exit" && ev.VM != "":
+			e.vmDown(h, b.Host, ev)
 		case ev.Kind == "exit" && (crashSignals[ev.Signal] || ev.CoreDump):
 			e.sink.AddIncident(instant(b.Host, KindCrash, LevelCaution, ev, func(i *model.Incident) {
 				i.Signal, i.CoreDump = ev.Signal, ev.CoreDump
@@ -112,6 +136,102 @@ func (e *Evaluator) OnEvents(b model.EventBatch) {
 			e.crashLoopStep(h, b.Host, ev)
 		}
 	}
+	// OOM and signal records only matter for the exit that follows within seconds
+	for pid, o := range h.ooms {
+		if b.Time.Sub(o.Time) > 30*time.Second {
+			delete(h.ooms, pid)
+		}
+	}
+	for pid, o := range h.signals {
+		if b.Time.Sub(o.Time) > 30*time.Second {
+			delete(h.signals, pid)
+		}
+	}
+}
+
+// --- vm_down ---
+
+// vmDown explains why a VM's QEMU process stopped, from the evidence at hand: an OOM kill just before (and whether
+// it was the host or the VM's own cgroup that ran out), a crash signal, a deliberate kill, or a clean exit.
+func (e *Evaluator) vmDown(h *hostState, host string, ev model.ProcEvent) {
+	level := LevelCaution
+	cause := CauseShutdown
+	oom, hadOOM := h.ooms[ev.Pid]
+	sig, hadSig := h.signals[ev.Pid] // QEMU handles SIGTERM and exits 0, so the exit alone cannot show a kill
+	switch {
+	case hadOOM && oom.Memcg:
+		cause, level = CauseCgroupOOM, LevelWarning
+	case hadOOM:
+		cause, level = CauseHostOOM, LevelWarning
+	case crashSignals[ev.Signal] || ev.CoreDump:
+		cause, level = CauseCrash, LevelWarning
+	case ev.Signal != 0 || hadSig:
+		cause = CauseKilled // libvirt destroy, an administrator, or a supervisor; Trigger* says who
+	}
+	delete(h.ooms, ev.Pid)
+	delete(h.signals, ev.Pid)
+	inc := instant(host, KindVMDown, level, ev, func(i *model.Incident) {
+		i.Subject, i.VM, i.Cause = ev.VM, ev.VM, cause
+		i.Signal, i.CoreDump, i.ExitStatus = ev.Signal, ev.CoreDump, ev.ExitStatus
+		switch {
+		case hadOOM:
+			i.Memcg, i.TriggerComm, i.TriggerPid = oom.Memcg, oom.TriggerComm, oom.TriggerPid
+		case cause == CauseKilled && hadSig:
+			i.TriggerComm, i.TriggerPid = sig.TriggerComm, sig.TriggerPid
+			if i.Signal == 0 {
+				i.Signal = sig.Signal
+			}
+		}
+	})
+	inc.ID = incidentID(host, KindVMDown, ev.VM, ev.Time)
+	inc.ContextStallMs, inc.ContextWaitP99Us = e.vmContext(host, ev.VM, ev.Time)
+	e.sink.AddIncident(inc)
+}
+
+// vmContext sums what the VM's process went through in the 60 s before t: time stalled in reclaim (memstall)
+// and its run-queue wait p99 (runqlat), both from the per-process stats filed under "vm:<name>".
+func (e *Evaluator) vmContext(host, name string, t time.Time) (stallMs, waitP99Us float64) {
+	if e.history == nil {
+		return 0, 0
+	}
+	label := "vm:" + name
+	from := t.Add(-60 * time.Second)
+	// Samples are stamped at the end of their interval, so the one covering the death arrives up to a second
+	// after the exit; let the window reach a little past t
+	until := t.Add(2 * time.Second)
+	for _, s := range e.history.Samples(host, "memstall") {
+		if s.Time.Before(from) || s.Time.After(until) {
+			continue
+		}
+		for _, p := range s.Procs {
+			if p.Comm == label {
+				stallMs += float64(p.WaitNs) / 1e6
+			}
+		}
+	}
+	var slots []uint64
+	for _, s := range e.history.Samples(host, "runqlat") {
+		if s.Time.Before(from) || s.Time.After(until) {
+			continue
+		}
+		for _, p := range s.Procs {
+			if p.Comm != label {
+				continue
+			}
+			if slots == nil {
+				slots = make([]uint64, len(p.Slots))
+			}
+			for i, c := range p.Slots {
+				if i < len(slots) {
+					slots[i] += c
+				}
+			}
+		}
+	}
+	if p99, ok := Percentile(slots, 0.99); ok {
+		waitP99Us = p99
+	}
+	return stallMs, waitP99Us
 }
 
 // MarkSeen records when a host last reported without judging anything. main calls it for each host restored

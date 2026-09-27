@@ -15,6 +15,7 @@
 #define KIND_EXEC 1
 #define KIND_EXIT 2
 #define KIND_OOM 3
+#define KIND_SIGNAL 4
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
@@ -103,6 +104,32 @@ int BPF_PROG(handle_exit, struct task_struct *p, bool group_dead)
 		return 0;
 	e->exit_code = BPF_CORE_READ(p, exit_code);
 	e->lifetime_ns = e->ts - BPF_CORE_READ(p, start_time);
+	bpf_ringbuf_submit(e, 0);
+	return 0;
+}
+
+// Who sent a terminating signal to whom. QEMU handles SIGTERM and exits 0, so without this a "virsh destroy"
+// is indistinguishable from a guest shutdown. Only signals that stop a process are recorded, only when they
+// were actually queued (result 0), and never when a process signals itself (kill -TERM $$).
+SEC("tp_btf/signal_generate")
+int BPF_PROG(handle_signal, int sig, struct kernel_siginfo *info, struct task_struct *task, int group, int result)
+{
+	struct task_struct *cur;
+	struct event *e;
+
+	if (result != 0)
+		return 0;
+	if (sig != 9 && sig != 15 && sig != 2 && sig != 1 && sig != 3) // KILL TERM INT HUP QUIT
+		return 0;
+	cur = (struct task_struct *)bpf_get_current_task_btf();
+	if (BPF_CORE_READ(cur, tgid) == BPF_CORE_READ(task, tgid))
+		return 0;
+	e = reserve(KIND_SIGNAL, task);
+	if (!e)
+		return 0;
+	e->exit_code = sig;
+	e->trigger_pid = BPF_CORE_READ(cur, tgid);
+	bpf_probe_read_kernel_str(e->trigger_comm, sizeof(e->trigger_comm), BPF_CORE_READ(cur, group_leader, comm));
 	bpf_ringbuf_submit(e, 0);
 	return 0;
 }

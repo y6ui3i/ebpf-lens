@@ -23,6 +23,7 @@ const (
 	kindExec = 1
 	kindExit = 2
 	kindOOM  = 3
+	kindSig  = 4
 )
 
 type Probe struct {
@@ -40,7 +41,7 @@ func Open() (*Probe, error) {
 	if err := loadProclifeObjects(&p.objs, nil); err != nil {
 		return nil, fmt.Errorf("load bpf objects: %w", err)
 	}
-	for _, prog := range []*ebpf.Program{p.objs.HandleExec, p.objs.HandleExit, p.objs.HandleOom} {
+	for _, prog := range []*ebpf.Program{p.objs.HandleExec, p.objs.HandleExit, p.objs.HandleOom, p.objs.HandleSignal} {
 		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
 		if err != nil {
 			p.Close()
@@ -107,6 +108,12 @@ func (p *Probe) convert(r *proclifeEvent) model.ProcEvent {
 		e.CoreDump = code&0x80 != 0
 		e.ExitStatus = int((code >> 8) & 0xff)
 		e.LifetimeNs = r.LifetimeNs
+	case kindSig:
+		// A terminating signal sent to this process: Signal is the signal, Trigger* is who sent it
+		e.Kind = "signal"
+		e.Signal = int(r.ExitCode)
+		e.TriggerPid = r.TriggerPid
+		e.TriggerComm = probe.CString(r.TriggerComm[:])
 	case kindOOM:
 		e.Kind = "oom"
 		e.TriggerPid = r.TriggerPid

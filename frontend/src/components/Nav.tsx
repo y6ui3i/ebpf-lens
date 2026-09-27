@@ -2,16 +2,17 @@ import { useEffect, useState } from "react";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
 import { Link, ROUTES, matchRoute, vmPath } from "../lib/router";
 import { useI18n, type Key, type TFn } from "../lib/i18n";
+import type { VmPhase } from "../lib/vms";
 
 // OpenSearch Dashboards style menu. The ☰ in the top bar slides it in from the left; pressing again slides it out.
 // It stays in the DOM while closed and moves with transform (for the enter/leave animation). It is inert while closed
 
 // A menu entry: `label` is a translation key for static screens; `text` is a literal (a VM name) for dynamic ones
-type Item = { path?: string; label?: Key; text?: string; state?: "running" | "stopped"; level?: Level };
+type Item = { path?: string; label?: Key; text?: string; state?: "running" | "stopped"; level?: Level; indent?: boolean };
 type Group = { title: Key; items: Item[] };
 
 // The VMs the menu lists, as computed in App (running now, or with an incident in the last 24 h)
-export type NavVm = { name: string; running: boolean; level: Level };
+export type NavVm = { name: string; running: boolean; level: Level; phase: VmPhase };
 
 const STATIC_GROUPS: Group[] = [
   {
@@ -35,6 +36,7 @@ const STATIC_GROUPS: Group[] = [
 ];
 
 const RECENT_MAX = 3;
+const STOPPED_FOLD = "\u0000stopped"; // marker item rendered as the "Stopped (N)" fold
 
 // Menu text for a path: the screen name, or the VM name for /vms/<name>
 function labelFor(path: string, t: TFn): string | undefined {
@@ -52,6 +54,7 @@ export function Nav({ path, open, onClose, levels, vms }: {
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [stoppedOpen, setStoppedOpen] = useState(false); // the "Stopped (N)" fold under the VM group, closed by default
   const recent = useRecent(path);
 
   useEffect(() => {
@@ -69,12 +72,18 @@ export function Nav({ path, open, onClose, levels, vms }: {
       return text ? [{ path: p, text }] : [];
     }),
   };
-  // VMs get their own group between "eBPFLens" and "Host": the list, then one entry per known VM with its state
+  // VMs get their own group between "eBPFLens" and "Host": the list, then the VMs that are running or need attention,
+  // then the recently stopped ones folded under "Stopped (N)". VMs stopped longer ago are in the list only (see lib/vms LIFECYCLE)
+  const entry = (v: NavVm, indent = false): Item => ({ path: vmPath(v.name), text: v.name, state: v.running ? "running" : "stopped", level: v.level, indent });
+  const shown = vms.filter((v) => v.phase === "running" || v.phase === "attention");
+  const stopped = vms.filter((v) => v.phase === "stopped");
   const vmGroup: Group = {
     title: "nav.group.vms",
     items: [
       { path: "/vms", label: "page.vms" },
-      ...vms.map((v) => ({ path: vmPath(v.name), text: v.name, state: v.running ? "running" as const : "stopped" as const, level: v.level })),
+      ...shown.map((v) => entry(v)),
+      ...(stopped.length > 0 ? [{ text: STOPPED_FOLD } as Item] : []),
+      ...(stoppedOpen ? stopped.map((v) => entry(v, true)) : []),
     ],
   };
   const groups = [recentGroup, STATIC_GROUPS[0], vmGroup, ...STATIC_GROUPS.slice(1)];
@@ -120,11 +129,21 @@ export function Nav({ path, open, onClose, levels, vms }: {
                   {g.items.map((it) => {
                     const text = it.text ?? (it.label ? t(it.label) : "");
                     return (
-                      <li key={`${g.title}:${it.path ?? it.label}`}>
-                        {it.path ? (
+                      <li key={`${g.title}:${it.path ?? it.label ?? it.text}`}>
+                        {it.text === STOPPED_FOLD ? (
+                          <button
+                            onClick={() => setStoppedOpen((v) => !v)}
+                            aria-expanded={stoppedOpen}
+                            className="flex w-full items-center justify-between px-4 py-1.5 text-sm hover:bg-[var(--page)]"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            <span>{t("nav.stopped", { n: stopped.length })}</span>
+                            <span aria-hidden className={`text-xs transition-transform duration-200 motion-reduce:transition-none ${stoppedOpen ? "" : "-rotate-90"}`} style={{ color: "var(--text-muted)" }}>⌄</span>
+                          </button>
+                        ) : it.path ? (
                           <NavLink
                             path={it.path} label={text} active={it.path === path}
-                            level={it.level ?? levels[it.path]} state={it.state} onNavigate={onClose}
+                            level={it.level ?? levels[it.path]} state={it.state} indent={it.indent} onNavigate={onClose}
                           />
                         ) : (
                           <span className="flex items-center justify-between px-4 py-1.5 text-sm" style={{ color: "var(--text-muted)" }}>
@@ -145,8 +164,8 @@ export function Nav({ path, open, onClose, levels, vms }: {
   );
 }
 
-function NavLink({ path, label, active, level, state, onNavigate }: {
-  path: string; label: string; active: boolean; level?: Level; state?: "running" | "stopped"; onNavigate: () => void;
+function NavLink({ path, label, active, level, state, indent, onNavigate }: {
+  path: string; label: string; active: boolean; level?: Level; state?: "running" | "stopped"; indent?: boolean; onNavigate: () => void;
 }) {
   const { t } = useI18n();
   const stateText = state ? t(state === "running" ? "vm.state.running" : "vm.state.stopped") : undefined;
@@ -155,7 +174,7 @@ function NavLink({ path, label, active, level, state, onNavigate }: {
       to={path}
       onNavigate={onNavigate}
       aria-current={active ? "page" : undefined}
-      className="flex items-center justify-between gap-2 px-4 py-1.5 text-sm hover:bg-[var(--page)]"
+      className={`flex items-center justify-between gap-2 py-1.5 pr-4 text-sm hover:bg-[var(--page)] ${indent ? "pl-8" : "pl-4"}`}
       style={{
         color: active ? "var(--text-primary)" : "var(--text-secondary)",
         fontWeight: active ? 600 : 400,

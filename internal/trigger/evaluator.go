@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -285,7 +286,30 @@ func (e *Evaluator) destCulprits(host string, from, to time.Time, by string) ([]
 	for k, v := range shares {
 		shares[k] = v / all
 	}
-	return GroupCulprits(shares)
+	if group, total := GroupCulprits(shares); len(group) > 0 {
+		return group, total
+	}
+	// No single address:port stands out (a connectivity check hitting a dozen addresses of one service, one
+	// failure each): try again per address family block — the host for IPv4, the /64 for IPv6
+	blocks := map[string]float64{}
+	for k, v := range shares {
+		blocks[destBlock(k)] += v
+	}
+	return GroupCulprits(blocks)
+}
+
+// destBlock widens "addr:port" to the address (IPv4) or its /64 (IPv6); "clients at addr" rows keep their address.
+func destBlock(dest string) string {
+	addr := dest
+	if s, ok := strings.CutPrefix(dest, "clients at "); ok {
+		addr = s
+	} else if i := strings.LastIndex(dest, ":"); i >= 0 {
+		addr = dest[:i]
+	}
+	if ip, err := netip.ParseAddr(addr); err == nil && ip.Is6() && !ip.Is4In6() {
+		return netip.PrefixFrom(ip, 64).Masked().String()
+	}
+	return addr
 }
 
 func (e *Evaluator) destDecorator(host, by string) func(*model.Incident) {

@@ -139,7 +139,7 @@ Cells show the latest value, a 5-minute sparkline, and a level mark only when so
 
 ## 4. The screens
 
-![The menu: eBPFLens, VMs (one entry per VM with its state), Host](img/en-menu.png)
+![The menu: eBPFLens, VMs (the list, the VMs that run or need attention, and recently stopped ones under the Stopped (N) fold), Host](img/en-menu.png)
 
 
 The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (VM list, then one entry per VM), **Host** (CPU wait, processes, memory; disk, network and GPU are planned).
@@ -182,12 +182,14 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 
 ### VMs (`/vms` and `/vms/<name>`)
 
-![VM list: state, host-side wait, share, stall, last incident](img/en-vms.png)
+![VM list: the running section and the Stopped (N) fold — eleven VMs stopped within 24 h, opened because nothing runs](img/en-vms.png)
 
 
 *What it is.* KVM guests seen from the host. eBPFLens recognises QEMU processes (libvirt and Proxmox naming), so each VM's CPU wait and reclaim stalls are filed under its name, and a VM's death is explained from host-side evidence. No agent inside the guest is needed for this; no libvirt access either.
 
-*VM list.* One row per VM seen in the last 24 h: state (running since / stopped at · cause), host-side CPU wait p99, share of host CPU, reclaim stall, last incident. VMs with an active incident float to the top.
+*VM list.* Two sections: **Running** (plus VMs that need attention: a stop in the last 5 minutes, or waiting for host CPU now) and **Stopped (N)**, folded closed by default and opened with a click (it opens by itself when nothing runs). Each row: state (running since / stopped at · cause), host-side CPU wait p99, share of host CPU, reclaim stall, last incident.
+
+*A VM's life after it stops.* The host cannot tell a stopped VM from a deleted one, so time decides: 5 minutes in the menu with its level mark, an hour under the menu's **Stopped (N)** fold, 24 hours in the list's stopped section, then gone from both — its page (`/vms/<name>`) still answers from the incidents the DB keeps for 30 days. A VM that starts again under the same name goes back to *running* and its earlier stops become the history on its page.
 
 ![VM page: the VM Lens Summary for a VM killed by its cgroup limit — headline, evidence, next step — then its own charts and incidents](img/en-vm.png)
 

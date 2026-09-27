@@ -4,16 +4,16 @@ import type { Incident } from "../types/model";
 import type { Level } from "./lens";
 import type { Key } from "./i18n";
 
-export type IncidentKind = "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down";
+export type IncidentKind = "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down";
 
 // Instant incidents (an OOM kill, a crash) have no duration, so they keep an area at their level for this long afterwards
 const INSTANT_LINGER_MS = 5 * 60 * 1000;
-const INSTANT_KINDS = new Set<string>(["oom_kill", "crash", "crash_loop"]);
+const INSTANT_KINDS = new Set<string>(["oom_kill", "crash", "crash_loop", "vm_down"]);
 
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
 
 export const isOngoing = (x: Incident) => !x.end;
-export const isInstantKind = (kind: string) => kind === "oom_kill" || kind === "crash";
+export const isInstantKind = (kind: string) => kind === "oom_kill" || kind === "crash" || kind === "vm_down";
 
 // Whether an incident still counts toward the current status.
 // cpu_wait / mem_stall / agent_down: only while ongoing. oom_kill / crash / crash_loop: also for 5 minutes after they ended
@@ -50,6 +50,7 @@ const KIND_KEY: Record<IncidentKind, Key> = {
   crash: "incident.kind.crash",
   crash_loop: "incident.kind.crash_loop",
   agent_down: "incident.kind.agent_down",
+  vm_down: "incident.kind.vm_down",
 };
 
 // Translation key for a kind label (unknown kinds from a newer server fall back to a generic label)

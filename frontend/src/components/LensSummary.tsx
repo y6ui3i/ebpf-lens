@@ -194,6 +194,13 @@ function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
       return t("incident.crashes", { n: x.count ?? x.peak ?? 0 });
     case "agent_down":
       return t("incident.silentFor", { n: x.seconds });
+    case "vm_down": {
+      const causeKey = (`incident.cause.${x.cause ?? "shutdown"}` as Key);
+      let d = t(causeKey);
+      if (x.cause === "crash" && x.signal) d += ` (${signalName(x.signal, lang)})`;
+      if (x.triggerComm) d += t("incident.by", { comm: x.triggerComm });
+      return d;
+    }
     default:
       return "";
   }

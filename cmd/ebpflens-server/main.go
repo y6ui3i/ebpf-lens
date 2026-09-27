@@ -76,6 +76,7 @@ func main() {
 	}
 	// Judge live data on the server; incidents go to the store (and from there to the DB, SSE, and hooks)
 	ev := trigger.New(triggers, st)
+	ev.SetHistory(st)
 	for _, h := range st.Hosts() { // so a host that is still silent after a restart is flagged, not forgotten
 		ev.MarkSeen(h.Name, h.LastSeen)
 	}

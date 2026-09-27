@@ -143,11 +143,45 @@ func Text(event string, i model.Incident) string {
 		what = fmt.Sprintf("%s is crashing repeatedly (%d times since %s)", i.Subject, i.Count, when)
 	case KindAgentDown:
 		what = fmt.Sprintf("host stopped reporting (last sample at %s, silent for %d s)", when, i.Seconds)
+	case KindVMDown:
+		var why string
+		switch i.Cause {
+		case CauseHostOOM:
+			why = fmt.Sprintf("the host ran out of memory and the OOM killer chose it; triggered by %s (pid %d)", i.TriggerComm, i.TriggerPid)
+		case CauseCgroupOOM:
+			why = fmt.Sprintf("its cgroup memory limit was reached; triggered by %s (pid %d)", i.TriggerComm, i.TriggerPid)
+		case CauseCrash:
+			why = fmt.Sprintf("QEMU crashed with signal %d", i.Signal)
+			if i.CoreDump {
+				why += " (core dumped)"
+			}
+		case CauseKilled:
+			why = fmt.Sprintf("QEMU was stopped with signal %d", i.Signal)
+			switch {
+			case isLibvirt(i.TriggerComm):
+				// libvirt runs QEMU with -no-shutdown and sends SIGTERM after a guest shutdown as well as on
+				// "virsh destroy", so from the host these two look the same; libvirt's own stop reason would tell
+				why += fmt.Sprintf(" by %s (pid %d): a managed shutdown or a virsh destroy", i.TriggerComm, i.TriggerPid)
+			case i.TriggerComm != "":
+				why += fmt.Sprintf(" by %s (pid %d)", i.TriggerComm, i.TriggerPid)
+			default:
+				why += " (an administrator, libvirt, or a supervisor)"
+			}
+		default:
+			why = fmt.Sprintf("QEMU exited cleanly with status %d (guest shutdown or a managed stop)", i.ExitStatus)
+		}
+		what = fmt.Sprintf("VM %s stopped at %s: %s", i.VM, when, why)
+		if i.ContextStallMs > 0 || i.ContextWaitP99Us > 0 {
+			what += fmt.Sprintf(". In the minute before: %.0f ms stalled in memory reclaim, CPU wait p99 %s", i.ContextStallMs, formatUs(i.ContextWaitP99Us))
+		}
 	default:
 		what = i.Kind
 	}
 	return fmt.Sprintf("[%s] %s: %s", level, i.Host, what)
 }
+
+// isLibvirt matches the libvirt daemons (monolithic libvirtd or the modular virtqemud).
+func isLibvirt(comm string) bool { return comm == "libvirtd" || comm == "virtqemud" }
 
 func formatUs(us float64) string {
 	switch {

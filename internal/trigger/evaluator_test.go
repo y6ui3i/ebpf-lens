@@ -209,3 +209,109 @@ func TestMarkSeenLetsAgentDownFireAfterRestart(t *testing.T) {
 		t.Fatalf("expected agent_down from the restored last-seen time, got %+v", r.got)
 	}
 }
+
+// history with one memstall and one runqlat sample for VM web-02 in the minute before it dies.
+type fakeHistory struct{ samples map[string][]model.Sample }
+
+func (f fakeHistory) Samples(host, probe string) []model.Sample { return f.samples[probe] }
+
+func vmHistory() fakeHistory {
+	slots := make([]uint64, 27)
+	slots[13] = 50 // 8-16 ms wait
+	return fakeHistory{samples: map[string][]model.Sample{
+		"memstall": {
+			{Host: "h", Probe: "memstall", Time: t0.Add(-30 * time.Second), Procs: []model.ProcStat{{Comm: "vm:web-02", WaitNs: 100e6}}},
+			// the interval in which the VM died is stamped after the exit and must still count
+			{Host: "h", Probe: "memstall", Time: t0.Add(900 * time.Millisecond), Procs: []model.ProcStat{{Comm: "vm:web-02", WaitNs: 20e6}}},
+		},
+		"runqlat": {{Host: "h", Probe: "runqlat", Time: t0.Add(-20 * time.Second), Procs: []model.ProcStat{{Comm: "vm:web-02", Slots: slots}}}},
+	}}
+}
+
+// Recorded in the lab: an OOM kill event is followed by the SIGKILL exit of the same pid.
+func TestVMDownAfterOOMNamesTheCauseAndContext(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.SetHistory(vmHistory())
+	e.OnEvents(model.EventBatch{Host: "h", Time: t0, Events: []model.ProcEvent{
+		{Time: t0, Kind: "oom", Pid: 4242, Comm: "qemu-system-x86", VM: "web-02", TriggerPid: 7001, TriggerComm: "vzdump", Memcg: false},
+		{Time: t0.Add(50 * time.Millisecond), Kind: "exit", Pid: 4242, Comm: "qemu-system-x86", VM: "web-02", Signal: 9},
+	}})
+	if len(r.got) != 2 || r.got[0].Kind != KindOOMKill || r.got[1].Kind != KindVMDown {
+		t.Fatalf("expected oom_kill then vm_down, got %+v", r.got)
+	}
+	vm := r.got[1]
+	if vm.Level != LevelWarning || vm.Cause != CauseHostOOM || vm.VM != "web-02" || vm.TriggerComm != "vzdump" || vm.Signal != 9 {
+		t.Fatalf("unexpected vm_down %+v", vm)
+	}
+	if vm.ContextStallMs != 120 || vm.ContextWaitP99Us < 8000 {
+		t.Fatalf("context not attached: stall=%v p99=%v", vm.ContextStallMs, vm.ContextWaitP99Us)
+	}
+	if vm.Ongoing() || !vm.End.Equal(vm.Start) {
+		t.Fatal("vm_down is an instant incident")
+	}
+	// The plain crash rule must not fire a second incident for the same exit (a SIGKILL is not a crash anyway)
+	for _, x := range r.got {
+		if x.Kind == KindCrash {
+			t.Fatal("a VM exit must not also be reported as a process crash")
+		}
+	}
+}
+
+func TestVMDownCauses(t *testing.T) {
+	cases := []struct {
+		name  string
+		ev    model.ProcEvent
+		cause string
+		level string
+	}{
+		{"segv", model.ProcEvent{Kind: "exit", Signal: 11, CoreDump: true}, CauseCrash, LevelWarning},
+		{"sigterm", model.ProcEvent{Kind: "exit", Signal: 15}, CauseKilled, LevelCaution},
+		{"clean", model.ProcEvent{Kind: "exit", ExitStatus: 0}, CauseShutdown, LevelCaution},
+	}
+	for _, c := range cases {
+		r := &recorder{}
+		e := New(Default(), r)
+		ev := c.ev
+		ev.Time, ev.Pid, ev.Comm, ev.VM = t0, 4242, "qemu-system-x86", "web-02"
+		e.OnEvents(model.EventBatch{Host: "h", Time: t0, Events: []model.ProcEvent{ev}})
+		if len(r.got) != 1 || r.got[0].Kind != KindVMDown || r.got[0].Cause != c.cause || r.got[0].Level != c.level {
+			t.Fatalf("%s: got %+v, want cause=%s level=%s", c.name, r.got, c.cause, c.level)
+		}
+	}
+}
+
+func TestCgroupOOMIsDistinguished(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.OnEvents(model.EventBatch{Host: "h", Time: t0, Events: []model.ProcEvent{
+		{Time: t0, Kind: "oom", Pid: 1, Comm: "qemu-system-x86", VM: "web-02", TriggerPid: 1, TriggerComm: "qemu-system-x86", Memcg: true},
+		{Time: t0, Kind: "exit", Pid: 1, Comm: "qemu-system-x86", VM: "web-02", Signal: 9},
+	}})
+	if got := r.last(); got.Kind != KindVMDown || got.Cause != CauseCgroupOOM || !got.Memcg {
+		t.Fatalf("expected cgroup_oom, got %+v", got)
+	}
+	want := "[WARNING] h: VM web-02 stopped at 10:00:00: its cgroup memory limit was reached; triggered by qemu-system-x86 (pid 1)"
+	if txt := Text("open", r.last()); txt != want {
+		t.Fatalf("text\n got %q\nwant %q", txt, want)
+	}
+}
+
+// Recorded in the lab: "virsh destroy" makes virtqemud send SIGTERM; QEMU handles it and exits 0.
+// Only the signal event tells this apart from a guest shutdown, and it names who did it.
+func TestVMDownKilledBySignalSeenBeforeCleanExit(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.OnEvents(model.EventBatch{Host: "h", Time: t0, Events: []model.ProcEvent{
+		{Time: t0, Kind: "signal", Pid: 4242, Comm: "qemu-system-x86", VM: "web-02", Signal: 15, TriggerPid: 900, TriggerComm: "virtqemud"},
+		{Time: t0.Add(200 * time.Millisecond), Kind: "exit", Pid: 4242, Comm: "qemu-system-x86", VM: "web-02", ExitStatus: 0},
+	}})
+	got := r.last()
+	if got.Kind != KindVMDown || got.Cause != CauseKilled || got.Signal != 15 || got.TriggerComm != "virtqemud" || got.Level != LevelCaution {
+		t.Fatalf("expected killed by virtqemud with SIGTERM, got %+v", got)
+	}
+	want := "[CAUTION] h: VM web-02 stopped at 10:00:00: QEMU was stopped with signal 15 by virtqemud (pid 900): a managed shutdown or a virsh destroy"
+	if txt := Text("open", got); txt != want {
+		t.Fatalf("text\n got %q\nwant %q", txt, want)
+	}
+}

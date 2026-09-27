@@ -1,6 +1,7 @@
-import type { ProcEvent, Sample } from "../types/model";
+import type { Incident, ProcEvent, Sample } from "../types/model";
 import { formatUs, percentile } from "../lib/hist";
 import { current, LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
+import { areaLevel } from "../lib/incidents";
 import { useI18n, type Key } from "../lib/i18n";
 import type { Lifecycle } from "../lib/lifecycle";
 import type { TimeWindow } from "../lib/timeWindow";
@@ -24,17 +25,22 @@ const COLUMNS: { title: Key; hint: Key }[] = [
   { title: "use.col.err", hint: "use.col.errHint" },
 ];
 
-export function UseMatrix({ samples, memSamples, events, life, win }: {
-  samples: Sample[]; memSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; win: TimeWindow;
+// Levels in the cells come from the server's incidents; the numbers still come from samples and events
+export function UseMatrix({ samples, memSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
+  const nowMs = Date.now();
   const mem = currentMem(memSamples);
   const utilSeries = samples.map((s) => (s.cpus && s.intervalMs ? s.busyNs / (s.intervalMs * 1e6 * s.cpus) : null));
   const util = mean(utilSeries.slice(-5));
   const cpuNow = current(samples);
   const p99Series = samples.map((s) => percentile(s.slots, 0.99));
   const execSeries = perSecond(events.filter((e) => e.kind === "exec"), win);
-  const crashLevel: Level = life.crashLoops.length > 0 ? "warning" : life.crashes.length > 0 ? "caution" : "ok";
+  const cpuLevel = areaLevel(incidents, ["cpu_wait"], nowMs);
+  const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
+  const oomLevel = areaLevel(incidents, ["oom_kill"], nowMs);
+  const crashLevel = areaLevel(incidents, ["crash", "crash_loop"], nowMs);
 
   const rows: Row[] = [
     {
@@ -43,7 +49,7 @@ export function UseMatrix({ samples, memSamples, events, life, win }: {
         { kind: "value", value: util == null ? "–" : `${Math.round(util * 100)}%`, note: t("use.cpuUtil"), spark: utilSeries, to: "/cpu" },
         {
           kind: "value", value: formatUs(cpuNow.p99), note: t("use.cpuSat"),
-          level: cpuNow.level, spark: p99Series, log: true, to: "/cpu",
+          level: cpuLevel, spark: p99Series, log: true, to: "/cpu",
         },
         { kind: "na" },
       ],
@@ -57,11 +63,11 @@ export function UseMatrix({ samples, memSamples, events, life, win }: {
         },
         {
           kind: "value", value: formatMsPerSec(mem.stall, lang), note: t("use.memSat"),
-          level: mem.level, spark: memSamples.map(stallMsPerSec), to: "/memory",
+          level: memLevel, spark: memSamples.map(stallMsPerSec), to: "/memory",
         },
         {
           kind: "value", value: `${life.ooms.length}`, note: t("use.memErr"),
-          level: life.ooms.length > 0 ? "warning" : "ok", to: "/processes",
+          level: oomLevel, to: "/processes",
         },
       ],
     },

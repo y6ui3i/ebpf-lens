@@ -22,19 +22,33 @@ type Message struct {
 type Persister interface {
 	SaveSample(model.Sample)
 	SaveEvents(model.EventBatch)
+	SaveIncident(model.Incident)
 }
 
-// Store holds the latest keep samples per host × probe and the latest keepEvents events per host.
+// Observer sees every live sample and event batch after it is stored (the trigger evaluator is one).
+// Observers are called outside the store lock and may call back into the store.
+type Observer interface {
+	OnSample(model.Sample)
+	OnEvents(model.EventBatch)
+}
+
+// keepIncidents bounds the per-host incident list held in memory; the DB keeps the rest.
+const keepIncidents = 500
+
+// Store holds the latest keep samples per host × probe, the latest keepEvents events per host, and recent incidents.
 // The in-memory data is the recent window for the UI; the Persister holds what is kept longer.
 type Store struct {
-	persist    Persister
-	mu         sync.RWMutex
-	keep       int
-	keepEvents int
-	series     map[key][]model.Sample
-	events     map[string][]model.ProcEvent
-	lastSeen   map[string]time.Time
-	subs       map[chan Message]string // subscriber channel -> host filter ("" means all hosts)
+	persist       Persister
+	mu            sync.RWMutex
+	keep          int
+	keepEvents    int
+	series        map[key][]model.Sample
+	events        map[string][]model.ProcEvent
+	incidents     map[string][]model.Incident
+	lastSeen      map[string]time.Time
+	subs          map[chan Message]string // subscriber channel -> host filter ("" means all hosts)
+	observers     []Observer
+	incidentHooks []func(model.Incident)
 }
 
 func New(keep, keepEvents int) *Store {
@@ -43,9 +57,24 @@ func New(keep, keepEvents int) *Store {
 		keepEvents: keepEvents,
 		series:     map[key][]model.Sample{},
 		events:     map[string][]model.ProcEvent{},
+		incidents:  map[string][]model.Incident{},
 		lastSeen:   map[string]time.Time{},
 		subs:       map[chan Message]string{},
 	}
+}
+
+// AddObserver registers an Observer for live data (restored history is not replayed to it).
+func (s *Store) AddObserver(o Observer) {
+	s.mu.Lock()
+	s.observers = append(s.observers, o)
+	s.mu.Unlock()
+}
+
+// OnIncident registers a hook called for every live incident upsert (e.g. the webhook notifier).
+func (s *Store) OnIncident(h func(model.Incident)) {
+	s.mu.Lock()
+	s.incidentHooks = append(s.incidentHooks, h)
+	s.mu.Unlock()
 }
 
 // SetPersister sets the storage backend. Call it after restoring history with LoadInto (so the restored data is not written again).
@@ -55,13 +84,12 @@ func (s *Store) SetPersister(p Persister) {
 	s.mu.Unlock()
 }
 
-// Add adds a sample, persists it, and delivers it to subscribers.
+// Add adds a live sample: it is stored, persisted, delivered to subscribers, and judged by the observers.
 func (s *Store) Add(x model.Sample) { s.add(x, true) }
 
-func (s *Store) add(x model.Sample, save bool) {
+// add stores a sample. live is false when restoring history: nothing is persisted again or re-judged.
+func (s *Store) add(x model.Sample, live bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	k := key{x.Host, x.Probe}
 	buf := append(s.series[k], x)
 	if len(buf) > s.keep {
@@ -71,28 +99,78 @@ func (s *Store) add(x model.Sample, save bool) {
 	if x.Time.After(s.lastSeen[x.Host]) {
 		s.lastSeen[x.Host] = x.Time
 	}
-	if save && s.persist != nil {
+	if live && s.persist != nil {
 		s.persist.SaveSample(x)
 	}
 	s.publish(x.Host, Message{"sample", x})
+	obs := s.observers
+	s.mu.Unlock()
+
+	if live {
+		for _, o := range obs {
+			o.OnSample(x)
+		}
+	}
 }
 
-// AddEvents adds events, persists them, and delivers them to subscribers as one batch.
+// AddEvents adds a live batch of events: stored, persisted, delivered to subscribers, and judged by the observers.
 func (s *Store) AddEvents(b model.EventBatch) { s.addEvents(b, true) }
 
-func (s *Store) addEvents(b model.EventBatch, save bool) {
+func (s *Store) addEvents(b model.EventBatch, live bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	buf := append(s.events[b.Host], b.Events...)
 	if len(buf) > s.keepEvents {
 		buf = slices.Clone(buf[len(buf)-s.keepEvents:])
 	}
 	s.events[b.Host] = buf
-	if save && s.persist != nil {
+	if live && s.persist != nil {
 		s.persist.SaveEvents(b)
 	}
 	s.publish(b.Host, Message{"events", b})
+	obs := s.observers
+	s.mu.Unlock()
+
+	if live {
+		for _, o := range obs {
+			o.OnEvents(b)
+		}
+	}
+}
+
+// AddIncident inserts or replaces an incident by ID, persists it, streams it to subscribers, and runs the hooks.
+func (s *Store) AddIncident(inc model.Incident) { s.addIncident(inc, true) }
+
+func (s *Store) addIncident(inc model.Incident, live bool) {
+	s.mu.Lock()
+	buf := s.incidents[inc.Host]
+	if i := slices.IndexFunc(buf, func(x model.Incident) bool { return x.ID == inc.ID }); i >= 0 {
+		buf[i] = inc
+	} else {
+		buf = append(buf, inc)
+		if len(buf) > keepIncidents {
+			buf = slices.Clone(buf[len(buf)-keepIncidents:])
+		}
+	}
+	s.incidents[inc.Host] = buf
+	if live && s.persist != nil {
+		s.persist.SaveIncident(inc)
+	}
+	s.publish(inc.Host, Message{"incident", inc})
+	hooks := s.incidentHooks
+	s.mu.Unlock()
+
+	if live {
+		for _, h := range hooks {
+			h(inc)
+		}
+	}
+}
+
+// Incidents returns a copy of the stored incidents for a host, oldest first.
+func (s *Store) Incidents(host string) []model.Incident {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return orEmpty(slices.Clone(s.incidents[host]))
 }
 
 // Events returns a copy of the stored events, oldest first.

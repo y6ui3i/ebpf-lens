@@ -1,13 +1,16 @@
 import { useState } from "react";
 import type { ProcEvent } from "../types/model";
-import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY } from "../lib/lens";
+import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
 import { formatTime, translate, useI18n, type Key, type Lang } from "../lib/i18n";
 import { formatLifetime, isCrash, isErrorExit, signalName, type Lifecycle } from "../lib/lifecycle";
 
 const LOG_ROWS = 30;
 
-// Process starts, exits and kills. Lists even short-lived processes that polling monitors cannot see, one by one
-export function LifecyclePanel({ events, life, dropped }: { events: ProcEvent[]; life: Lifecycle; dropped: number }) {
+// Process starts, exits and kills. Lists even short-lived processes that polling monitors cannot see, one by one.
+// `level` is the process area's level from the server's incidents (oom_kill / crash / crash_loop)
+export function LifecyclePanel({ events, life, dropped, level }: {
+  events: ProcEvent[]; life: Lifecycle; dropped: number; level: Level;
+}) {
   const { lang, t } = useI18n();
   const [onlyProblems, setOnlyProblems] = useState(false);
   const notable = [...life.ooms, ...life.crashes].sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
@@ -35,7 +38,7 @@ export function LifecyclePanel({ events, life, dropped }: { events: ProcEvent[];
           label={t("lp.tileCrash")}
           value={life.crashes.length + life.ooms.length}
           note={t("lp.tileCrashNote")}
-          level={life.level}
+          level={level}
         />
       </div>
 

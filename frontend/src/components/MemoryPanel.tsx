@@ -3,16 +3,17 @@ import uPlot from "uplot";
 import type { Sample } from "../types/model";
 import type { TimeWindow } from "../lib/timeWindow";
 import { cssVar } from "../lib/theme";
-import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY } from "../lib/lens";
+import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
+import { useTriggers } from "../lib/useTriggers";
 import { formatHMS, formatTime, useI18n } from "../lib/i18n";
-import {
-  CAUTION_MS_PER_S, WARNING_MS_PER_S, currentMem, formatBytes, formatMsPerSec, psiMsPerSec, stallMsPerSec, stalledProcs,
-} from "../lib/memory";
+import { currentMem, formatBytes, formatMsPerSec, psiMsPerSec, stallMsPerSec, stalledProcs } from "../lib/memory";
 import { Heatmap, CHART_HEIGHT } from "./Heatmap";
 
-// Time processes spent stalled freeing memory themselves (reclaim) because memory ran short
-export function MemoryPanel({ samples, win, schemeKey }: { samples: Sample[]; win: TimeWindow; schemeKey: string }) {
+// Time processes spent stalled freeing memory themselves (reclaim) because memory ran short.
+// `level` is the memory area's level from the server's mem_stall incidents
+export function MemoryPanel({ samples, win, schemeKey, level }: { samples: Sample[]; win: TimeWindow; schemeKey: string; level: Level }) {
   const { lang, t } = useI18n();
+  const thresholds = useTriggers().memory; // ms/s, the same numbers the server judges with
   const now = currentMem(samples);
   const procs = stalledProcs(samples);
   const [hoverMs, setHoverMs] = useState<number | null>(null);
@@ -26,7 +27,7 @@ export function MemoryPanel({ samples, win, schemeKey }: { samples: Sample[]; wi
       </p>
 
       <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Tile label={t("mem.tileStall")} value={formatMsPerSec(now.stall, lang)} note={t("mem.tileStallNote")} level={now.level} />
+        <Tile label={t("mem.tileStall")} value={formatMsPerSec(now.stall, lang)} note={t("mem.tileStallNote")} level={level} />
         <Tile label={t("mem.tileUsed")} value={now.used == null ? "–" : `${Math.round(now.used * 100)}%`} note={now.mem ? t("mem.tileUsedNote", { total: formatBytes(now.mem.totalBytes) }) : ""} />
         <Tile label={t("mem.tileAvail")} value={now.mem ? formatBytes(now.mem.availableBytes) : "–"} note={t("mem.tileAvailNote")} />
         <Tile label="PSI some" value={formatMsPerSec(samples.at(-1) ? psiMsPerSec(samples.at(-1)!) : null, lang)} note={t("mem.tilePsiNote")} />
@@ -43,9 +44,9 @@ export function MemoryPanel({ samples, win, schemeKey }: { samples: Sample[]; wi
         <div className="min-w-0">
           <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("mem.trendTitle")}</h3>
           <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>
-            {t("mem.trendNote", { c: CAUTION_MS_PER_S, w: WARNING_MS_PER_S })}
+            {t("mem.trendNote", { c: thresholds.caution, w: thresholds.warning })}
           </p>
-          <StallChart samples={samples} win={win} schemeKey={schemeKey} />
+          <StallChart samples={samples} win={win} schemeKey={schemeKey} caution={thresholds.caution} warning={thresholds.warning} />
         </div>
       </div>
 
@@ -104,8 +105,10 @@ function Tile({ label, value, note, level }: { label: string; value: string; not
   );
 }
 
-// Plots eBPF stall time and PSI some in the same unit (ms/s) on the same axis
-function StallChart({ samples, win, schemeKey }: { samples: Sample[]; win: TimeWindow; schemeKey: string }) {
+// Plots eBPF stall time and PSI some in the same unit (ms/s) on the same axis, with the server's thresholds as lines
+function StallChart({ samples, win, schemeKey, caution, warning }: {
+  samples: Sample[]; win: TimeWindow; schemeKey: string; caution: number; warning: number;
+}) {
   const { lang, t } = useI18n();
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -134,7 +137,7 @@ function StallChart({ samples, win, schemeKey }: { samples: Sample[]; win: TimeW
         scales: {
           x: { time: true, range: () => [winRef.current.startMs / 1000, winRef.current.endMs / 1000] },
           // Keep the top at least slightly above the warning threshold so the thresholds are visible even at the normal value (0)
-          y: { range: (_u, _min, max) => [0, Math.max(max ?? 0, WARNING_MS_PER_S) * 1.1] },
+          y: { range: (_u, _min, max) => [0, Math.max(max ?? 0, warning) * 1.1] },
         },
         axes: [
           {
@@ -155,8 +158,8 @@ function StallChart({ samples, win, schemeKey }: { samples: Sample[]; win: TimeW
               const { left, width } = u.bbox;
               ctx.save();
               for (const [v, color, label] of [
-                [CAUTION_MS_PER_S, cssVar("--status-warning"), t("chart.caution", { v: `${CAUTION_MS_PER_S} ${t("unit.msPerSec")}` })],
-                [WARNING_MS_PER_S, cssVar("--status-critical"), t("chart.warning", { v: `${WARNING_MS_PER_S} ${t("unit.msPerSec")}` })],
+                [caution, cssVar("--status-warning"), t("chart.caution", { v: `${caution} ${t("unit.msPerSec")}` })],
+                [warning, cssVar("--status-critical"), t("chart.warning", { v: `${warning} ${t("unit.msPerSec")}` })],
               ] as const) {
                 const y = u.valToPos(v, "y", true);
                 ctx.strokeStyle = color;
@@ -190,7 +193,7 @@ function StallChart({ samples, win, schemeKey }: { samples: Sample[]; win: TimeW
       u.destroy();
       plotRef.current = null;
     };
-  }, [schemeKey, lang]); // colors and labels are read at creation, so rebuild on theme or language change
+  }, [schemeKey, lang, caution, warning]); // colors, labels and thresholds are read at creation, so rebuild when they change
 
   useEffect(() => {
     plotRef.current?.setData(data);

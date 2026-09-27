@@ -10,6 +10,7 @@ import (
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/store"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
 )
 
 const maxSlots = 64
@@ -21,8 +22,10 @@ const maxSlots = 64
 //	GET  /api/samples?host=&probe=    history
 //	POST /api/events                  receive events from agents
 //	GET  /api/events?host=            event history
-//	GET  /api/stream?host=            SSE of new data (event: sample / events)
-func Register(mux *http.ServeMux, st *store.Store) {
+//	GET  /api/incidents?host=         incidents, newest first (ongoing ones have no "end")
+//	GET  /api/triggers                the thresholds the server judges with (the UI draws its bands from them)
+//	GET  /api/stream?host=            SSE of new data (event: sample / events / incident)
+func Register(mux *http.ServeMux, st *store.Store, triggers trigger.Config) {
 	mux.HandleFunc("POST /api/ingest", func(w http.ResponseWriter, r *http.Request) {
 		var x model.Sample
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&x); err != nil {
@@ -56,6 +59,16 @@ func Register(mux *http.ServeMux, st *store.Store) {
 
 	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, st.Events(r.URL.Query().Get("host")))
+	})
+
+	mux.HandleFunc("GET /api/incidents", func(w http.ResponseWriter, r *http.Request) {
+		xs := st.Incidents(r.URL.Query().Get("host"))
+		trigger.SortIncidents(xs)
+		writeJSON(w, xs)
+	})
+
+	mux.HandleFunc("GET /api/triggers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, triggers)
 	})
 
 	mux.HandleFunc("GET /api/hosts", func(w http.ResponseWriter, r *http.Request) {

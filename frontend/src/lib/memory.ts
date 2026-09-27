@@ -1,13 +1,10 @@
 // Turns memory reclaim stalls (memstall) into what they mean for an operator.
+// Whether a stall is "bad" is judged by the server (mem_stall incidents); this file only summarizes values.
 import type { Sample } from "../types/model";
 import type { Level } from "./lens";
 import { translate, type Key, type Lang, type Params } from "./i18n";
 
-// Thresholds (provisional): total time all processes spent stalled on reclaim per second.
-// On hal it is 0 normally; reading a 3GB file inside a 64MB cgroup limit gave about 8 ms/s
-export const CAUTION_MS_PER_S = 10;
-export const WARNING_MS_PER_S = 100;
-const CURRENT_WINDOW = 5; // judge by the median of the last 5 s (so a momentary spike does not flip it)
+const CURRENT_WINDOW = 5; // current value is the median of the last 5 s (so a momentary spike does not flip it)
 
 export const stallMsPerSec = (s: Sample) =>
   s.mem && s.intervalMs ? s.mem.stallNs / 1e6 / (s.intervalMs / 1000) : null;
@@ -16,16 +13,11 @@ export const psiMsPerSec = (s: Sample) =>
 export const memUsed = (s: Sample) =>
   s.mem && s.mem.totalBytes ? 1 - s.mem.availableBytes / s.mem.totalBytes : null;
 
-export function levelOf(msPerSec: number | null): Level {
-  if (msPerSec == null || msPerSec < CAUTION_MS_PER_S) return "ok";
-  return msPerSec < WARNING_MS_PER_S ? "caution" : "warning";
-}
-
 export function currentMem(samples: Sample[]) {
   const xs = samples.slice(-CURRENT_WINDOW).map(stallMsPerSec).filter((v): v is number => v != null).sort((a, b) => a - b);
   const stall = xs.length ? xs[Math.floor(xs.length / 2)] : null;
   const last = samples.at(-1);
-  return { stall, level: levelOf(stall), used: last ? memUsed(last) : null, mem: last?.mem };
+  return { stall, used: last ? memUsed(last) : null, mem: last?.mem };
 }
 
 export type StallProc = {
@@ -68,8 +60,9 @@ export const formatMsPerSec = (v: number | null, lang: Lang) => {
   return v == null ? "–" : v < 0.01 ? `0 ${unit}` : `${v < 10 ? v.toFixed(1) : Math.round(v)} ${unit}`;
 };
 
-// One-line sentence for the summary. Templates live in i18n.tsx because word order differs per language
-export function memorySentence(samples: Sample[], lang: Lang): string {
+// One-line sentence for the summary. Templates live in i18n.tsx because word order differs per language.
+// `level` is the memory area's level from the server's mem_stall incidents; the "stalling" wording is used while it is not OK
+export function memorySentence(samples: Sample[], lang: Lang, level: Level): string {
   const tr = (k: Key, p?: Params) => translate(lang, k, p);
   const now = currentMem(samples);
   const usage =
@@ -77,7 +70,7 @@ export function memorySentence(samples: Sample[], lang: Lang): string {
       ? tr("mem.usage", { pct: Math.round(now.used * 100), free: formatBytes(now.mem.availableBytes) })
       : "";
   const top = stalledProcs(samples)[0];
-  if (now.level !== "ok") {
+  if (level !== "ok") {
     return tr("mem.stalling", {
       stall: formatMsPerSec(now.stall, lang),
       top: top ? tr("mem.top", { comm: top.comm }) : "",

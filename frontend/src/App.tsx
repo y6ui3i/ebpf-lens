@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { HostInfo } from "./types/model";
 import { useLiveHost, type StreamStatus } from "./lib/useLiveHost";
 import { analyze } from "./lib/lifecycle";
-import { current, type Level } from "./lib/lens";
+import type { Level } from "./lib/lens";
+import { areaLevel } from "./lib/incidents";
 import { useColorSchemeKey } from "./lib/theme";
 import { timeWindow } from "./lib/timeWindow";
 import { Link, ROUTES, usePath } from "./lib/router";
@@ -15,12 +16,13 @@ import { ImpactPanel } from "./components/ImpactPanel";
 import { CpuLatencyCard } from "./components/CpuLatencyCard";
 import { LifecyclePanel } from "./components/LifecyclePanel";
 import { MemoryPanel } from "./components/MemoryPanel";
-import { currentMem } from "./lib/memory";
 import type { Sample } from "./types/model";
 
 const WINDOW = 300; // last 5 minutes (one column per second)
 const PROBES = ["runqlat", "memstall"] as const;
 const EMPTY: Sample[] = [];
+const PROCESS_KINDS = ["oom_kill", "crash", "crash_loop"] as const;
+const TICK_MS = 30_000; // re-evaluate "ended within the last 5 minutes" even when no new data arrives
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
 const worst = (...xs: Level[]) => xs.reduce((a, b) => (RANK[a] >= RANK[b] ? a : b), "ok");
 
@@ -39,16 +41,25 @@ export default function App() {
   const [picked, setPicked] = useState<string>();
   const host = picked ?? hosts.data?.[0]?.name;
   // Keep receiving outside the screens, so the live view does not break when switching screens
-  const { samples: byProbe, events, dropped, status } = useLiveHost(host, PROBES, WINDOW);
+  const { samples: byProbe, events, incidents, dropped, status } = useLiveHost(host, PROBES, WINDOW);
   const samples = byProbe.runqlat ?? EMPTY;
   const memSamples = byProbe.memstall ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
   // The visible range follows the CPU samples; the memory screen uses the same 5 minutes
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
-  const cpuLevel = current(samples).level;
-  const memLevel = currentMem(memSamples).level;
-  const overall = worst(cpuLevel, memLevel, life.level);
-  const levels = { "/": overall, "/all": overall, "/cpu": cpuLevel, "/processes": life.level, "/memory": memLevel };
+  // Levels come from the server's incidents (a periodic tick keeps the time-based ones fresh while nothing arrives)
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+  const nowMs = Date.now();
+  const cpuLevel = areaLevel(incidents, ["cpu_wait"], nowMs);
+  const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
+  const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
+  const agentLevel = areaLevel(incidents, ["agent_down"], nowMs);
+  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel);
+  const levels = { "/": overall, "/all": overall, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel };
   const routeKey = ROUTES.find((r) => r.path === path)?.labelKey;
   const title = routeKey ? t(routeKey) : "";
 
@@ -104,7 +115,7 @@ export default function App() {
         ) : path === "/cpu" ? (
           <>
             <CpuLatencyCard samples={samples} win={win} schemeKey={schemeKey} />
-            <div className="mt-6"><ImpactPanel samples={samples} /></div>
+            <div className="mt-6"><ImpactPanel samples={samples} incidents={incidents} /></div>
           </>
         ) : path === "/all" ? (
           <AllPanels>
@@ -112,23 +123,23 @@ export default function App() {
               <CpuLatencyCard samples={samples} win={win} schemeKey={schemeKey} />
             </PanelSection>
             <PanelSection id="impact" title={t("page.impact")}>
-              <ImpactPanel samples={samples} />
+              <ImpactPanel samples={samples} incidents={incidents} />
             </PanelSection>
             <PanelSection id="memory" title={t("page.memory")}>
-              <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} />
+              <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} level={memLevel} />
             </PanelSection>
             <PanelSection id="processes" title={t("page.processes")}>
-              <LifecyclePanel events={events} life={life} dropped={dropped} />
+              <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
             </PanelSection>
           </AllPanels>
         ) : path === "/memory" ? (
-          <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} />
+          <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} level={memLevel} />
         ) : path === "/processes" ? (
-          <LifecyclePanel events={events} life={life} dropped={dropped} />
+          <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
         ) : (
           <>
-            <LensSummary samples={samples} memSamples={memSamples} life={life} />
-            <UseMatrix samples={samples} memSamples={memSamples} events={events} life={life} win={win} />
+            <LensSummary samples={samples} memSamples={memSamples} life={life} incidents={incidents} />
+            <UseMatrix samples={samples} memSamples={memSamples} events={events} life={life} incidents={incidents} win={win} />
           </>
         )}
       </main>

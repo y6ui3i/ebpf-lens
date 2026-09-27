@@ -81,3 +81,29 @@ type HostInfo struct {
 	LastSeen time.Time `json:"lastSeen"`
 	Probes   []string  `json:"probes"`
 }
+
+// Incident is one thing that went wrong, as judged by the server-side trigger rules.
+// Ongoing incidents have End == nil. Instant incidents (an OOM kill, a crash) have End == Start.
+type Incident struct {
+	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
+	Host    string     `json:"host"`
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down"
+	Level   string     `json:"level"`             // "caution" | "warning"
+	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
+	Start   time.Time  `json:"start"`
+	End     *time.Time `json:"end,omitempty"`
+	Updated time.Time  `json:"updated"`
+	Seconds int        `json:"seconds"`         // seconds the condition held (cpu_wait / mem_stall / agent_down)
+	Peak    float64    `json:"peak,omitempty"`  // cpu_wait: p99 in µs; mem_stall: ms/s; crash_loop: crash count
+	Count   int        `json:"count,omitempty"` // crash_loop: crashes so far
+	// oom_kill / crash details
+	Pid         uint32 `json:"pid,omitempty"`
+	Signal      int    `json:"signal,omitempty"`
+	CoreDump    bool   `json:"coreDump,omitempty"`
+	Memcg       bool   `json:"memcg,omitempty"`
+	TriggerComm string `json:"triggerComm,omitempty"`
+	TriggerPid  uint32 `json:"triggerPid,omitempty"`
+}
+
+// Ongoing reports whether the incident is still open.
+func (i Incident) Ongoing() bool { return i.End == nil }

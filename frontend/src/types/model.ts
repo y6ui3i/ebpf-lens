@@ -99,3 +99,29 @@ export interface HostInfo {
   lastSeen: string /* RFC3339 */;
   probes: string[];
 }
+/**
+ * Incident is one thing that went wrong, as judged by the server-side trigger rules.
+ * Ongoing incidents have End == nil. Instant incidents (an OOM kill, a crash) have End == Start.
+ */
+export interface Incident {
+  id: string; // host + kind + subject + start; stable across updates
+  host: string;
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down"
+  level: string; // "caution" | "warning"
+  subject?: string; // process name for oom_kill / crash / crash_loop
+  start: string /* RFC3339 */;
+  end?: string /* RFC3339 */;
+  updated: string /* RFC3339 */;
+  seconds: number /* int */; // seconds the condition held (cpu_wait / mem_stall / agent_down)
+  peak?: number /* float64 */; // cpu_wait: p99 in µs; mem_stall: ms/s; crash_loop: crash count
+  count?: number /* int */; // crash_loop: crashes so far
+  /**
+   * oom_kill / crash details
+   */
+  pid?: number /* uint32 */;
+  signal?: number /* int */;
+  coreDump?: boolean;
+  memcg?: boolean;
+  triggerComm?: string;
+  triggerPid?: number /* uint32 */;
+}

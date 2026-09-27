@@ -1,0 +1,91 @@
+// Package trigger judges samples and events on the server and turns them into incidents.
+// The rules are deterministic and every verdict can be traced back to the numbers that caused it (see docs/adr/0001).
+package trigger
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+// Config holds every threshold and window the rules use. It is served at GET /api/triggers so the UI draws
+// its threshold bands from the same numbers the server judges with.
+type Config struct {
+	CPU       ExcursionRule `json:"cpu"`       // run-queue latency p99, in µs
+	Memory    ExcursionRule `json:"memory"`    // time stalled in reclaim, in ms per second
+	Processes ProcessRule   `json:"processes"` // crashes and OOM kills
+	AgentDown AgentDownRule `json:"agentDown"` // a host that stopped reporting
+}
+
+// ExcursionRule describes "a value stayed above a threshold for a while".
+// A single second over the threshold is noise; the incident opens only after MinSeconds and closes only after
+// the value has been back below the threshold for more than MaxGapSeconds.
+type ExcursionRule struct {
+	Caution       float64 `json:"caution"`
+	Warning       float64 `json:"warning"`
+	MinSeconds    int     `json:"minSeconds"`
+	MaxGapSeconds int     `json:"maxGapSeconds"`
+}
+
+// ProcessRule: a crash is a caution, an OOM kill is a warning, and the same command crashing
+// CrashLoopCount times within CrashLoopWindowSeconds is a warning (a crash loop).
+type ProcessRule struct {
+	CrashLoopCount         int `json:"crashLoopCount"`
+	CrashLoopWindowSeconds int `json:"crashLoopWindowSeconds"`
+}
+
+// AgentDownRule: a host is "down" (as far as we can tell) after AfterSeconds without any sample.
+type AgentDownRule struct {
+	AfterSeconds int `json:"afterSeconds"`
+}
+
+// Default returns the provisional thresholds. They were chosen from measurements on the test machine:
+// the per-second CPU p99 is about 30 µs idle and 16 ms under 4x oversubscription; reclaim stalls are 0 idle
+// and about 11 ms/s with four dd processes fighting a 32 MB cgroup.
+func Default() Config {
+	return Config{
+		CPU:       ExcursionRule{Caution: 1_000, Warning: 10_000, MinSeconds: 3, MaxGapSeconds: 2},
+		Memory:    ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 2},
+		Processes: ProcessRule{CrashLoopCount: 3, CrashLoopWindowSeconds: 300},
+		AgentDown: AgentDownRule{AfterSeconds: 30},
+	}
+}
+
+// Load reads a JSON file over the defaults, so a file only needs the values it changes.
+func Load(path string) (Config, error) {
+	cfg := Default()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg, cfg.Validate()
+}
+
+// Validate rejects values that would make the rules meaningless (e.g. warning below caution).
+func (c Config) Validate() error {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory} {
+		switch {
+		case r.Caution <= 0 || r.Warning <= 0:
+			return fmt.Errorf("%s: thresholds must be positive", name)
+		case r.Warning < r.Caution:
+			return fmt.Errorf("%s: warning (%v) must not be below caution (%v)", name, r.Warning, r.Caution)
+		case r.MinSeconds < 1:
+			return fmt.Errorf("%s: minSeconds must be at least 1", name)
+		case r.MaxGapSeconds < 0:
+			return fmt.Errorf("%s: maxGapSeconds must not be negative", name)
+		}
+	}
+	if c.Processes.CrashLoopCount < 2 {
+		return fmt.Errorf("processes: crashLoopCount must be at least 2")
+	}
+	if c.Processes.CrashLoopWindowSeconds < 1 {
+		return fmt.Errorf("processes: crashLoopWindowSeconds must be at least 1")
+	}
+	if c.AgentDown.AfterSeconds < 5 {
+		return fmt.Errorf("agentDown: afterSeconds must be at least 5")
+	}
+	return nil
+}

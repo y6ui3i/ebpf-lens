@@ -1,7 +1,7 @@
 import type { Incident, Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
-import { asLevel, kindKey } from "../lib/incidents";
+import { asLevel, isInstantKind, isOngoing, kindKey } from "../lib/incidents";
 import { formatMsPerSec } from "../lib/memory";
 import { knownVms, levelFor, runningVms, vmCpuShare, vmStallMsPerSec, vmWaitP99, type VmState } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
@@ -46,7 +46,8 @@ export function VmListPanel({ vmSamples, samples, memSamples, incidents }: {
                 const wait = v.running ? vmWaitP99(samples, v.name) : null;
                 const share = v.running ? vmCpuShare(samples, v.name) : null;
                 const stall = v.running ? vmStallMsPerSec(memSamples, v.name) : null;
-                const last = v.incidents[0];
+                // What is happening now (an ongoing vm_cpu_wait) outranks the newest ended incident
+                const last = v.incidents.find(isOngoing) ?? v.incidents[0];
                 return (
                   <tr key={v.name} style={{ borderTop: "1px solid var(--grid)" }}>
                     <td className="py-1.5 pr-3 whitespace-nowrap">
@@ -69,6 +70,7 @@ export function VmListPanel({ vmSamples, samples, memSamples, incidents }: {
                         <>
                           <Marked level={asLevel(last.level)}>{t(kindKey(last.kind))}</Marked>
                           {" · "}{formatTime(lang, last.start)}
+                          {isOngoing(last) && !isInstantKind(last.kind) && <>{" · "}{t("common.ongoing")}</>}
                           <span style={{ color: "var(--text-muted)" }}> · {incidentDetail(last, lang, t)}</span>
                         </>
                       ) : (

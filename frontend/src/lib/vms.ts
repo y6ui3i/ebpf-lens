@@ -1,14 +1,16 @@
-// Turns the "vms" probe, the per-process runqlat / memstall stats and the vm_down incidents into per-VM views.
-// Whether a VM stop is "bad" is judged by the server (vm_down incidents); this file only reads and aggregates.
+// Turns the "vms" probe, the per-process runqlat / memstall stats and the VM incidents (vm_down, vm_cpu_wait) into per-VM views.
+// Whether a VM stop or its CPU wait is "bad" is judged by the server; this file only reads and aggregates.
 import type { Incident, ProcStat, Sample, VMInfo } from "../types/model";
 import { percentile } from "./hist";
-import { areaLevel } from "./incidents";
+import { areaLevel, isOngoing } from "./incidents";
 import type { Level } from "./lens";
 
 const SLOTS = 27; // log2 histogram size the agent sends (µs, 2^0 .. 2^26)
 const RECENT = 5; // seconds used for the "current" numbers in the list and the USE row
 const DAY_MS = 24 * 60 * 60 * 1000;
-const VM_KINDS = ["vm_down", "oom_kill"] as const;
+// Incident kinds that belong to a VM. The area level of the VM group (dashboard, nav, USE row) is judged over VM_AREA_KINDS
+const VM_KINDS = ["vm_down", "oom_kill", "vm_cpu_wait"] as const;
+export const VM_AREA_KINDS = ["vm_down", "vm_cpu_wait"] as const;
 
 // A VM's QEMU process is filed under this comm in runqlat / memstall
 export const vmComm = (name: string) => `vm:${name}`;
@@ -18,8 +20,9 @@ export type VmState = {
   running: boolean;
   info?: VMInfo; // present while running
   lastDown?: Incident; // latest vm_down of this VM within the kept 24 h
-  level: Level; // worst level of this VM's incidents that still count (vm_down lingers 5 minutes)
-  incidents: Incident[]; // vm_down / oom_kill of this VM, newest first
+  cpuWait?: Incident; // ongoing vm_cpu_wait of this VM (it is waiting for host CPU right now)
+  level: Level; // worst level of this VM's incidents that still count (vm_down lingers 5 minutes, vm_cpu_wait while ongoing)
+  incidents: Incident[]; // vm_down / oom_kill / vm_cpu_wait of this VM, newest first
 };
 
 // The VMs on the host right now (from the latest "vms" sample). undefined when no vms sample has arrived yet
@@ -30,13 +33,24 @@ export function runningVms(vmSamples: Sample[]): VMInfo[] | undefined {
 
 export const runningCounts = (vmSamples: Sample[]): number[] => vmSamples.map((s) => s.vms?.length ?? 0);
 
-// Incidents that belong to a VM: its vm_down, and OOM kills of its QEMU process. The input is newest first
+// Incidents that belong to a VM: its vm_down, OOM kills of its QEMU process, and its own host-side CPU wait. The input is newest first
 export function vmIncidents(incidents: Incident[], name: string): Incident[] {
   return incidents.filter((x) => x.vm === name && (VM_KINDS as readonly string[]).includes(x.kind));
 }
 
 export const latestVmDown = (incidents: Incident[], name: string): Incident | undefined =>
   incidents.find((x) => x.kind === "vm_down" && x.vm === name);
+
+// Latest vm_cpu_wait of a VM (ongoing or ended) within the kept 24 h
+export const latestVmCpuWait = (incidents: Incident[], name: string): Incident | undefined =>
+  incidents.find((x) => x.kind === "vm_cpu_wait" && x.vm === name);
+
+// VMs waiting for host CPU right now (one ongoing vm_cpu_wait per VM), worst peak first
+export function vmsWaitingForCpu(incidents: Incident[]): Incident[] {
+  return incidents
+    .filter((x) => x.kind === "vm_cpu_wait" && isOngoing(x))
+    .sort((a, b) => (b.peak ?? 0) - (a.peak ?? 0));
+}
 
 // VM stops in the last 24 h (across all VMs), newest first
 export function vmStopsWithin(incidents: Incident[], nowMs: number, ms = DAY_MS): Incident[] {
@@ -67,6 +81,7 @@ export function vmState(name: string, info: VMInfo | undefined, incidents: Incid
     running: info != null,
     info,
     lastDown: own.find((x) => x.kind === "vm_down"),
+    cpuWait: own.find((x) => x.kind === "vm_cpu_wait" && isOngoing(x)),
     level: areaLevel(own, VM_KINDS, nowMs),
     incidents: own,
   };

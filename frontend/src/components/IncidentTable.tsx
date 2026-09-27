@@ -4,7 +4,10 @@ import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY } from "../lib/lens";
 import { asLevel, durationSeconds, isInstantKind, kindKey } from "../lib/incidents";
 import { signalName } from "../lib/lifecycle";
 import { formatMsPerSec } from "../lib/memory";
+import { culpritList } from "../lib/impact";
 import { formatTime, useI18n, type Key, type Lang, type TFn } from "../lib/i18n";
+
+const CULPRIT_NAMES = 3; // names shown in the detail column before "+n"
 
 // The incidents table used by the dashboard's Lens Summary and by the VM page (same columns, so a reader learns it once)
 export function IncidentTable({ incidents, nowMs }: { incidents: Incident[]; nowMs: number }) {
@@ -59,7 +62,9 @@ export function timeSpan(x: Incident, lang: Lang, t: TFn): string {
 export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
   switch (x.kind) {
     case "cpu_wait":
-      return x.peak == null ? "" : formatUs(x.peak);
+    case "vm_cpu_wait":
+      // Peak p99 plus who took the CPU, when the server recorded a group (older incidents have none)
+      return (x.peak == null ? "" : formatUs(x.peak)) + culpritSummary(x, t);
     case "mem_stall":
       return formatMsPerSec(x.peak ?? null, lang);
     case "crash":
@@ -82,4 +87,10 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
     default:
       return "";
   }
+}
+
+// " · taken by a (34%), b (24%), c (23%) +2", or "" when the incident carries no group
+function culpritSummary(x: Incident, t: TFn): string {
+  if (!x.culprits?.length) return "";
+  return t("incident.takenBy", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) });
 }

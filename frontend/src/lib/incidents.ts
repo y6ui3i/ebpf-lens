@@ -4,7 +4,7 @@ import type { Incident } from "../types/model";
 import type { Level } from "./lens";
 import type { Key } from "./i18n";
 
-export type IncidentKind = "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down";
+export type IncidentKind = "cpu_wait" | "vm_cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down";
 
 // Instant incidents (an OOM kill, a crash) have no duration, so they keep an area at their level for this long afterwards
 const INSTANT_LINGER_MS = 5 * 60 * 1000;
@@ -16,7 +16,7 @@ export const isOngoing = (x: Incident) => !x.end;
 export const isInstantKind = (kind: string) => kind === "oom_kill" || kind === "crash" || kind === "vm_down";
 
 // Whether an incident still counts toward the current status.
-// cpu_wait / mem_stall / agent_down: only while ongoing. oom_kill / crash / crash_loop: also for 5 minutes after they ended
+// cpu_wait / vm_cpu_wait / mem_stall / agent_down: only while ongoing. oom_kill / crash / crash_loop / vm_down: also for 5 minutes after they ended
 export function isActive(x: Incident, nowMs: number): boolean {
   if (isOngoing(x)) return true;
   if (!INSTANT_KINDS.has(x.kind)) return false;
@@ -45,6 +45,7 @@ export function asLevel(s: string): Level {
 
 const KIND_KEY: Record<IncidentKind, Key> = {
   cpu_wait: "incident.kind.cpu_wait",
+  vm_cpu_wait: "incident.kind.vm_cpu_wait",
   mem_stall: "incident.kind.mem_stall",
   oom_kill: "incident.kind.oom_kill",
   crash: "incident.kind.crash",

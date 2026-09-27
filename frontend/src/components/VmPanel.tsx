@@ -4,7 +4,11 @@ import { formatUs, percentile } from "../lib/hist";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
 import { signalName } from "../lib/lifecycle";
 import { formatMsPerSec } from "../lib/memory";
-import { levelFor, runningVms, vmPseudoSamples, vmStallMsPerSec, vmStallSeries, vmState, vmWaitP99, type VmState } from "../lib/vms";
+import { asLevel, durationSeconds } from "../lib/incidents";
+import { byCpu, culpritList, culpritsFor, formatMs, impact, pct, procLabel, samplesBetween, type CulpritMember } from "../lib/impact";
+import {
+  latestVmCpuWait, levelFor, runningVms, vmComm, vmPseudoSamples, vmStallMsPerSec, vmStallSeries, vmState, vmWaitP99, type VmState,
+} from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 import type { TimeWindow } from "../lib/timeWindow";
 import { formatTime, useI18n, type Lang, type TFn } from "../lib/i18n";
@@ -15,6 +19,7 @@ import { IncidentTable } from "./IncidentTable";
 
 const WINDOW = 300; // the whole visible range (5 min)
 const LINGER_MS = 5 * 60 * 1000; // a stop this recent is still the headline, even if the VM is running again
+const STEAL_ROWS = 5; // rows in "who took this VM's CPU"
 
 type Cause = "host_oom" | "cgroup_oom" | "crash" | "killed" | "shutdown";
 const CAUSES = new Set<string>(["host_oom", "cgroup_oom", "crash", "killed", "shutdown"]);
@@ -78,6 +83,8 @@ export function VmPanel({ name, vmSamples, samples, memSamples, incidents, win, 
         </div>
       </section>
 
+      <StealPanel name={name} samples={samples} incidents={incidents} nowMs={nowMs} />
+
       <section className="rounded-xl p-5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
         <h2 className="text-lg font-semibold">{t("vm.incidentsTitle")}</h2>
         {vm.incidents.length === 0 ? (
@@ -107,7 +114,8 @@ function Header({ vm }: { vm: VmState }) {
 }
 
 // Same look as the host Lens Summary: level icon + label + headline, then the findings.
-// A stop in the last 5 minutes is the headline even if the VM is running again; otherwise a running VM gets its 5-minute numbers,
+// A stop in the last 5 minutes is the headline even if the VM is running again; a running VM that is waiting for host CPU
+// right now gets that as its headline with the evidence and next step; otherwise a running VM gets its 5-minute numbers,
 // and the latest stop of the last 24 h is kept below as a post-mortem
 function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: Sample[]; memSamples: Sample[]; nowMs: number }) {
   const { lang, t } = useI18n();
@@ -115,6 +123,7 @@ function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: S
   const down = vm.lastDown;
   const recentStop = down != null && nowMs - Date.parse(down.start) <= LINGER_MS;
   const cause = down && CAUSES.has(down.cause ?? "") ? (down.cause as Cause) : undefined;
+  const cpuWait = vm.running ? vm.cpuWait : undefined;
 
   // An old stop is history, not a status: the header then shows a neutral "stopped" mark rather than "OK"
   const stale = down != null && !vm.running && !recentStop;
@@ -123,6 +132,9 @@ function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: S
   if (down && (recentStop || !vm.running)) {
     level = recentStop ? vm.level : "ok";
     headline = t(cause ? `vm.headline.${cause}` : "vm.headline.unknown");
+  } else if (cpuWait) {
+    level = asLevel(cpuWait.level);
+    headline = t("vm.headline.cpuWait");
   } else if (vm.running) {
     // Levels for a running VM come from the same thresholds the server judges the host with
     const p99 = vmWaitP99(samples, vm.name, WINDOW);
@@ -150,6 +162,7 @@ function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: S
             {runningSentence(vm.name, samples, memSamples, triggers.cpu.caution, triggers.memory.caution, lang, t)}
           </p>
         )}
+        {cpuWait && !recentStop && <CpuWaitBrief x={cpuWait} name={vm.name} samples={samples} nowMs={nowMs} />}
         {down && <PostMortem x={down} cause={cause} showTime={vm.running && !recentStop} />}
       </div>
     </div>
@@ -210,6 +223,106 @@ function PostMortem({ x, cause, showTime }: { x: Incident; cause?: Cause; showTi
         <p style={{ color: "var(--text-primary)" }}>{next}</p>
       </div>
     </div>
+  );
+}
+
+// Evidence and next step while the VM is waiting for host CPU: its own wait, and who took the CPU (the incident's group,
+// which the server computed without the VM itself; older data falls back to the samples, again without the VM)
+function CpuWaitBrief({ x, name, samples, nowMs }: { x: Incident; name: string; samples: Sample[]; nowMs: number }) {
+  const { lang, t } = useI18n();
+  const range = samplesBetween(samples, new Date(x.start), x.end ? new Date(x.end) : new Date(nowMs));
+  const xs = impact(range).filter((p) => p.comm !== vmComm(name));
+  const { members, total, busy } = culpritsFor(x, xs, range);
+  const evidence: string[] = [
+    t("vm.ev.cpuWait", { v: formatUs(x.peak ?? null), seconds: durationSeconds(x, nowMs) ?? x.seconds, time: formatTime(lang, x.start) }),
+    takenBy(members, total, busy, t),
+  ];
+  return (
+    <div className="space-y-1.5">
+      <div>
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.evidence")}</div>
+        <ul className="ml-4 list-disc space-y-0.5">
+          {evidence.map((e, i) => <li key={i}>{e}</li>)}
+        </ul>
+      </div>
+      <div>
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.nextStep")}</div>
+        <p style={{ color: "var(--text-primary)" }}>{t("vm.next.cpuWait")}</p>
+      </div>
+    </div>
+  );
+}
+
+// "CPU taken by a (34%), b (24%) — 81% together", or the honest alternative when no one stands out
+function takenBy(members: CulpritMember[], total: number, busy: number | null, t: TFn): string {
+  if (members.length === 0) return busy == null ? t("vm.ev.noCulpritNoBusy") : t("vm.ev.noCulprit", { busy: pct(busy) });
+  if (members.length === 1) return t("vm.ev.takenByOne", { list: culpritList(members, t) });
+  return t("vm.ev.takenBy", { list: culpritList(members, t), pct: pct(total) });
+}
+
+// "Who took this VM's CPU": the host's top CPU consumers, without the VM itself, over the latest vm_cpu_wait of the last 24 h
+// (else the visible 5 minutes). Group members are marked. When the episode is older than the samples in view, the server's
+// group is still listed, without CPU time
+function StealPanel({ name, samples, incidents, nowMs }: { name: string; samples: Sample[]; incidents: Incident[]; nowMs: number }) {
+  const { lang, t } = useI18n();
+  const ep = latestVmCpuWait(incidents, name);
+  const range = ep ? samplesBetween(samples, new Date(ep.start), ep.end ? new Date(ep.end) : new Date(nowMs)) : samples;
+  const xs = impact(range).filter((p) => p.comm !== vmComm(name));
+  const { members, total, busy } = culpritsFor(ep, xs, range);
+  const memberNames = new Set(members.map((m) => m.name));
+  // Rows: the samples' top consumers; or, with no samples for the episode, the group the server recorded
+  const rows: { name: string; label: string; share: number; onCpuNs: number | null }[] = xs.length > 0
+    ? byCpu(xs).slice(0, STEAL_ROWS).map((p) => ({ name: p.comm, label: procLabel(p), share: p.cpuShare, onCpuNs: p.onCpuNs }))
+    : members.map((m) => ({ name: m.name, label: m.name, share: m.share, onCpuNs: null }));
+  const maxShare = Math.max(...rows.map((r) => r.share), 0.01);
+  const scope = ep
+    ? t("vm.stealScopeEpisode", {
+        range: `${formatTime(lang, ep.start)}${t("range.sep")}${ep.end ? formatTime(lang, ep.end) : t("common.ongoing")}`,
+      })
+    : t("vm.stealScopeRecent", { n: WINDOW / 60 });
+
+  return (
+    <section className="rounded-xl p-5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+      <h2 className="text-lg font-semibold">{t("vm.stealTitle")}</h2>
+      <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>{t("vm.stealDesc", { scope })}</p>
+      {members.length > 0 && (
+        <p className="mt-3 text-sm font-semibold" style={{ color: "var(--text-primary)" }}>{takenBy(members, total, busy, t)}</p>
+      )}
+      {rows.length === 0 ? (
+        <p className="mt-3 text-sm" style={{ color: "var(--text-muted)" }}>{t("vm.stealNoData")}</p>
+      ) : (
+        <table className="mt-3 w-full max-w-2xl text-sm tabular">
+          <thead style={{ color: "var(--text-muted)" }}>
+            <tr>
+              <th className="py-1 text-left font-normal">{t("vm.stealCol.who")}</th>
+              <th className="py-1 text-left font-normal">{t("impact.cpuShare")}</th>
+              <th className="py-1 text-right font-normal">{t("impact.cpuTime")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.name} style={{ borderTop: "1px solid var(--grid)" }}>
+                <td className="py-1.5 pr-2">
+                  {r.label}
+                  {memberNames.has(r.name) && (
+                    <span className="ml-1 text-xs" style={{ color: "var(--text-muted)" }}>{t("impact.culpritTag")}</span>
+                  )}
+                </td>
+                <td className="py-1.5 pr-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-10 text-right">{(r.share * 100).toFixed(r.share < 0.1 ? 1 : 0)}%</span>
+                    <span className="h-1.5 flex-1 rounded-sm" style={{ background: "var(--grid)" }}>
+                      <span className="block h-1.5 rounded-sm" style={{ width: `${(r.share / maxShare) * 100}%`, background: "var(--series-1)" }} />
+                    </span>
+                  </div>
+                </td>
+                <td className="py-1.5 text-right" style={{ color: "var(--text-secondary)" }}>{r.onCpuNs == null ? "–" : formatMs(r.onCpuNs)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

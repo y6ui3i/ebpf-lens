@@ -118,6 +118,17 @@ type Incident struct {
 	ExitStatus       int     `json:"exitStatus,omitempty"`
 	ContextStallMs   float64 `json:"contextStallMs,omitempty"`   // time the VM stalled in memory reclaim in the last 60 s
 	ContextWaitP99Us float64 `json:"contextWaitP99Us,omitempty"` // run-queue wait p99 of the VM in the last 60 s
+	// cpu_wait / vm_cpu_wait: who was using the CPU while the subject waited (the culprit group, see trigger.GroupCulprits)
+	Culprits     []Culprit `json:"culprits,omitempty"`
+	CulpritShare float64   `json:"culpritShare,omitempty"` // combined share of the host's CPU used by the group
+	HostBusy     float64   `json:"hostBusy,omitempty"`     // share of the host's CPU that was busy over the same window
+}
+
+// Culprit is one member of the group that was using the CPU while an incident's subject waited.
+// Name is a process name, or "vm:<name>" for a VM.
+type Culprit struct {
+	Name  string  `json:"name"`
+	Share float64 `json:"share"` // of the host's total CPU capacity, 0..1
 }
 
 // Ongoing reports whether the incident is still open.

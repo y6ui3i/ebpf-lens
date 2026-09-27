@@ -153,6 +153,14 @@ Two things the lab taught us, both now handled:
 
 Reproduced on the test host with the lab VM: `virsh destroy` → killed by libvirtd (SIGTERM); `virsh shutdown` → the same, as explained; `kill -SEGV` on QEMU → crash; `virsh memtune --hard-limit 256M` plus a 700 MB allocation inside the guest → `cgroup_oom`, matching the kernel's "Memory cgroup out of memory: Killed process … (qemu-system-x86)". A host-wide OOM of a VM cannot be triggered safely on the test host; the rule is covered by unit tests against the recorded event shapes.
 
+## VM screens
+
+The menu has a **VMs** group (a list, then one entry per VM with a running/stopped mark and a level icon when it has a fresh incident) above **Host** (the host's own resources).
+
+- **VM list** (`/vms`): one row per VM seen in the last 24 h — state (running since / stopped at · cause), host-side CPU wait p99, CPU share and reclaim stall over the last 5 s, last incident. Rows with an active incident first.
+- **VM page** (`/vms/<name>`): a **VM Lens Summary** in the form ADR 0001 asks for — headline by cause, an **Evidence** list built only from fields that are present (who sent the signal; what triggered the OOM and whether it was the cgroup limit or the host; the minute before: reclaim stall, CPU wait p99), and a **Next step** with its reason ("Raise the VM's memory limit or reduce guest memory; restarting alone will repeat this, because the limit is unchanged"). Below: the VM's CPU wait heatmap and trend (host side), its reclaim stalls, and its incidents.
+- The dashboard's USE grid has a **VMs** row (running count, worst VM CPU wait, stops in 24 h), and the Lens Summary a **VM** line; a VM stop outranks CPU/memory/process findings for the headline.
+
 ## Storage
 
 With `-db`, samples and events are stored in SQLite (pure-Go modernc.org/sqlite, no cgo). History survives restarts.
@@ -183,7 +191,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 5. ✅ Layout: overview page (Lens Summary + USE grid) and per-resource pages, responsive menu
 6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
 7. ✅ Triggers and notifications: verdicts run on the server as incidents, with a webhook; all inputs come from eBPF
-8. 🔶 VM monitoring (first step done: why a VM stopped; VM screens next): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
+8. ✅ VM monitoring, first two steps (why a VM stopped; VM screens): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
 9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
 10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
 11. Disk and network: biolatency / tcpconnect / tcpretrans

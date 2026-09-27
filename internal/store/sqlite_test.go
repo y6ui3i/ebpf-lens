@@ -39,7 +39,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 	}
 	defer db2.Close()
 	st2 := New(900, 1000)
-	r, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute))
+	r, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute), now.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestSQLiteIncidentUpsertAndRestore(t *testing.T) {
 	}
 	defer db2.Close()
 	st2 := New(900, 1000)
-	r, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute))
+	r, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute), now.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}

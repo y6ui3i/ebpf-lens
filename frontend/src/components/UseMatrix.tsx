@@ -8,6 +8,8 @@ import type { TimeWindow } from "../lib/timeWindow";
 import { Link } from "../lib/router";
 import { Sparkline } from "./Sparkline";
 import { currentMem, formatBytes, formatMsPerSec, memUsed, stallMsPerSec } from "../lib/memory";
+import { levelFor, runningCounts, runningVms, vmStopsWithin, vmWaitP99 } from "../lib/vms";
+import { useTriggers } from "../lib/useTriggers";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -26,10 +28,11 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
+  const triggers = useTriggers();
   const nowMs = Date.now();
   const mem = currentMem(memSamples);
   const utilSeries = samples.map((s) => (s.cpus && s.intervalMs ? s.busyNs / (s.intervalMs * 1e6 * s.cpus) : null));
@@ -41,6 +44,14 @@ export function UseMatrix({ samples, memSamples, events, life, incidents, win }:
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const oomLevel = areaLevel(incidents, ["oom_kill"], nowMs);
   const crashLevel = areaLevel(incidents, ["crash", "crash_loop"], nowMs);
+  const vmLevel = areaLevel(incidents, ["vm_down"], nowMs);
+  // VMs: how many run, the worst VM's CPU wait, and the stops of the last 24 h. Without any "vms" sample the row stays blank
+  const vmsNow = runningVms(vmSamples);
+  const vmWorstWait = vmsNow?.reduce<number | null>((acc, v) => {
+    const p = vmWaitP99(samples, v.name);
+    return p != null && (acc == null || p > acc) ? p : acc;
+  }, null) ?? null;
+  const vmStops = vmStopsWithin(incidents, nowMs).length;
 
   const rows: Row[] = [
     {
@@ -78,6 +89,19 @@ export function UseMatrix({ samples, memSamples, events, life, incidents, win }:
         { kind: "na" },
         { kind: "value", value: `${life.crashes.length}`, note: t("use.procErr"), level: crashLevel, to: "/processes" },
       ],
+    },
+    {
+      resource: "resource.vms",
+      cells: vmsNow === undefined
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: t("use.vmRunning", { n: vmsNow.length }), note: t("use.vmUtil"), spark: runningCounts(vmSamples), to: "/vms" },
+          {
+            kind: "value", value: formatUs(vmWorstWait), note: t("use.vmSat"),
+            level: levelFor(vmWorstWait, triggers.cpu.caution, triggers.cpu.warning), to: "/vms",
+          },
+          { kind: "value", value: `${vmStops}`, note: t("use.vmErr"), level: vmLevel, to: "/vms" },
+        ],
     },
     { resource: "resource.disk", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },
     { resource: "resource.network", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },

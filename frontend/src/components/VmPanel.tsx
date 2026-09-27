@@ -1,0 +1,237 @@
+import { useMemo, useState } from "react";
+import type { Incident, Sample } from "../types/model";
+import { formatUs, percentile } from "../lib/hist";
+import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
+import { signalName } from "../lib/lifecycle";
+import { formatMsPerSec } from "../lib/memory";
+import { levelFor, runningVms, vmPseudoSamples, vmStallMsPerSec, vmStallSeries, vmState, vmWaitP99, type VmState } from "../lib/vms";
+import { useTriggers } from "../lib/useTriggers";
+import type { TimeWindow } from "../lib/timeWindow";
+import { formatTime, useI18n, type Lang, type TFn } from "../lib/i18n";
+import { Heatmap } from "./Heatmap";
+import { PercentileChart } from "./PercentileChart";
+import { Sparkline } from "./Sparkline";
+import { IncidentTable } from "./IncidentTable";
+
+const WINDOW = 300; // the whole visible range (5 min)
+const LINGER_MS = 5 * 60 * 1000; // a stop this recent is still the headline, even if the VM is running again
+
+type Cause = "host_oom" | "cgroup_oom" | "crash" | "killed" | "shutdown";
+const CAUSES = new Set<string>(["host_oom", "cgroup_oom", "crash", "killed", "shutdown"]);
+
+// One page per VM: what the host saw of its QEMU process, and why it stopped (ADR 0001: verdict, evidence, next step)
+export function VmPanel({ name, vmSamples, samples, memSamples, incidents, win, schemeKey }: {
+  name: string; vmSamples: Sample[]; samples: Sample[]; memSamples: Sample[]; incidents: Incident[]; win: TimeWindow; schemeKey: string;
+}) {
+  const { lang, t } = useI18n();
+  const triggers = useTriggers();
+  const nowMs = Date.now();
+  const info = runningVms(vmSamples)?.find((v) => v.name === name);
+  const vm = vmState(name, info, incidents, nowMs);
+  const pseudo = useMemo(() => vmPseudoSamples(samples, name), [samples, name]);
+  const stallSeries = useMemo(() => vmStallSeries(memSamples, name), [memSamples, name]);
+  const stallNow = vmStallMsPerSec(memSamples, name);
+  const [hoverMs, setHoverMs] = useState<number | null>(null);
+  const known = vm.running || vm.incidents.length > 0;
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-xl p-5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h2 className="text-lg font-semibold">{name}</h2>
+          <span className="text-sm" style={{ color: "var(--text-secondary)" }}><Header vm={vm} /></span>
+        </div>
+        {!known && <p className="mt-2 text-sm" style={{ color: "var(--text-muted)" }}>{t("vm.notFound")}</p>}
+
+        <div className="mt-4">
+          <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>VM Lens Summary</div>
+          <VmSummary vm={vm} samples={samples} memSamples={memSamples} nowMs={nowMs} />
+        </div>
+      </section>
+
+      <section className="rounded-xl p-5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+        <h2 className="text-lg font-semibold">{t("vm.chartTitle")}</h2>
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>Run Queue Latency · runqlat · {`vm:${name}`}</div>
+        {/* Side by side on wide screens like the host CPU card; both x axes cover the same 5 minutes and share the cursor */}
+        <div className="mt-4 grid gap-8 lg:grid-cols-2">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("cpu.distTitle")}</h3>
+            <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.chartNote")}</p>
+            <Heatmap samples={pseudo} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("cpu.trendTitle")}</h3>
+            <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.trendNote")}</p>
+            <PercentileChart samples={pseudo} win={win} schemeKey={schemeKey} hoverMs={hoverMs} onHover={setHoverMs} />
+          </div>
+        </div>
+
+        <div className="mt-6 max-w-md">
+          <h3 className="text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("vm.stallTitle")}</h3>
+          <p className="mb-2 text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.stallNote")}</p>
+          <div className="flex items-center gap-3">
+            <Marked level={levelFor(stallNow, triggers.memory.caution, triggers.memory.warning)}>
+              <span className="text-lg">{formatMsPerSec(stallNow, lang)}</span>
+            </Marked>
+            <div className="min-w-0 flex-1"><Sparkline values={stallSeries} label={t("use.sparkAria", { note: t("vm.stallTitle") })} /></div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-xl p-5" style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+        <h2 className="text-lg font-semibold">{t("vm.incidentsTitle")}</h2>
+        {vm.incidents.length === 0 ? (
+          <p className="mt-2 text-sm" style={{ color: "var(--text-muted)" }}>{t("common.none")}</p>
+        ) : (
+          <div className="mt-2"><IncidentTable incidents={vm.incidents} nowMs={nowMs} /></div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// "running · pid N · since HH:MM:SS" or "stopped · stopped at HH:MM:SS"
+function Header({ vm }: { vm: VmState }) {
+  const { lang, t } = useI18n();
+  const parts: string[] = [];
+  if (vm.running && vm.info) {
+    parts.push(t("vm.state.running"), t("vm.header.pid", { pid: vm.info.pid }), t("vm.header.since", { time: formatTime(lang, vm.info.since) }));
+  } else {
+    parts.push(t("vm.state.stopped"));
+    if (vm.lastDown) {
+      parts.push(t("vm.header.stoppedAt", { time: formatTime(lang, vm.lastDown.start) }));
+      if (vm.lastDown.pid) parts.push(t("vm.header.pid", { pid: vm.lastDown.pid }));
+    }
+  }
+  return <>{parts.join(" · ")}</>;
+}
+
+// Same look as the host Lens Summary: level icon + label + headline, then the findings.
+// A stop in the last 5 minutes is the headline even if the VM is running again; otherwise a running VM gets its 5-minute numbers,
+// and the latest stop of the last 24 h is kept below as a post-mortem
+function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: Sample[]; memSamples: Sample[]; nowMs: number }) {
+  const { lang, t } = useI18n();
+  const triggers = useTriggers();
+  const down = vm.lastDown;
+  const recentStop = down != null && nowMs - Date.parse(down.start) <= LINGER_MS;
+  const cause = down && CAUSES.has(down.cause ?? "") ? (down.cause as Cause) : undefined;
+
+  let level: Level;
+  let headline: string;
+  if (down && (recentStop || !vm.running)) {
+    level = recentStop ? vm.level : "ok";
+    headline = t(cause ? `vm.headline.${cause}` : "vm.headline.unknown");
+  } else if (vm.running) {
+    // Levels for a running VM come from the same thresholds the server judges the host with
+    const p99 = vmWaitP99(samples, vm.name, WINDOW);
+    const stall = vmStallMsPerSec(memSamples, vm.name, WINDOW);
+    level = worst(levelFor(p99, triggers.cpu.caution, triggers.cpu.warning), levelFor(stall, triggers.memory.caution, triggers.memory.warning));
+    headline = t("vm.headline.running");
+  } else {
+    level = "ok";
+    headline = t("vm.state.stopped");
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
+        <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]}</span>
+        <span>{t(LEVEL_KEY[level])}</span>
+        <span style={{ color: "var(--text-secondary)" }}>·</span>
+        <span>{headline}</span>
+      </div>
+      <div className="mt-2 space-y-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+        {vm.running && vm.info && (
+          <p>
+            {recentStop && t("vm.runningAgain", { time: formatTime(lang, vm.info.since), pid: vm.info.pid })}
+            {recentStop && " "}
+            {runningSentence(vm.name, samples, memSamples, triggers.cpu.caution, triggers.memory.caution, lang, t)}
+          </p>
+        )}
+        {down && <PostMortem x={down} cause={cause} showTime={vm.running && !recentStop} />}
+      </div>
+    </div>
+  );
+}
+
+// CPU wait p99 and reclaim stall of the VM over the visible 5 minutes, and whether either second crossed the caution threshold
+function runningSentence(name: string, samples: Sample[], memSamples: Sample[], cpuCaution: number, memCaution: number, lang: Lang, t: TFn): string {
+  const p99 = vmWaitP99(samples, name, WINDOW);
+  const stall = vmStallMsPerSec(memSamples, name, WINDOW);
+  if (p99 == null && stall == null) return t("vm.running.noData");
+  const cpuCrossed = vmPseudoSamples(samples, name).some((s) => (percentile(s.slots, 0.99) ?? 0) >= cpuCaution);
+  const memCrossed = vmStallSeries(memSamples, name).some((v) => (v ?? 0) >= memCaution);
+  const crossed = cpuCrossed && memCrossed
+    ? t("vm.running.crossedBoth")
+    : cpuCrossed
+      ? t("vm.running.crossedCpu", { v: formatUs(cpuCaution) })
+      : memCrossed
+        ? t("vm.running.crossedMem", { v: formatMsPerSec(memCaution, lang) })
+        : t("vm.running.crossedNone");
+  return t("vm.running.sentence", { p99: formatUs(p99), stall: formatMsPerSec(stall, lang), crossed });
+}
+
+// Evidence and next step for one vm_down, built only from the fields the server actually recorded
+function PostMortem({ x, cause, showTime }: { x: Incident; cause?: Cause; showTime: boolean }) {
+  const { lang, t } = useI18n();
+  const evidence: string[] = [];
+  const who = x.triggerComm ? t("vm.who", { comm: x.triggerComm, pid: x.triggerPid ?? "?" }) : undefined;
+  const sig = x.signal ? signalName(x.signal, lang) : undefined;
+
+  if (cause === "cgroup_oom" || cause === "host_oom") {
+    evidence.push(t(x.memcg || cause === "cgroup_oom" ? "vm.ev.oomCgroup" : "vm.ev.oomHost"));
+    if (x.triggerComm) evidence.push(t("vm.ev.oomTrigger", { comm: x.triggerComm, pid: x.triggerPid ?? "?" }));
+  } else if (sig) {
+    evidence.push(x.triggerComm ? t("vm.ev.signalFrom", { sig, comm: x.triggerComm, pid: x.triggerPid ?? "?" }) : t("vm.ev.signal", { sig }));
+  }
+  // Only say what the server recorded: an absent coreDump field is not evidence either way
+  if (cause === "crash" && x.coreDump != null) evidence.push(t(x.coreDump ? "vm.ev.coreDump" : "vm.ev.noCoreDump"));
+  if (cause === "shutdown" && x.exitStatus != null) evidence.push(t("vm.ev.exitStatus", { n: x.exitStatus }));
+  if (x.contextStallMs != null) evidence.push(t("vm.ev.stall", { ms: x.contextStallMs.toFixed(x.contextStallMs < 10 ? 1 : 0) }));
+  if (x.contextWaitP99Us != null) evidence.push(t("vm.ev.wait", { v: formatUs(x.contextWaitP99Us) }));
+
+  const next = nextStep(cause, who, t);
+
+  return (
+    <div className="space-y-1.5">
+      {showTime && <p className="font-semibold" style={{ color: "var(--text-primary)" }}>{t("vm.lastStop", { time: formatTime(lang, x.start) })}</p>}
+      {evidence.length > 0 && (
+        <div>
+          <div className="text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.evidence")}</div>
+          <ul className="ml-4 list-disc space-y-0.5">
+            {evidence.map((e, i) => <li key={i}>{e}</li>)}
+          </ul>
+        </div>
+      )}
+      <div>
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>{t("vm.nextStep")}</div>
+        <p style={{ color: "var(--text-primary)" }}>{next}</p>
+      </div>
+    </div>
+  );
+}
+
+// Every next step carries its reason (ADR 0001, principle 3); an unknown cause says so instead of guessing
+function nextStep(cause: Cause | undefined, who: string | undefined, t: TFn): string {
+  if (!cause) return t("vm.next.unknown");
+  if (cause === "killed") return who ? t("vm.next.killed", { who }) : t("vm.next.killedUnknown");
+  return t(`vm.next.${cause}`);
+}
+
+const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
+const worst = (a: Level, b: Level): Level => (RANK[a] >= RANK[b] ? a : b);
+
+function Marked({ level, children }: { level: Level; children: React.ReactNode }) {
+  const { t } = useI18n();
+  return (
+    <span className={level === "ok" ? "" : "font-semibold"}>
+      {level !== "ok" && (
+        <>
+          <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]} </span>
+          <span className="sr-only">{t(LEVEL_KEY[level])} </span>
+        </>
+      )}
+      {children}
+    </span>
+  );
+}

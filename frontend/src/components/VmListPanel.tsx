@@ -4,7 +4,8 @@ import { formatUs } from "../lib/hist";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
 import { asLevel, isInstantKind, isOngoing, kindKey } from "../lib/incidents";
 import { formatMsPerSec } from "../lib/memory";
-import { knownVms, levelFor, runningVms, vmCpuShare, vmStallMsPerSec, vmWaitP99, type VmState } from "../lib/vms";
+import { knownVms, levelFor, lifecycleFrom, runningVms, vmCpuShare, vmStallMsPerSec, vmWaitP99, type VmState } from "../lib/vms";
+import { useSettings } from "../lib/useSettings";
 import { useTriggers } from "../lib/useTriggers";
 import { Link, vmPath } from "../lib/router";
 import { formatHM, formatTime, useI18n } from "../lib/i18n";
@@ -17,7 +18,7 @@ export function VmListPanel({ vmSamples, samples, memSamples, incidents }: {
 }) {
   const { t } = useI18n();
   const nowMs = Date.now();
-  const vms = knownVms(vmSamples, incidents, nowMs);
+  const vms = knownVms(vmSamples, incidents, nowMs, lifecycleFrom(useSettings().ui.vm));
   const noVmData = runningVms(vmSamples) === undefined;
   // Running (and VMs that need attention) always shown; the stopped ones fold away, closed by default, so ten VMs
   // taken down together do not bury the ones that matter. With nothing running the fold opens by itself

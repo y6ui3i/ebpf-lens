@@ -9,6 +9,7 @@ export type Route = { path: string; labelKey: Key };
 export const ROUTES: Route[] = [
   { path: "/", labelKey: "page.dashboard" },
   { path: "/all", labelKey: "page.all" },
+  { path: "/settings", labelKey: "page.settings" },
   { path: "/vms", labelKey: "page.vms" },
   { path: "/cpu", labelKey: "page.cpu" },
   { path: "/processes", labelKey: "page.processes" },

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/server"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/settings"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/store"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/webui"
@@ -50,8 +51,10 @@ func main() {
 	}
 
 	st := store.New(*keep, *keepEvents)
+	var db *store.SQLite
 	if *dbPath != "" {
-		db, err := store.OpenSQLite(*dbPath, *retention, *eventRetention, *incidentRetention)
+		var err error
+		db, err = store.OpenSQLite(*dbPath, *retention, *eventRetention, *incidentRetention)
 		if err != nil {
 			log.Fatalf("sqlite: %v", err)
 		}
@@ -82,6 +85,18 @@ func main() {
 	}
 	st.AddObserver(ev)
 	go ev.Run(context.Background())
+	// Settings saved from the screen override the file; they live in the DB (without one, changes last until restart)
+	var settingsStore settings.Store
+	if db != nil {
+		settingsStore = db
+	}
+	sm, err := settings.NewManager(settings.Default(triggers), settingsStore, ev.SetConfig)
+	if err != nil {
+		log.Fatalf("settings: %v", err)
+	}
+	if sm.Saved() {
+		log.Printf("settings: using the copy saved from the settings screen (DELETE /api/settings or the screen's reset goes back to the file / defaults)")
+	}
 	if *webhook != "" {
 		n, err := trigger.NewNotifier(*webhook, *webhookFormat)
 		if err != nil {
@@ -92,7 +107,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	server.Register(mux, st, triggers)
+	server.Register(mux, st, sm)
 	mux.Handle("/", webui.Handler())
 
 	log.Printf("ebpflens-server listening on %s", *addr)

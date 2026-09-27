@@ -20,6 +20,7 @@ const STATIC_GROUPS: Group[] = [
     items: [
       { path: "/", label: "page.dashboard" },
       { path: "/all", label: "page.all" },
+      { path: "/settings", label: "page.settings" },
     ],
   },
   {

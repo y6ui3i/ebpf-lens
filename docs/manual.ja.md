@@ -18,7 +18,83 @@ eBPFLens は Linux ホストをカーネルの中から eBPF で見て、見え�
 
 言語は上部バーの **EN / 日本語**。ホストは上部バーの選択(1 台のサーバーで複数ホストを見られます)。
 
-## 2. ダッシュボードの読み方
+## 2. 導入と配置
+
+### 必要なもの
+
+- **監視対象のホスト**: カーネル BTF のある Linux(`/sys/kernel/btf/vmlinux` がある。Ubuntu、Fedora、RHEL 9、Debian 12 以降は標準で入っています)。検証は Ubuntu 26.04 / カーネル 7.0。エージェントは静的な単一バイナリで、ホストに他に入れるものはありません。
+- **ビルド機**(同じアーキテクチャの Linux): Go 1.25+、clang、llvm、libbpf-dev、bpftool。画面は Node 22 で一度ビルドしてサーバーのバイナリに埋め込むので、ブラウザ側に必要なものはありません。
+- **サーバー**: 各ホストから TCP 1 ポート(既定 8080)で届く Linux。監視対象の 1 台を兼ねてもかまいません。SQLite 内蔵で、データベースのサービスは不要です。
+- **ネットワーク**: エージェント → サーバー `:8080`(HTTP)、ブラウザ → サーバー `:8080`。認証はありません(7 章)。このポートは信頼できるネットワークの中に置くか、認証を足すリバースプロキシの後ろに置いてください。
+
+### ビルド
+
+```bash
+git clone https://github.com/yoshiharu-ishii/ebpf-lens && cd ebpf-lens
+make web      # Node のある機械で。TS の型を生成し、画面を internal/webui/dist にビルド
+make build    # Linux で。このカーネルの BTF から vmlinux.h → BPF オブジェクト → bin/ebpflens-agent と bin/ebpflens-server
+```
+
+`bin/` に 2 つのバイナリができます。`ebpflens-agent` は監視したいホストすべてにコピー、サーバーは決めた場所へ。
+
+### サーバーの配置(systemd)
+
+サーバー機で、リポジトリの中から:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin ebpflens
+sudo usermod -aG ebpflens "$USER"            # 任意: sqlite3 で DB を読めるようにする
+make install                                 # /opt/ebpflens/bin/* と /etc/systemd/system/ebpflens-{server,agent}.service
+sudo systemctl enable --now ebpflens-server
+```
+
+ユニットはサーバーを特権なしの `ebpflens` ユーザーで動かし、`:8080` で待ち受け、DB は `/var/lib/ebpflens/ebpflens.db`(サンプル 24 時間、イベント 7 日、出来事 30 日)。DB を別のディスクに置くなら drop-in を足します。NFS には置かないでください。
+
+```ini
+# /etc/systemd/system/ebpflens-server.service.d/10-local-db.conf
+[Unit]
+RequiresMountsFor=/data/ebpflens
+[Service]
+ExecStart=
+ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /data/ebpflens/ebpflens.db
+ReadWritePaths=/data/ebpflens
+```
+
+しきい値の変更や通知の追加は、同じ `ExecStart` にフラグを足します(`-triggers /etc/ebpflens/triggers.json`、`-webhook https://… -webhook-format slack`。8 章参照)。そのあと `sudo systemctl daemon-reload && sudo systemctl restart ebpflens-server`。
+
+### 各ホストへのエージェント配置(systemd)
+
+監視対象の各ホストで:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin ebpflens
+sudo install -d /opt/ebpflens/bin
+sudo install -m 0755 ebpflens-agent /opt/ebpflens/bin/
+sudo install -m 0644 deploy/systemd/ebpflens-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+ユニットの `ExecStart` の `-server` を自分のサーバーに向け(`-server http://SERVER:8080`。同梱のユニットはサーバーが同じ機械にある前提です)、`sudo systemctl enable --now ebpflens-agent`。エージェントは `ebpflens` ユーザーで、`CAP_BPF` と `CAP_PERFMON` だけを持って動きます。root ではありません。ホストはダッシュボードのホスト選択にホスト名で現れます(`-host 名前` で上書き可)。1 台のサーバーで多数のホストを見られ、各ホストのエージェントは互いに独立です。報告が止まったホストは 30 秒で「エージェント停止」の出来事になります。
+
+### 動作確認
+
+```bash
+systemctl status ebpflens-server ebpflens-agent
+journalctl -u ebpflens-agent -n 20            # "load bpf objects" のエラーが出ていないこと
+curl -s http://SERVER:8080/api/hosts          # 各ホストと最終サンプル時刻
+```
+
+`http://SERVER:8080` を開くと、数秒で Lens Summary が緑になり、CPU の行にマイクロ秒の待ち時間が出ます。ホストが出てこないときは、エージェントが動いていない、サーバーに届いていない、カーネルに BTF がない、のどれかです(エージェントのログに出ます)。
+
+### 更新
+
+新しいバイナリをビルドし、サーバーでは `make install && sudo systemctl restart ebpflens-server`、各ホストでは新しいエージェントを `/opt/ebpflens/bin/` にコピーして `sudo systemctl restart ebpflens-agent`。出来事と履歴はサーバーの再起動をまたいで残ります(開いていた出来事の扱いは 5 章)。
+
+### 削除
+
+`sudo systemctl disable --now ebpflens-agent`(サーバーは `ebpflens-server`)、`/opt/ebpflens`・ユニット・`/var/lib/ebpflens`(DB)・`ebpflens` ユーザーを削除。エージェントはホストに他に何も残しません。eBPF のプログラムは停止時に外れます。
+
+## 3. ダッシュボードの読み方
 
 ### レベル
 
@@ -39,7 +115,7 @@ eBPFLens は Linux ホストをカーネルの中から eBPF で見て、見え�
 
 ### 直近の出来事
 
-1 行が 1 件: レベル、種類、プロセス/VM、時間帯(または *継続中*)、継続時間、種類ごとの詳細(最大待ち、ms/秒、シグナル、OOM の範囲と引き金、クラッシュ回数、誰がシグナルを送ったか)。継続中の出来事には終了時刻がありません。種類の一覧は 4 章に。
+1 行が 1 件: レベル、種類、プロセス/VM、時間帯(または *継続中*)、継続時間、種類ごとの詳細(最大待ち、ms/秒、シグナル、OOM の範囲と引き金、クラッシュ回数、誰がシグナルを送ったか)。継続中の出来事には終了時刻がありません。種類の一覧は 5 章に。
 
 ### 資源ごとの状態(USE)
 
@@ -53,7 +129,7 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 升目には最新値、5 分のスパークライン、異常時だけレベルの印。「未実装(ロードマップ n)」はまだ作っていないものです。
 
-## 3. 各画面
+## 4. 各画面
 
 メニュー(☰)は 3 グループ: **eBPFLens**(ダッシュボード、すべてのパネル)、**VM**(VM 一覧、VM ごと)、**ホスト**(CPU実行待ち時間、プロセスの起動と終了、メモリ。ディスク・ネットワーク・GPU は準備中)。
 
@@ -64,7 +140,7 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 *見えるもの。*
 - **待ち時間の分布** — ヒートマップ。横が時刻(直近 5 分、1 列 1 秒)、縦が待ち時間(対数、上ほど長い)、色が回数。取り合いは、明るい帯が 8 µs の行から 8 ms の行へ飛ぶ形で見えます。
 - **待ち時間の推移** — p50 と p99 に、注意(1 ms)と警告(10 ms)の帯。p99 が帯の中にある間、CPU の取り合いが起きています。
-- **原因と影響** — 直近の出来事(なければ直近 10 秒)について、CPU を*使っていた*側(ホスト全体に占める割合)と*待たされた*側(合計、回数、p99、最大)の 2 表。「原因」は単独でホストの 30% 以上を使うプロセス。25% ずつの隣人が 3 つの場合は被害側だけが出ます(既知の穴、6 章)。
+- **原因と影響** — 直近の出来事(なければ直近 10 秒)について、CPU を*使っていた*側(ホスト全体に占める割合)と*待たされた*側(合計、回数、p99、最大)の 2 表。「原因」は単独でホストの 30% 以上を使うプロセス。25% ずつの隣人が 3 つの場合は被害側だけが出ます(既知の穴、7 章)。
 
 *読み方。* 一番待たされているプロセスが、利用者が体感しているものです。大きく使って少ししか待たないのは占有者、少ししか使わず大きく待つのは被害者。EEVDF はよく眠るタスク(対話的なもの)を起床時に優遇するので、被害者の待ちは占有者より 1 桁小さいのが普通です。16 ms の嵐の中で、応答を待たせたくないデーモンの p99 が 1 ms、というのが「守られてはいるが無傷ではない」姿です。
 
@@ -103,9 +179,9 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 上の画面のパネルを 1 ページに縦に並べ、ジャンプリンク付き。クリックよりスクロールしたいときに。
 
-## 4. 出来事: 種類ごとの意味と対応
+## 5. 出来事: 種類ごとの意味と対応
 
-出来事は**サーバー側**で固定のルールにより決まります(しきい値は JSON、7 章)。開いている間、レベルは下がりません。最大値が経過を語ります。サーバー再起動時に開いていた出来事は、最後の更新時刻で閉じた扱いになります。止まっていた間のことを知っているふりはしません。
+出来事は**サーバー側**で固定のルールにより決まります(しきい値は JSON、8 章)。開いている間、レベルは下がりません。最大値が経過を語ります。サーバー再起動時に開いていた出来事は、最後の更新時刻で閉じた扱いになります。止まっていた間のことを知っているふりはしません。
 
 | 種類 | 開く条件 | レベル | 閉じる条件 | 意味と対応 |
 |---|---|---|---|---|
@@ -124,10 +200,10 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 | `cgroup_oom` | VM 自身の cgroup の中での OOM kill と、引き金のプロセス | VM のメモリ上限を上げるかゲストのメモリを減らす。上限がそのままなので再起動だけでは繰り返す。 |
 | `host_oom` | ホスト全体の OOM kill | ホストの割り当て過多。ホストのメモリを空けてから再起動しないと、また起きうる。 |
 | `crash` | QEMU がクラッシュのシグナルかコアダンプで終了 | 再起動する。QEMU のクラッシュはゲストのせいではない。QEMU のログとコアダンプを確認。 |
-| `killed` | QEMU に終了シグナルが送られた。誰が送ったか付き | 意図した操作でなければ再起動。送り主が *libvirtd* の場合、ゲストの shutdown と `virsh destroy` の両方がこれになる(6 章)。 |
+| `killed` | QEMU に終了シグナルが送られた。誰が送ったか付き | 意図した操作でなければ再起動。送り主が *libvirtd* の場合、ゲストの shutdown と `virsh destroy` の両方がこれになる(7 章)。 |
 | `shutdown` | シグナルなしの exit 0 | 正常終了。意図していなければ再起動。 |
 
-## 5. 通知
+## 6. 通知
 
 `ebpflens-server -webhook URL` で、**遷移**(開始・格上げ・終了)ごとに 1 行を POST します。途中経過は送りません。`-webhook-format generic` は `{event, text, incident}`、`slack` は `{text}`、`discord` は `{content}`。文面は英語で、例:
 
@@ -141,19 +217,19 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 送信は非同期で 1 回だけ再試行。webhook が死んでいてもエージェントは止まりません。
 
-## 6. 見えないもの、限界
+## 7. 見えないもの、限界
 
 - **認証がありません。** サーバーに届く人は誰でも全部を読め、偽のサンプルを送れます。信頼できるネットワークの中だけで動かしてください。
 - **ゲストの shutdown と `virsh destroy` はホストから同じに見えます。** libvirt は QEMU を `-no-shutdown` で動かし、どちらの場合も自分で SIGTERM を送り、QEMU は SIGTERM で exit 0 します。見分けるには libvirt 自身の停止理由が必要で、まだ読んでいません。
 - **原因の名指しは単一プロセスが 30% 以上のときだけ。** 25% ずつの隣人 3 つは被害側としてしか出ません。
 - **プロセス別の表は上位 N 件です。** エージェントは毎秒、待ち時間と CPU の上位 8 件(VM は常に)を送ります。長い範囲の合計は近似で、画面にもそう書いてあります。
 - **ホスト全体の OOM による VM の停止**は、記録したイベントの形に対する単体テストでしか再現していません。
-- **しきい値は仮です。** 8 コア 1 台の実測から決めました。自分のホストに合わせて調整してください(7 章)。
+- **しきい値は仮です。** 8 コア 1 台の実測から決めました。自分のホストに合わせて調整してください(8 章)。
 - **Linux 専用です。** macOS には eBPF がなく、できる範囲の macOS エージェントは計画のみ。
 - **Windows は需要がなければ作りません。**
 - **ダッシュボードはサンプル 5 分・出来事 24 時間を表示します。** DB はサンプル 24 時間・イベント 7 日・出来事 30 日を保持しますが、長期の履歴画面はまだありません。
 
-## 7. 設定と API の早見表
+## 8. 設定と API の早見表
 
 サーバー:
 
@@ -182,7 +258,7 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 API(断りがなければ `GET`): `/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
 
-## 8. 用語集
+## 9. 用語集
 
 - **実行待ち時間(run-queue latency、CPU 待ち)** — タスクが実行可能になってから実際に CPU で動くまでの時間。CPU の飽和の信号。
 - **p50 / p99** — 測定値の半分 / 99% がその下に収まる値。p99 は運の悪いリクエストが見る値。

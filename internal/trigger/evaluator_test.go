@@ -405,3 +405,96 @@ func TestHostCPUWaitCarriesCulprits(t *testing.T) {
 		t.Fatalf("host cpu_wait should name the group: %+v", got)
 	}
 }
+
+// A gpu sample: the GPU at util, and one CUDA process that spent cpuMs on the CPU and copyMs inside copy calls.
+func gpuSample(sec int, util float64, comm string, cpuMs, copyMs float64, vramShare float64) model.Sample {
+	return model.Sample{
+		Host: "h", Probe: "gpu", Time: t0.Add(time.Duration(sec) * time.Second), IntervalMs: 1000, Slots: []uint64{0},
+		GPU: &model.GPUStat{
+			Util: util, UsedBytes: uint64(vramShare * float64(8<<30)), TotalBytes: 8 << 30,
+			Procs: []model.GPUProc{{Comm: comm, OnCPUNs: uint64(cpuMs * 1e6), CopyNs: uint64(copyMs * 1e6)}},
+		},
+	}
+}
+
+// Recorded on the test machine: a PyTorch process feeding a 4096x4096 matmul from pageable memory spent 982 ms/s
+// inside cuMemcpyHtoDAsync (5.1 GB/s) with the GPU busy only part of the time. A starved GPU is one whose
+// process is fully busy elsewhere while the GPU sits below idleUtil.
+func TestGPUStarvedNamesTheProcessAndHow(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 9; s++ {
+		e.OnSample(gpuSample(s, 0.05, "python", 950, 40, 0.3)) // busy on the CPU, GPU idle
+	}
+	if len(r.got) != 0 {
+		t.Fatalf("opened after 9 s; MinSeconds is 10")
+	}
+	e.OnSample(gpuSample(9, 0.05, "python", 950, 40, 0.3))
+	if len(r.got) != 1 || r.last().Kind != KindGPUStarved || r.last().Subject != "python" || r.last().Level != LevelWarning {
+		t.Fatalf("expected a gpu_starved warning naming python, got %+v", r.got)
+	}
+	if i := r.last(); i.GPUUtil != 0.05 || i.CPUShare != 0.95 || i.CopyShare != 0.04 {
+		t.Fatalf("incident must carry util and shares, got util=%v cpu=%v copy=%v", i.GPUUtil, i.CPUShare, i.CopyShare)
+	}
+	text := Text("open", r.last())
+	if !contains(text, "GPU is idle (5% busy)") || !contains(text, "python is working on the CPU") {
+		t.Fatalf("text: %s", text)
+	}
+	// The GPU gets busy: no incident while util is above idleUtil, and the excursion closes after the gap
+	for s := 10; s < 20; s++ {
+		e.OnSample(gpuSample(s, 0.9, "python", 100, 0, 0.3))
+	}
+	if r.last().Ongoing() {
+		t.Fatalf("incident must close once the GPU is busy, got %+v", r.last())
+	}
+}
+
+func TestGPUCopyBoundReadsAsCopying(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 10; s++ {
+		e.OnSample(gpuSample(s, 0.1, "python", 300, 700, 0.3))
+	}
+	if len(r.got) != 1 || r.last().Level != LevelCaution {
+		t.Fatalf("expected one caution (score 0.7), got %+v", r.got)
+	}
+	if text := Text("open", r.last()); !contains(text, "copying data to or from the GPU") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+func TestGPUIdleWithoutWorkIsNotStarved(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 20; s++ {
+		e.OnSample(gpuSample(s, 0, "python", 5, 0, 0.3)) // a loaded model doing nothing is fine
+	}
+	if len(r.got) != 0 {
+		t.Fatalf("an idle process must not count as starving the GPU, got %+v", r.got)
+	}
+}
+
+func TestVRAMFullOpensAtNinetyPercent(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 3; s++ {
+		e.OnSample(gpuSample(s, 0.9, "python", 100, 0, 0.95))
+	}
+	if len(r.got) != 1 || r.last().Kind != KindVRAMFull || r.last().Level != LevelCaution || r.last().Peak < 0.949 || r.last().Peak > 0.951 {
+		t.Fatalf("expected a vram_full caution with peak 0.95, got %+v", r.got)
+	}
+	if text := Text("open", r.last()); !contains(text, "VRAM is 95% full") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

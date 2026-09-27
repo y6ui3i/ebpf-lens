@@ -131,6 +131,15 @@ func Text(event string, i model.Incident) string {
 		what = fmt.Sprintf("VM %s is waiting for host CPU (99%% of its tasks waited up to %s, %d s since %s)%s", i.VM, formatUs(i.Peak), i.Seconds, when, culpritText(i))
 	case KindMemStall:
 		what = fmt.Sprintf("processes are stalling on low memory (%.0f ms/s stalled in reclaim, %d s since %s)", i.Peak, i.Seconds, when)
+	case KindGPUStarved:
+		how := "on the CPU"
+		if i.CopyShare > i.CPUShare {
+			how = "copying data to or from the GPU"
+		}
+		what = fmt.Sprintf("the GPU is idle (%.0f%% busy) while %s is working %s (%.0f%% of a CPU, %.0f%% of the time in copies; %d s since %s)",
+			i.GPUUtil*100, i.Subject, how, i.CPUShare*100, i.CopyShare*100, i.Seconds, when)
+	case KindVRAMFull:
+		what = fmt.Sprintf("VRAM is %.0f%% full (%d s since %s); the next large allocation may fail", i.Peak*100, i.Seconds, when)
 	case KindOOMKill:
 		scope := "the host ran out of memory"
 		if i.Memcg {

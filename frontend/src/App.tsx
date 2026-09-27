@@ -17,12 +17,14 @@ import { ImpactPanel } from "./components/ImpactPanel";
 import { CpuLatencyCard } from "./components/CpuLatencyCard";
 import { LifecyclePanel } from "./components/LifecyclePanel";
 import { MemoryPanel } from "./components/MemoryPanel";
+import { GpuPanel } from "./components/GpuPanel";
+import { GPU_KINDS } from "./lib/gpu";
 import { VmListPanel } from "./components/VmListPanel";
 import { VmPanel } from "./components/VmPanel";
 import type { Sample } from "./types/model";
 
 const WINDOW = 300; // last 5 minutes (one column per second)
-const PROBES = ["runqlat", "memstall", "vms"] as const;
+const PROBES = ["runqlat", "memstall", "vms", "gpu"] as const;
 const EMPTY: Sample[] = [];
 const PROCESS_KINDS = ["oom_kill", "crash", "crash_loop"] as const;
 const TICK_MS = 30_000; // re-evaluate "ended within the last 5 minutes" even when no new data arrives
@@ -48,6 +50,7 @@ export default function App() {
   const samples = byProbe.runqlat ?? EMPTY;
   const memSamples = byProbe.memstall ?? EMPTY;
   const vmSamples = byProbe.vms ?? EMPTY;
+  const gpuSamples = byProbe.gpu ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
   // The visible range follows the CPU samples; the memory screen uses the same 5 minutes
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
@@ -64,8 +67,9 @@ export default function App() {
   const agentLevel = areaLevel(incidents, ["agent_down"], nowMs);
   // A VM stop, or a VM waiting for host CPU, counts toward the headline like any other area
   const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
-  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel);
-  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel };
+  const gpuLevel = areaLevel(incidents, GPU_KINDS, nowMs);
+  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel);
+  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel };
   // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level
   const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs).map((v) => ({ name: v.name, running: v.running, level: v.level }));
   const match = matchRoute(path);
@@ -140,12 +144,17 @@ export default function App() {
             <PanelSection id="processes" title={t("page.processes")}>
               <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
             </PanelSection>
+            <PanelSection id="gpu" title={t("page.gpu")}>
+              <GpuPanel samples={gpuSamples} win={win} schemeKey={schemeKey} level={gpuLevel} />
+            </PanelSection>
             <PanelSection id="vms" title={t("page.vms")}>
               <VmListPanel vmSamples={vmSamples} samples={samples} memSamples={memSamples} incidents={incidents} />
             </PanelSection>
           </AllPanels>
         ) : path === "/memory" ? (
           <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} level={memLevel} />
+        ) : path === "/gpu" ? (
+          <GpuPanel samples={gpuSamples} win={win} schemeKey={schemeKey} level={gpuLevel} />
         ) : path === "/processes" ? (
           <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
         ) : path === "/vms" ? (
@@ -157,8 +166,8 @@ export default function App() {
           />
         ) : (
           <>
-            <LensSummary samples={samples} memSamples={memSamples} vmSamples={vmSamples} life={life} incidents={incidents} />
-            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} events={events} life={life} incidents={incidents} win={win} />
+            <LensSummary samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} life={life} incidents={incidents} />
+            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} events={events} life={life} incidents={incidents} win={win} />
           </>
         )}
       </main>
@@ -182,6 +191,7 @@ const SECTIONS: { id: string; titleKey: Key }[] = [
   { id: "impact", titleKey: "page.impact" },
   { id: "memory", titleKey: "page.memory" },
   { id: "processes", titleKey: "page.processes" },
+  { id: "gpu", titleKey: "page.gpu" },
   { id: "vms", titleKey: "page.vms" },
 ];
 

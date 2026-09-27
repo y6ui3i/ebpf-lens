@@ -5,6 +5,7 @@ import { areaLevel, asLevel, isOngoing, latestOf } from "../lib/incidents";
 import { byWait, culpritList, culpritsFor, formatMs, impact, pct, samplesBetween } from "../lib/impact";
 import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
 import { memorySentence } from "../lib/memory";
+import { GPU_KINDS, gpuSentence } from "../lib/gpu";
 import { VM_AREA_KINDS, runningVms, vmStopsWithin, vmsWaitingForCpu } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params } from "../lib/i18n";
@@ -46,8 +47,8 @@ function cpuUtil(samples: Sample[]): number | null {
 
 // "What is happening right now" summary shown at the top of the screen.
 // Levels come from the server's incidents; the numbers in the sentences still come from the samples
-export function LensSummary({ samples, memSamples, vmSamples, life, incidents }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; life: Lifecycle; incidents: Incident[];
+export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, life, incidents }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; life: Lifecycle; incidents: Incident[];
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -58,19 +59,24 @@ export function LensSummary({ samples, memSamples, vmSamples, life, incidents }:
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
   const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
+  const gpuLevel = areaLevel(incidents, GPU_KINDS, nowMs);
+  const gpuHeadline: Key = areaLevel(incidents, ["vram_full"], nowMs) !== "ok" && areaLevel(incidents, ["gpu_starved"], nowMs) === "ok"
+    ? "summary.gpu.vram"
+    : "summary.gpu.starved";
   // The VM headline names whichever VM problem carries the area's level: a VM waiting for host CPU, or a stop
   const vmCpuWaitLevel = areaLevel(incidents, ["vm_cpu_wait"], nowMs);
   const vmHeadline: Key = vmCpuWaitLevel !== "ok" && RANK[vmCpuWaitLevel] >= RANK[areaLevel(incidents, ["vm_down"], nowMs)]
     ? "summary.vmCpuWait"
     : "summary.vmDown";
   const agentDown = incidents.find((x) => x.kind === "agent_down" && isOngoing(x));
-  // The overall status follows the worst area, and the headline uses that area's wording (ties: VM -> CPU -> memory -> processes).
+  // The overall status follows the worst area, and the headline uses that area's wording (ties: VM -> CPU -> memory -> processes -> GPU).
   // A host that stopped reporting outranks everything, because no other data is fresh
   const areas: { level: Level; headline: Key }[] = [
     { level: vmLevel, headline: vmHeadline },
     { level: cpuLevel, headline: CPU_HEADLINE[cpuLevel] },
     { level: memLevel, headline: MEM_HEADLINE[memLevel] },
     { level: procLevel, headline: lifecycleHeadline(incidents, nowMs) },
+    { level: gpuLevel, headline: gpuHeadline },
   ];
   const worstArea = areas.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a));
   const overall: Level = agentDown ? asLevel(agentDown.level) : worstArea.level;
@@ -123,6 +129,12 @@ export function LensSummary({ samples, memSamples, vmSamples, life, incidents }:
         <Finding area={t("resource.vm")} level={vmLevel}>
           <p>{vmSentence(vmSamples, incidents, lang, nowMs)}</p>
         </Finding>
+        {/* Only hosts with a GPU send gpu samples; the row stays away elsewhere rather than saying "no GPU" forever */}
+        {gpuSamples.length > 0 && (
+          <Finding area={t("resource.gpu")} level={gpuLevel}>
+            <p>{gpuSentence(gpuSamples, lang, gpuLevel, triggers.gpu.idleUtil)}</p>
+          </Finding>
+        )}
       </dl>
 
       {recent.length > 0 && (

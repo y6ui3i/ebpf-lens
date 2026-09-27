@@ -77,6 +77,12 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
       return t("incident.crashes", { n: x.count ?? x.peak ?? 0 });
     case "agent_down":
       return t("incident.silentFor", { n: x.seconds });
+    case "gpu_starved":
+      return t((x.copyShare ?? 0) > (x.cpuShare ?? 0) ? "incident.gpuCopy" : "incident.gpuCpu", {
+        util: Math.round((x.gpuUtil ?? 0) * 100), cpu: Math.round((x.cpuShare ?? 0) * 100), copy: Math.round((x.copyShare ?? 0) * 100),
+      });
+    case "vram_full":
+      return t("incident.vramFull", { pct: Math.round((x.peak ?? 0) * 100) });
     case "vm_down": {
       const causeKey = (`incident.cause.${x.cause ?? "shutdown"}` as Key);
       let d = t(causeKey);

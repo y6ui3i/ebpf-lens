@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/gpu"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/memstall"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
@@ -77,6 +78,10 @@ func main() {
 		}
 	}()
 
+	// GPU: optional. A host without an NVIDIA driver, or without libcuda, simply sends no "gpu" samples
+	gw := openGPU()
+	defer gw.Close()
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	tick := time.NewTicker(*interval)
@@ -115,6 +120,13 @@ func main() {
 			}
 			mx.Host, mx.Time, mx.IntervalMs, mx.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
 			vx := model.Sample{Host: host, Time: now, Probe: "vms", Slots: []uint64{0}, IntervalMs: now.Sub(prev).Milliseconds(), VMs: vms.List()}
+			gx, err := gw.sample(all, vms.Label)
+			if err != nil {
+				log.Fatalf("gpu: %v", err)
+			}
+			if gx != nil {
+				gx.Host, gx.Time, gx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			}
 
 			batch := model.EventBatch{Host: host, Time: now, Events: tagVMs(vms, drain(events, maxEventsPerBatch))}
 			kdrop, err := pl.DroppedDelta()
@@ -127,6 +139,9 @@ func main() {
 				printText(now, slots)
 				printProcs(procs)
 				printMem(mx)
+				if gx != nil {
+					printGPU(*gx)
+				}
 				printEvents(batch)
 				continue
 			}
@@ -146,6 +161,11 @@ func main() {
 				if err := send(client, *serverURL, "/api/ingest", vx); err != nil {
 					log.Printf("send vms: %v", err)
 				}
+				if gx != nil {
+					if err := send(client, *serverURL, "/api/ingest", *gx); err != nil {
+						log.Printf("send gpu: %v", err)
+					}
+				}
 				if len(batch.Events) > 0 || batch.Dropped > 0 {
 					if err := send(client, *serverURL, "/api/events", batch); err != nil {
 						log.Printf("send events: %v", err)
@@ -161,6 +181,11 @@ func main() {
 			}
 			if len(vx.VMs) > 0 {
 				if err := enc.Encode(vx); err != nil {
+					log.Fatal(err)
+				}
+			}
+			if gx != nil {
+				if err := enc.Encode(*gx); err != nil {
 					log.Fatal(err)
 				}
 			}
@@ -211,6 +236,138 @@ func memSample(ms *memstall.Probe, mem *memReader, vms *vm.Map, topN int) (model
 		Probe: "memstall", Unit: "usecs", Slots: slots[:],
 		Procs: topProcs(all, topN), Mem: mem.read(stall),
 	}, nil
+}
+
+// gpuWatch is the GPU half of the agent: NVML for the GPU's own counters and uprobes on libcuda for what each
+// process does with it. Either half may be missing (no driver: neither; a driver without libcuda: NVML only).
+type gpuWatch struct {
+	nv   *gpu.NVML
+	prb  *gpu.Probe
+	comm map[uint32]string // pid -> name, for processes NVML reports that made no CUDA call this interval
+}
+
+func openGPU() *gpuWatch {
+	w := &gpuWatch{comm: map[uint32]string{}}
+	nv, err := gpu.OpenNVML()
+	if err != nil {
+		log.Printf("gpu: %v (no GPU samples)", err)
+		return w
+	}
+	w.nv = nv
+	path, err := gpu.FindLibcuda()
+	if err != nil {
+		log.Printf("gpu: %v (GPU samples without per-process detail)", err)
+		return w
+	}
+	prb, err := gpu.Open(path)
+	if err != nil {
+		log.Printf("gpu: %v (GPU samples without per-process detail)", err)
+		return w
+	}
+	w.prb = prb
+	log.Printf("gpu: %s, uprobes on %s", nv.Name(), path)
+	return w
+}
+
+func (w *gpuWatch) Close() {
+	if w.prb != nil {
+		w.prb.Close()
+	}
+	if w.nv != nil {
+		w.nv.Close()
+	}
+}
+
+// sample builds one interval of GPU data, or nil when there is no GPU. cpuProcs (from runqlat, same interval)
+// supplies each CUDA process's CPU time, so the verdict can tell "busy on the CPU" from "waiting for something else".
+func (w *gpuWatch) sample(cpuProcs []model.ProcStat, label func(uint32, string) string) (*model.Sample, error) {
+	if w.nv == nil {
+		return nil, nil
+	}
+	g, vram := w.nv.Read()
+	slots := []uint64{0}
+	var procs []model.GPUProc
+	if w.prb != nil {
+		d, err := w.prb.Delta()
+		if err != nil {
+			return nil, err
+		}
+		slots = d[:]
+		if procs, err = w.prb.Procs(label); err != nil {
+			return nil, err
+		}
+		g.Uprobes = true
+	}
+	// Merge: VRAM by pid from NVML onto the uprobe rows. A process holding VRAM without any CUDA call this
+	// interval (a loaded model sitting idle) still gets a row, so the UI can say it is idle rather than miss it
+	rowOfPid := map[uint32]int{}
+	rowOfComm := map[string]int{}
+	for i, p := range procs {
+		rowOfComm[p.Comm] = i
+		for _, pid := range p.Pids {
+			rowOfPid[pid] = i
+		}
+	}
+	for pid, bytes := range vram {
+		i, ok := rowOfPid[pid]
+		if !ok {
+			name := w.commOf(pid)
+			if label != nil {
+				name = label(pid, name)
+			}
+			if i, ok = rowOfComm[name]; !ok {
+				procs = append(procs, model.GPUProc{Comm: name})
+				i = len(procs) - 1
+				rowOfComm[name] = i
+			}
+			procs[i].Procs++
+			if len(procs[i].Pids) < 5 {
+				procs[i].Pids = append(procs[i].Pids, pid)
+			}
+		}
+		procs[i].VRAMBytes += bytes
+	}
+	// CPU time in the same interval, from runqlat's per-process rows (merged by name there too)
+	cpu := map[string]uint64{}
+	for _, p := range cpuProcs {
+		cpu[p.Comm] += p.OnCPUNs
+	}
+	for i := range procs {
+		procs[i].OnCPUNs = cpu[procs[i].Comm]
+	}
+	slices.SortFunc(procs, func(a, b model.GPUProc) int {
+		return cmpDesc(a.Launches+a.CopyCount+a.SyncCount, b.Launches+b.CopyCount+b.SyncCount)
+	})
+	g.Procs = procs
+	return &model.Sample{Probe: "gpu", Unit: "usecs", Slots: slots, GPU: &g}, nil
+}
+
+// commOf reads a process name from /proc (cached; a pid is not reused within one interval in practice).
+func (w *gpuWatch) commOf(pid uint32) string {
+	if c, ok := w.comm[pid]; ok {
+		return c
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	name := "?"
+	if err == nil {
+		name = strings.TrimSpace(string(b))
+	}
+	if len(w.comm) > 4096 {
+		w.comm = map[uint32]string{}
+	}
+	w.comm[pid] = name
+	return name
+}
+
+func printGPU(x model.Sample) {
+	g := x.GPU
+	fmt.Printf("gpu: %s util=%.0f%% mem=%.0f%% vram=%.0f/%.0fMiB temp=%dC power=%.0fW throttle=%v\n",
+		g.Name, g.Util*100, g.MemUtil*100, float64(g.UsedBytes)/(1<<20), float64(g.TotalBytes)/(1<<20), g.TempC, g.PowerW, g.Throttle)
+	for _, p := range g.Procs {
+		fmt.Printf("  %-16s x%-3d vram=%.0fMiB launches=%d h2d=%.1fMB d2h=%.1fMB copy=%.1fms sync=%.1fms cpu=%.1fms\n",
+			p.Comm, p.Procs, float64(p.VRAMBytes)/(1<<20), p.Launches, float64(p.H2DBytes)/1e6, float64(p.D2HBytes)/1e6,
+			float64(p.CopyNs)/1e6, float64(p.SyncNs)/1e6, float64(p.OnCPUNs)/1e6)
+	}
 }
 
 func printMem(x model.Sample) {

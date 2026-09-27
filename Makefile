@@ -16,6 +16,9 @@ generate: bpf/headers/vmlinux.h
 
 build: agent server
 
+# go-nvml (cgo) compiles NVIDIA's header, which marks older entry points deprecated; the warnings are theirs, not ours
+export CGO_CFLAGS = -Wno-deprecated-declarations
+
 agent: generate
 	go build -o bin/ebpflens-agent ./cmd/ebpflens-agent
 

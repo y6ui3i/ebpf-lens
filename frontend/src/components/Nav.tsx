@@ -27,9 +27,9 @@ const STATIC_GROUPS: Group[] = [
       { path: "/cpu", label: "page.cpu" },
       { path: "/processes", label: "page.processes" },
       { path: "/memory", label: "page.memory" },
+      { path: "/gpu", label: "page.gpu" },
       { label: "resource.disk" },
       { label: "resource.network" },
-      { label: "resource.gpu" },
     ],
   },
 ];

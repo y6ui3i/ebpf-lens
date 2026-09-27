@@ -18,6 +18,42 @@ type Sample struct {
 	Procs      []ProcStat `json:"procs,omitempty"`
 	Mem        *MemStat   `json:"mem,omitempty"` // memstall only
 	VMs        []VMInfo   `json:"vms,omitempty"` // probe "vms" only: the VMs running on this host
+	GPU        *GPUStat   `json:"gpu,omitempty"` // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+}
+
+// GPUStat is one interval of the first GPU (NVML) plus what the CUDA processes did meanwhile (eBPF uprobes on libcuda).
+// NVML is the one source in eBPFLens that is not eBPF: the GPU's own counters live in the driver, not in the kernel's
+// tracepoints (docs/adr/0003). Everything per process comes from the uprobes.
+type GPUStat struct {
+	Name       string    `json:"name"`
+	Util       float64   `json:"util"`       // share of the interval a kernel was running, 0..1 (NVML "GPU utilization")
+	MemUtil    float64   `json:"memUtil"`    // share of the interval the memory bus was busy, 0..1
+	UsedBytes  uint64    `json:"usedBytes"`  // VRAM in use
+	TotalBytes uint64    `json:"totalBytes"` // VRAM total
+	TempC      int       `json:"tempC"`
+	PowerW     float64   `json:"powerW"`
+	Throttle   []string  `json:"throttle,omitempty"` // why the clocks are held back right now: "power", "thermal", "hw" (empty when they are not)
+	Uprobes    bool      `json:"uprobes"`            // whether the libcuda uprobes are attached (false: no libcuda on this host, per-process fields stay 0)
+	Procs      []GPUProc `json:"procs,omitempty"`
+}
+
+// GPUProc is what one CUDA process (merged by name) did on the GPU during the interval.
+// The verdict "why is the GPU idle" is drawn from these by the UI and the trigger rules:
+// a process that is on the CPU or copying while the GPU is idle is starving it; one that is inside a
+// synchronize call is waiting for it; one that does neither is waiting for something else (I/O, a lock, input).
+type GPUProc struct {
+	Comm      string   `json:"comm"`
+	Procs     int      `json:"procs"`
+	Pids      []uint32 `json:"pids"`
+	VRAMBytes uint64   `json:"vramBytes"` // from NVML (the driver's view of the process)
+	Launches  uint64   `json:"launches"`  // kernel launches (cuLaunchKernel, cuGraphLaunch)
+	H2DBytes  uint64   `json:"h2dBytes"`  // bytes copied host -> GPU
+	D2HBytes  uint64   `json:"d2hBytes"`  // bytes copied GPU -> host
+	CopyNs    uint64   `json:"copyNs"`    // time inside copy calls (a copy from pageable memory blocks in the call)
+	CopyCount uint64   `json:"copyCount"`
+	SyncNs    uint64   `json:"syncNs"` // time inside cuStreamSynchronize / cuCtxSynchronize / cuEventSynchronize: waiting for the GPU
+	SyncCount uint64   `json:"syncCount"`
+	OnCPUNs   uint64   `json:"onCpuNs"` // CPU time of the process in the same interval (from runqlat), for "busy on the CPU instead"
 }
 
 // VMInfo is one virtual machine (a QEMU process) running on the host.
@@ -96,7 +132,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -122,6 +158,11 @@ type Incident struct {
 	Culprits     []Culprit `json:"culprits,omitempty"`
 	CulpritShare float64   `json:"culpritShare,omitempty"` // combined share of the host's CPU used by the group
 	HostBusy     float64   `json:"hostBusy,omitempty"`     // share of the host's CPU that was busy over the same window
+	// gpu_starved: the GPU sat idle while Subject (a CUDA process) was busy elsewhere. Peak is the busy share (0..1)
+	GPUUtil   float64 `json:"gpuUtil,omitempty"`   // GPU utilization at the peak, 0..1
+	CPUShare  float64 `json:"cpuShare,omitempty"`  // share of the interval the process spent on the CPU at the peak
+	CopyShare float64 `json:"copyShare,omitempty"` // share of the interval it spent inside copy calls at the peak
+	// vram_full: Peak is the share of VRAM in use (0..1)
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

@@ -98,6 +98,39 @@ ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /mnt/data/ebpflens/e
 ReadWritePaths=/mnt/data/ebpflens
 ```
 
+## トリガーと通知
+
+判定はブラウザではなくサーバー(`internal/trigger`)で行うので、誰も画面を見ていなくても出来事(incident)は記録される。ルールはすべて決定的で、出来事には判定の根拠になった数値が付く([ADR 0001](docs/adr/0001-everyone-an-sre.md))。
+
+| 種類 | 開く条件 | レベル | 閉じる条件 |
+|---|---|---|---|
+| `cpu_wait` | 実行待ち p99 が 1 ms 以上で 3 秒続く | 注意。10 ms 以上が 3 秒続いたら警告 | 1 ms 未満が 2 秒を超えて続く |
+| `mem_stall` | 回収の停止が 10 ms/秒以上で 3 秒続く | 注意。100 ms/秒以上が 3 秒続いたら警告 | 10 ms/秒未満が 2 秒を超えて続く |
+| `oom_kill` | OOM kill のイベント | 警告 | 即時(引き金のプロセスと、cgroup かホスト全体かを記録) |
+| `crash` | SIGSEGV / SIGABRT / SIGBUS / SIGFPE / SIGILL / SIGSYS かコアダンプ付きの終了 | 注意 | 即時 |
+| `crash_loop` | 同じコマンドが 5 分に 3 回クラッシュ | 警告 | 最後のクラッシュから 5 分 |
+| `agent_down` | ホストから 30 秒何も届かない | 警告 | ホストがまた報告してきたとき |
+
+開いている間、レベルは下がらない(最大値が経過を語る)。出来事は SQLite の `incidents` 表に id で upsert され(`-incident-retention`、既定 30 日)、SSE の `event: incident` で流れ、`GET /api/incidents?host=` で一覧できる。サーバー停止時に開いたままだった出来事は、最後の更新時刻で閉じた状態に戻す。開いたままにしていた判定の状態は残っていないので、「継続中」のままにすると嘘になるため。
+
+しきい値は既定値の上に重ねる JSON(`-print-triggers` で既定値を出力。変えたい値だけ書けばよい)。`GET /api/triggers` で配るので、画面のしきい値の帯はサーバーと同じ数値になる。
+
+```bash
+./bin/ebpflens-server -print-triggers > triggers.json   # 編集してから
+./bin/ebpflens-server -db … -triggers triggers.json
+```
+
+`-webhook URL` で、開始・格上げ・終了(途中経過は送らない)を JSON で POST する。`-webhook-format slack` / `discord` なら、それぞれが受け付ける 1 行のテキストだけを送る。例:
+
+```
+[WARNING] hal: processes are competing for CPU (99% of tasks waited up to 16.3 ms, 3 s since 09:01:34)
+[RESOLVED] hal: processes are competing for CPU (99% of tasks waited up to 16.3 ms, 21 s since 09:01:34)
+[WARNING] hal: flaky-app is crashing repeatedly (3 times since 09:02:00)
+[WARNING] hal: host stopped reporting (last sample at 09:02:09, silent for 30 s)
+```
+
+通知の文面は英語のみ(画面には日英の訳がある)。送信は非同期で 1 回だけ再試行し、webhook が死んでいても受信は止まらない。
+
 ## 保存
 
 `-db` を付けると SQLite に保存する(pure Go の modernc.org/sqlite。cgo 不要)。再起動しても履歴が戻る。
@@ -127,7 +160,7 @@ ReadWritePaths=/mnt/data/ebpflens
 4. ✅ プロセスのライフサイクル: exec / exit(終了コード・シグナル・寿命)/ OOM kill。CPU 使用率も eBPF の計測値から出す
 5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
 6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
-7. トリガーと通知: 判定をサーバー側へ移す。材料はすべて eBPF 由来
+7. ✅ トリガーと通知: 判定をサーバー側で行い、出来事(incident)として記録・webhook で通知。材料はすべて eBPF 由来
 8. VM 監視: ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる
 9. GPU の基本メトリクス(NVML。例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
 10. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
@@ -135,7 +168,7 @@ ReadWritePaths=/mnt/data/ebpflens
 
 ## 判定のしきい値(仮)
 
-CPU実行待ち時間の p99 で、注意 1ms / 警告 10ms。直近 5 秒の p99 の中央値で判定し、3 秒以上続いた超過を「出来事」にする。
+CPU実行待ち時間の p99 で、注意 1ms / 警告 10ms。3 秒以上続いた超過を「出来事」にする(上の「トリガーと通知」を参照)。
 
 検証機での実測(2026-09-26):
 

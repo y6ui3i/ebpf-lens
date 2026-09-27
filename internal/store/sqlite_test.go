@@ -14,7 +14,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ebpflens.db")
 	now := time.Now().Truncate(time.Millisecond)
 
-	db, err := OpenSQLite(path, time.Hour, time.Hour)
+	db, err := OpenSQLite(path, time.Hour, time.Hour, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,18 +33,18 @@ func TestSQLiteRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db2, err := OpenSQLite(path, time.Hour, time.Hour)
+	db2, err := OpenSQLite(path, time.Hour, time.Hour, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db2.Close()
 	st2 := New(900, 1000)
-	n, m, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute))
+	r, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 || m != 2 {
-		t.Fatalf("loaded samples=%d events=%d, want 3 and 2", n, m)
+	if r.Samples != 3 || r.Events != 2 {
+		t.Fatalf("loaded samples=%d events=%d, want 3 and 2", r.Samples, r.Events)
 	}
 	got := st2.Samples("h", "runqlat")
 	if len(got) != 3 || got[0].Slots[0] != 0 || got[2].Slots[0] != 2 {
@@ -61,7 +61,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 // Rows past the retention period are removed by the prune that runs on open.
 func TestSQLitePrune(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ebpflens.db")
-	db, err := OpenSQLite(path, time.Hour, time.Hour)
+	db, err := OpenSQLite(path, time.Hour, time.Hour, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestSQLitePrune(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db2, err := OpenSQLite(path, time.Hour, time.Hour) // prune runs right after opening
+	db2, err := OpenSQLite(path, time.Hour, time.Hour, time.Hour) // prune runs right after opening
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,5 +90,56 @@ func TestSQLitePrune(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("samples after prune = %d, want 1", count)
+	}
+}
+
+// An incident is one row updated in place; one still open at shutdown is restored as closed at its last update.
+func TestSQLiteIncidentUpsertAndRestore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ebpflens.db")
+	now := time.Now().Truncate(time.Millisecond)
+	db, err := OpenSQLite(path, time.Hour, time.Hour, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := New(900, 1000)
+	st.SetPersister(db)
+	inc := model.Incident{ID: "h|cpu_wait||1", Host: "h", Kind: "cpu_wait", Level: "caution", Start: now.Add(-20 * time.Second), Updated: now.Add(-18 * time.Second), Seconds: 3, Peak: 2000}
+	st.AddIncident(inc)
+	inc.Level, inc.Seconds, inc.Peak, inc.Updated = "warning", 10, 16000, now.Add(-10*time.Second)
+	st.AddIncident(inc) // progress: same ID, escalated
+	end := now.Add(-5 * time.Second)
+	closed := model.Incident{ID: "h|crash|7|2", Host: "h", Kind: "crash", Level: "caution", Subject: "flaky", Start: end, End: &end, Updated: end}
+	st.AddIncident(closed)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db2, err := OpenSQLite(path, time.Hour, time.Hour, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	st2 := New(900, 1000)
+	r, err := db2.LoadInto(context.Background(), st2, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := st2.Incidents("h")
+	if r.Incidents != 2 || len(got) != 2 {
+		t.Fatalf("restored %d incidents (%d in store), want 2", r.Incidents, len(got))
+	}
+	cpu := got[0]
+	if cpu.ID != inc.ID || cpu.Level != "warning" || cpu.Peak != 16000 {
+		t.Fatalf("upsert did not keep the latest state: %+v", cpu)
+	}
+	if cpu.Ongoing() || !cpu.End.Equal(inc.Updated) {
+		t.Fatalf("an incident open at shutdown must be restored closed at its last update, got end=%v", cpu.End)
+	}
+	if got[1].ID != closed.ID || got[1].Ongoing() {
+		t.Fatalf("closed incident not restored as closed: %+v", got[1])
+	}
+	var n int
+	if err := db2.db.QueryRow(`SELECT COUNT(*) FROM incidents`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("incident rows = %d (%v), want 2 (upsert, not insert)", n, err)
 	}
 }

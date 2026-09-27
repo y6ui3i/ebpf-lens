@@ -1,7 +1,7 @@
 import { useState } from "react";
-import type { Sample } from "../types/model";
+import type { Incident, Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
-import { episodes } from "../lib/lens";
+import { isOngoing, latestOf } from "../lib/incidents";
 import { byCpu, byWait, explain, formatMs, impact, procLabel, samplesBetween } from "../lib/impact";
 import { formatTime, useI18n } from "../lib/i18n";
 
@@ -11,13 +11,20 @@ const ROWS = 5;
 type Scope = "episode" | "recent";
 
 // Cause (who was using the CPU) and impact (who was kept waiting)
-export function ImpactPanel({ samples }: { samples: Sample[] }) {
+export function ImpactPanel({ samples, incidents }: { samples: Sample[]; incidents: Incident[] }) {
   const { lang, t } = useI18n();
-  const ep = episodes(samples)[0];
+  // The latest CPU contention incident judged by the server. Only offered while it overlaps the samples in view,
+  // because per-process data exists only for those samples
+  const latest = latestOf(incidents, "cpu_wait");
+  const firstMs = samples[0] ? Date.parse(samples[0].time) : Infinity;
+  const ep = latest && (isOngoing(latest) || Date.parse(latest.end!) >= firstMs) ? latest : undefined;
   const [picked, setPicked] = useState<Scope>();
   const scope: Scope = picked ?? (ep ? "episode" : "recent");
 
-  const range = scope === "episode" && ep ? samplesBetween(samples, ep.start, ep.end) : samples.slice(-RECENT_SECONDS);
+  const range =
+    scope === "episode" && ep
+      ? samplesBetween(samples, new Date(ep.start), ep.end ? new Date(ep.end) : new Date())
+      : samples.slice(-RECENT_SECONDS);
   const xs = impact(range);
   const { culprit } = explain(xs);
   const cpu = byCpu(xs).slice(0, ROWS);
@@ -27,7 +34,7 @@ export function ImpactPanel({ samples }: { samples: Sample[] }) {
   const scopeLabel =
     scope === "episode" && ep
       ? t("impact.scopeEpisode", {
-          range: `${formatTime(lang, ep.start)}${t("range.sep")}${ep.ongoing ? t("common.ongoing") : formatTime(lang, ep.end)}`,
+          range: `${formatTime(lang, ep.start)}${t("range.sep")}${ep.end ? formatTime(lang, ep.end) : t("common.ongoing")}`,
         })
       : t("impact.scopeRecent", { n: RECENT_SECONDS });
 

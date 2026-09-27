@@ -1,6 +1,6 @@
 // Turns process exec / exit / OOM kill events into what they mean for an operator.
+// The level of the process area comes from the server's incidents (oom_kill / crash / crash_loop), not from here.
 import type { ProcEvent } from "../types/model";
-import type { Level } from "./lens";
 import { formatTime, translate, type Key, type Lang, type Params } from "./i18n";
 
 // Signals treated as crashes. SIGTERM / SIGKILL / SIGINT etc. are a normal way for a process to be stopped, so they are excluded
@@ -29,7 +29,6 @@ export type Lifecycle = {
   ooms: ProcEvent[];
   crashLoops: { comm: string; count: number }[];
   shortLivedByComm: CommCount[];
-  level: Level;
 };
 
 export function analyze(events: ProcEvent[]): Lifecycle {
@@ -53,9 +52,6 @@ export function analyze(events: ProcEvent[]): Lifecycle {
     })
     .sort((a, b) => b.count - a.count);
 
-  const level: Level =
-    ooms.length > 0 || crashLoops.length > 0 ? "warning" : crashes.length > 0 ? "caution" : "ok";
-
   return {
     execs: events.filter((e) => e.kind === "exec").length,
     exits: exits.length,
@@ -65,7 +61,6 @@ export function analyze(events: ProcEvent[]): Lifecycle {
     ooms,
     crashLoops,
     shortLivedByComm,
-    level,
   };
 }
 

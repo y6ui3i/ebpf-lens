@@ -98,6 +98,39 @@ ExecStart=/opt/ebpflens/bin/ebpflens-server -addr :8080 -db /mnt/data/ebpflens/e
 ReadWritePaths=/mnt/data/ebpflens
 ```
 
+## Triggers and notifications
+
+The judgement runs on the server (`internal/trigger`), not in the browser, so incidents exist whether or not anyone is watching. Every rule is deterministic and every incident carries the numbers that caused it (see [ADR 0001](docs/adr/0001-everyone-an-sre.md)).
+
+| Kind | Opens when | Level | Closes when |
+|---|---|---|---|
+| `cpu_wait` | run-queue p99 ≥ 1 ms for 3 s | caution; warning once ≥ 10 ms for 3 s | below 1 ms for more than 2 s |
+| `mem_stall` | reclaim stall ≥ 10 ms/s for 3 s | caution; warning once ≥ 100 ms/s for 3 s | below 10 ms/s for more than 2 s |
+| `oom_kill` | an OOM kill event | warning | instant (records the trigger process and cgroup vs. host) |
+| `crash` | exit by SIGSEGV / SIGABRT / SIGBUS / SIGFPE / SIGILL / SIGSYS or with a core dump | caution | instant |
+| `crash_loop` | the same command crashes 3 times within 5 minutes | warning | 5 minutes after the last crash |
+| `agent_down` | a host sends nothing for 30 s | warning | the host reports again |
+
+A level never goes down while an incident is open; the peak tells the story. Incidents are stored in SQLite (`incidents` table, upserted by id, kept 30 days with `-incident-retention`), streamed over SSE as `event: incident`, and listed at `GET /api/incidents?host=`. An incident that was still open when the server stopped is restored as closed at its last update: the rule state that kept it open did not survive, and a stale "ongoing" would be a lie.
+
+Thresholds are a JSON file over the defaults (`-print-triggers` shows them; a file only needs the values it changes), served at `GET /api/triggers` so the UI draws its bands from the same numbers:
+
+```bash
+./bin/ebpflens-server -print-triggers > triggers.json   # edit, then
+./bin/ebpflens-server -db … -triggers triggers.json
+```
+
+`-webhook URL` posts each transition (open, escalate, close — not progress updates) as JSON; `-webhook-format slack` or `discord` sends just the one-line text those services expect, e.g.
+
+```
+[WARNING] hal: processes are competing for CPU (99% of tasks waited up to 16.3 ms, 3 s since 09:01:34)
+[RESOLVED] hal: processes are competing for CPU (99% of tasks waited up to 16.3 ms, 21 s since 09:01:34)
+[WARNING] hal: flaky-app is crashing repeatedly (3 times since 09:02:00)
+[WARNING] hal: host stopped reporting (last sample at 09:02:09, silent for 30 s)
+```
+
+Delivery is asynchronous with one retry; a dead webhook never blocks ingestion.
+
 ## Storage
 
 With `-db`, samples and events are stored in SQLite (pure-Go modernc.org/sqlite, no cgo). History survives restarts.
@@ -127,7 +160,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 4. ✅ Process lifecycle: exec / exit (exit code, signal, lifetime) / OOM kill; CPU utilization from eBPF measurements
 5. ✅ Layout: overview page (Lens Summary + USE grid) and per-resource pages, responsive menu
 6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
-7. Triggers and notifications: move the verdicts to the server; all inputs come from eBPF
+7. ✅ Triggers and notifications: verdicts run on the server as incidents, with a webhook; all inputs come from eBPF
 8. VM monitoring: watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest
 9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
 10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
@@ -135,7 +168,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 
 ## Thresholds (provisional)
 
-CPU run-queue latency p99: caution at 1 ms, warning at 10 ms, judged on the median of the last 5 seconds of per-second p99. An excursion that lasts 3 seconds or more becomes an incident.
+CPU run-queue latency p99: caution at 1 ms, warning at 10 ms; an excursion that lasts 3 seconds or more becomes an incident (see Triggers above).
 
 Measured on the test machine (2026-09-26):
 

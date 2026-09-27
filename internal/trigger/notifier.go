@@ -1,0 +1,161 @@
+package trigger
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+)
+
+// Notifier posts incident transitions (open, escalate, close) to a webhook. Progress updates are not sent.
+// Delivery is asynchronous with one retry, so a slow or dead webhook never blocks ingestion.
+type Notifier struct {
+	url, format string
+	client      *http.Client
+	queue       chan notification
+	mu          sync.Mutex
+	seen        map[string]model.Incident // last state notified per incident ID
+}
+
+type notification struct {
+	Event    string         `json:"event"` // "open" | "escalate" | "close"
+	Text     string         `json:"text"`
+	Incident model.Incident `json:"incident"`
+}
+
+// NewNotifier accepts format "generic" (full JSON), "slack" ({"text"}), or "discord" ({"content"}).
+func NewNotifier(url, format string) (*Notifier, error) {
+	switch format {
+	case "generic", "slack", "discord":
+	default:
+		return nil, fmt.Errorf("unknown webhook format %q (use generic, slack or discord)", format)
+	}
+	n := &Notifier{
+		url: url, format: format,
+		client: &http.Client{Timeout: 5 * time.Second},
+		queue:  make(chan notification, 256),
+		seen:   map[string]model.Incident{},
+	}
+	go n.loop()
+	return n, nil
+}
+
+// OnIncident decides whether a stored incident is a transition worth telling someone about.
+// It is called from the store for every upsert, so it must be cheap and must not block.
+func (n *Notifier) OnIncident(inc model.Incident) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	prev, known := n.seen[inc.ID]
+	n.seen[inc.ID] = inc
+	if len(n.seen) > 10000 { // bounded memory; old closed incidents are not needed again
+		for id, x := range n.seen {
+			if !x.Ongoing() && time.Since(x.Updated) > 24*time.Hour {
+				delete(n.seen, id)
+			}
+		}
+	}
+	var event string
+	switch {
+	case !known:
+		event = "open"
+	case prev.Ongoing() && !inc.Ongoing():
+		event = "close"
+	case prev.Level != inc.Level:
+		event = "escalate"
+	default:
+		return
+	}
+	// An instant incident (OOM kill, crash) is born closed; report it as an open, never as a close
+	if event == "close" && inc.End != nil && inc.End.Equal(inc.Start) {
+		return
+	}
+	select {
+	case n.queue <- notification{Event: event, Text: Text(event, inc), Incident: inc}:
+	default:
+		log.Printf("webhook: queue full, dropped %s for %s", event, inc.ID)
+	}
+}
+
+func (n *Notifier) loop() {
+	for msg := range n.queue {
+		if err := n.post(msg); err != nil {
+			time.Sleep(2 * time.Second)
+			if err = n.post(msg); err != nil {
+				log.Printf("webhook: %v", err)
+			}
+		}
+	}
+}
+
+func (n *Notifier) post(msg notification) error {
+	var body any = msg
+	switch n.format {
+	case "slack":
+		body = map[string]string{"text": msg.Text}
+	case "discord":
+		body = map[string]string{"content": msg.Text}
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	resp, err := n.client.Post(n.url, "application/json", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("webhook returned %s", resp.Status)
+	}
+	return nil
+}
+
+// Text renders one line a person can read in a chat channel. English only; the UI has its own translations.
+func Text(event string, i model.Incident) string {
+	level := map[string]string{LevelCaution: "CAUTION", LevelWarning: "WARNING"}[i.Level]
+	if !i.Ongoing() && i.End != nil && !i.End.Equal(i.Start) {
+		level = "RESOLVED"
+	}
+	when := i.Start.Format("15:04:05")
+	var what string
+	switch i.Kind {
+	case KindCPUWait:
+		what = fmt.Sprintf("processes are competing for CPU (99%% of tasks waited up to %s, %d s since %s)", formatUs(i.Peak), i.Seconds, when)
+	case KindMemStall:
+		what = fmt.Sprintf("processes are stalling on low memory (%.0f ms/s stalled in reclaim, %d s since %s)", i.Peak, i.Seconds, when)
+	case KindOOMKill:
+		scope := "the host ran out of memory"
+		if i.Memcg {
+			scope = "its cgroup memory limit was reached"
+		}
+		what = fmt.Sprintf("%s (pid %d) was OOM-killed at %s because %s; triggered by %s (pid %d)", i.Subject, i.Pid, when, scope, i.TriggerComm, i.TriggerPid)
+	case KindCrash:
+		what = fmt.Sprintf("%s (pid %d) crashed with signal %d at %s", i.Subject, i.Pid, i.Signal, when)
+		if i.CoreDump {
+			what += " (core dumped)"
+		}
+	case KindCrashLoop:
+		what = fmt.Sprintf("%s is crashing repeatedly (%d times since %s)", i.Subject, i.Count, when)
+	case KindAgentDown:
+		what = fmt.Sprintf("host stopped reporting (last sample at %s, silent for %d s)", when, i.Seconds)
+	default:
+		what = i.Kind
+	}
+	return fmt.Sprintf("[%s] %s: %s", level, i.Host, what)
+}
+
+func formatUs(us float64) string {
+	switch {
+	case us < 1000:
+		return fmt.Sprintf("%.0f µs", us)
+	case us < 1_000_000:
+		return fmt.Sprintf("%.1f ms", us/1000)
+	default:
+		return fmt.Sprintf("%.1f s", us/1_000_000)
+	}
+}

@@ -4,7 +4,7 @@ import "uplot/dist/uPlot.min.css";
 import type { Sample } from "../types/model";
 import { formatUs, percentile } from "../lib/hist";
 import { cssVar } from "../lib/theme";
-import { CAUTION_US, WARNING_US } from "../lib/lens";
+import { useTriggers } from "../lib/useTriggers";
 import type { TimeWindow } from "../lib/timeWindow";
 import { CHART_HEIGHT } from "./Heatmap";
 import { formatHMS, formatTime, useI18n, type Key } from "../lib/i18n";
@@ -24,6 +24,8 @@ type Props = {
 
 export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: Props) {
   const { lang, t } = useI18n();
+  // Threshold bands follow the server's trigger thresholds (µs)
+  const { caution: cautionUs, warning: warningUs } = useTriggers().cpu;
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const lineRef = useRef<HTMLDivElement | null>(null);
@@ -39,7 +41,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
     return [xs, ...ys];
   }, [samples]);
 
-  // Rebuild when the theme or language changes (colors and labels are read at creation)
+  // Rebuild when the theme, language or thresholds change (colors, labels and bands are read at creation)
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -96,8 +98,8 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
             const { left, width, top } = u.bbox;
             const yOf = (v: number) => u.valToPos(v, "y", true);
             const bands = [
-              { from: CAUTION_US, to: WARNING_US, color: cssVar("--status-warning"), label: t("chart.caution", { v: formatUs(CAUTION_US) }) },
-              { from: WARNING_US, to: 100_000, color: cssVar("--status-critical"), label: t("chart.warning", { v: formatUs(WARNING_US) }) },
+              { from: cautionUs, to: warningUs, color: cssVar("--status-warning"), label: t("chart.caution", { v: formatUs(cautionUs) }) },
+              { from: warningUs, to: 100_000, color: cssVar("--status-critical"), label: t("chart.warning", { v: formatUs(warningUs) }) },
             ];
             ctx.save();
             for (const b of bands) {
@@ -170,7 +172,7 @@ export function PercentileChart({ samples, win, schemeKey, hoverMs, onHover }: P
       plotRef.current = null;
       lineRef.current = null;
     };
-  }, [schemeKey, lang]);
+  }, [schemeKey, lang, cautionUs, warningUs]);
 
   useEffect(() => {
     plotRef.current?.setData(data);

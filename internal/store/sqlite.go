@@ -37,18 +37,29 @@ CREATE TABLE IF NOT EXISTS events (
 	body  TEXT   NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_host_ts ON events (host, ts_ms);
+CREATE TABLE IF NOT EXISTS incidents (
+	id       TEXT   PRIMARY KEY,
+	host     TEXT   NOT NULL,
+	kind     TEXT   NOT NULL,
+	level    TEXT   NOT NULL,
+	start_ms BIGINT NOT NULL,
+	end_ms   BIGINT,
+	body     TEXT   NOT NULL
+);
+CREATE INDEX IF NOT EXISTS incidents_host_start ON incidents (host, start_ms);
 `
 
 // SQLite is a Persister that writes samples and events to SQLite.
 // Writes are queued in the order received and written together in one transaction every second.
 type SQLite struct {
-	db             *sql.DB
-	queue          chan any // model.Sample or model.EventBatch
-	retention      time.Duration
-	eventRetention time.Duration
-	dropped        atomic.Uint64
-	done           chan struct{}
-	wg             sync.WaitGroup
+	db                *sql.DB
+	queue             chan any // model.Sample, model.EventBatch or model.Incident
+	retention         time.Duration
+	eventRetention    time.Duration
+	incidentRetention time.Duration
+	dropped           atomic.Uint64
+	done              chan struct{}
+	wg                sync.WaitGroup
 }
 
 const (
@@ -59,7 +70,7 @@ const (
 
 // OpenSQLite opens the DB at path (creating it if missing) and starts the writer goroutine.
 // path must be on a local disk of the monitored host (over NFS, locking is unreliable and the DB can be corrupted).
-func OpenSQLite(path string, retention, eventRetention time.Duration) (*SQLite, error) {
+func OpenSQLite(path string, retention, eventRetention, incidentRetention time.Duration) (*SQLite, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -72,7 +83,7 @@ func OpenSQLite(path string, retention, eventRetention time.Duration) (*SQLite, 
 	}
 	s := &SQLite{
 		db: db, queue: make(chan any, queueSize),
-		retention: retention, eventRetention: eventRetention,
+		retention: retention, eventRetention: eventRetention, incidentRetention: incidentRetention,
 		done: make(chan struct{}),
 	}
 	s.wg.Add(1)
@@ -88,6 +99,9 @@ func (s *SQLite) SaveEvents(b model.EventBatch) {
 		s.enqueue(b)
 	}
 }
+
+// SaveIncident upserts by ID, so an incident is one row that is updated as it progresses.
+func (s *SQLite) SaveIncident(i model.Incident) { s.enqueue(i) }
 
 func (s *SQLite) enqueue(v any) {
 	select {
@@ -155,6 +169,11 @@ func (s *SQLite) write(items []any) error {
 	if err != nil {
 		return err
 	}
+	upsertIncident, err := tx.Prepare(`INSERT INTO incidents (id, host, kind, level, start_ms, end_ms, body) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET level = excluded.level, end_ms = excluded.end_ms, body = excluded.body`)
+	if err != nil {
+		return err
+	}
 	for _, v := range items {
 		switch x := v.(type) {
 		case model.Sample:
@@ -175,6 +194,18 @@ func (s *SQLite) write(items []any) error {
 					return err
 				}
 			}
+		case model.Incident:
+			body, err := json.Marshal(x)
+			if err != nil {
+				return err
+			}
+			var end any // NULL while ongoing
+			if x.End != nil {
+				end = x.End.UnixMilli()
+			}
+			if _, err := upsertIncident.Exec(x.ID, x.Host, x.Kind, x.Level, x.Start.UnixMilli(), end, string(body)); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -189,6 +220,8 @@ func (s *SQLite) prune() {
 	}{
 		{`DELETE FROM samples WHERE ts_ms < ?`, now.Add(-s.retention)},
 		{`DELETE FROM events WHERE ts_ms < ?`, now.Add(-s.eventRetention)},
+		// Ongoing incidents are never pruned, however old their start is
+		{`DELETE FROM incidents WHERE end_ms IS NOT NULL AND start_ms < ?`, now.Add(-s.incidentRetention)},
 	} {
 		if _, err := s.db.Exec(q.sql, q.before.UnixMilli()); err != nil {
 			log.Printf("sqlite: prune: %v", err)
@@ -196,54 +229,88 @@ func (s *SQLite) prune() {
 	}
 }
 
-// LoadInto reads samples and events since the given time and restores them into the in-memory Store.
-// It exists so the UI history survives a server restart; call it before any subscribers attach.
-func (s *SQLite) LoadInto(ctx context.Context, st *Store, since time.Time) (samples, events int, err error) {
+// Restored counts what LoadInto put back into the Store.
+type Restored struct{ Samples, Events, Incidents int }
+
+// LoadInto restores samples and events since the given time, plus incidents that ended since then or were still
+// open, into the in-memory Store. It exists so the UI survives a server restart; call it before any subscribers attach.
+// Incidents that were still open are closed at their last update: the rule state that kept them open did not
+// survive the restart, and a stale "ongoing" would be a lie.
+func (s *SQLite) LoadInto(ctx context.Context, st *Store, since time.Time) (Restored, error) {
+	var r Restored
 	rows, err := s.db.QueryContext(ctx, `SELECT body FROM samples WHERE ts_ms >= ? ORDER BY ts_ms`, since.UnixMilli())
 	if err != nil {
-		return 0, 0, err
+		return r, err
 	}
 	for rows.Next() {
 		var body string
 		var x model.Sample
 		if err := rows.Scan(&body); err != nil {
 			rows.Close()
-			return samples, events, err
+			return r, err
 		}
 		if err := json.Unmarshal([]byte(body), &x); err != nil {
 			rows.Close()
-			return samples, events, err
+			return r, err
 		}
 		st.add(x, false)
-		samples++
+		r.Samples++
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return samples, events, err
+		return r, err
 	}
 
 	rows, err = s.db.QueryContext(ctx, `SELECT host, body FROM events WHERE ts_ms >= ? ORDER BY ts_ms`, since.UnixMilli())
 	if err != nil {
-		return samples, events, err
+		return r, err
 	}
-	defer rows.Close()
 	byHost := map[string][]model.ProcEvent{}
 	for rows.Next() {
 		var host, body string
 		var e model.ProcEvent
 		if err := rows.Scan(&host, &body); err != nil {
-			return samples, events, err
+			rows.Close()
+			return r, err
 		}
 		if err := json.Unmarshal([]byte(body), &e); err != nil {
-			return samples, events, err
+			rows.Close()
+			return r, err
 		}
 		byHost[host] = append(byHost[host], e)
-		events++
+		r.Events++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return r, err
 	}
 	for host, es := range byHost {
 		st.addEvents(model.EventBatch{Host: host, Events: es}, false)
 	}
-	return samples, events, rows.Err()
+
+	rows, err = s.db.QueryContext(ctx, `SELECT body FROM incidents WHERE end_ms IS NULL OR end_ms >= ? ORDER BY start_ms`, since.UnixMilli())
+	if err != nil {
+		return r, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		var inc model.Incident
+		if err := rows.Scan(&body); err != nil {
+			return r, err
+		}
+		if err := json.Unmarshal([]byte(body), &inc); err != nil {
+			return r, err
+		}
+		if inc.End == nil {
+			end := inc.Updated
+			inc.End = &end
+			s.enqueue(inc) // write the closed state back
+		}
+		st.addIncident(inc, false)
+		r.Incidents++
+	}
+	return r, rows.Err()
 }
 
 // Close flushes the remaining items and then closes the DB.

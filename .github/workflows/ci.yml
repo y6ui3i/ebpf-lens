@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (eBPF build, vet, test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install clang, llvm, libbpf
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libbpf-dev
+      - name: Install bpftool (static build from libbpf/bpftool)
+        run: |
+          curl -sSL -o /tmp/bpftool.tar.gz https://github.com/libbpf/bpftool/releases/download/v7.5.0/bpftool-v7.5.0-amd64.tar.gz
+          sudo tar -C /usr/local/bin -xzf /tmp/bpftool.tar.gz bpftool
+          sudo chmod +x /usr/local/bin/bpftool
+          bpftool version
+      - name: Kernel BTF (vmlinux.h is generated from the runner's kernel)
+        run: test -r /sys/kernel/btf/vmlinux && uname -r
+      - name: Generate BPF objects and Go bindings
+        run: make generate
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: TypeScript types are in sync with the Go model
+        run: go tool tygo generate && git diff --exit-code -- frontend/src/types/model.ts
+
+  web:
+    name: Web (types, build)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type-check and build
+        run: npm run build

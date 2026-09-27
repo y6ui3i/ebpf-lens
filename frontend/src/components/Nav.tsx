@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
-import { Link, ROUTES } from "../lib/router";
-import { useI18n, type Key } from "../lib/i18n";
+import { Link, ROUTES, matchRoute, vmPath } from "../lib/router";
+import { useI18n, type Key, type TFn } from "../lib/i18n";
 
 // OpenSearch Dashboards style menu. The ☰ in the top bar slides it in from the left; pressing again slides it out.
 // It stays in the DOM while closed and moves with transform (for the enter/leave animation). It is inert while closed
 
-type Group = { title: Key; items: { path?: string; label: Key }[] };
+// A menu entry: `label` is a translation key for static screens; `text` is a literal (a VM name) for dynamic ones
+type Item = { path?: string; label?: Key; text?: string; state?: "running" | "stopped"; level?: Level };
+type Group = { title: Key; items: Item[] };
 
-const GROUPS: Group[] = [
+// The VMs the menu lists, as computed in App (running now, or with an incident in the last 24 h)
+export type NavVm = { name: string; running: boolean; level: Level };
+
+const STATIC_GROUPS: Group[] = [
   {
     title: "nav.group.ebpflens",
     items: [
@@ -17,7 +22,7 @@ const GROUPS: Group[] = [
     ],
   },
   {
-    title: "nav.group.resources",
+    title: "nav.group.host",
     items: [
       { path: "/cpu", label: "page.cpu" },
       { path: "/processes", label: "page.processes" },
@@ -31,11 +36,19 @@ const GROUPS: Group[] = [
 
 const RECENT_MAX = 3;
 
-export function Nav({ path, open, onClose, levels }: {
+// Menu text for a path: the screen name, or the VM name for /vms/<name>
+function labelFor(path: string, t: TFn): string | undefined {
+  const m = matchRoute(path);
+  if (!m) return undefined;
+  return m.route === "/vms/:name" ? m.params.name : t(m.labelKey);
+}
+
+export function Nav({ path, open, onClose, levels, vms }: {
   path: string;
   open: boolean;
   onClose: () => void;
   levels: Record<string, Level>; // status per screen; only screens with a problem get an icon
+  vms: NavVm[];
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -52,10 +65,19 @@ export function Nav({ path, open, onClose, levels }: {
   const recentGroup: Group = {
     title: "nav.group.recent",
     items: recent.flatMap((p) => {
-      const r = ROUTES.find((x) => x.path === p);
-      return r ? [{ path: p, label: r.labelKey }] : [];
+      const text = labelFor(p, t);
+      return text ? [{ path: p, text }] : [];
     }),
   };
+  // VMs get their own group between "eBPFLens" and "Host": the list, then one entry per known VM with its state
+  const vmGroup: Group = {
+    title: "nav.group.vms",
+    items: [
+      { path: "/vms", label: "page.vms" },
+      ...vms.map((v) => ({ path: vmPath(v.name), text: v.name, state: v.running ? "running" as const : "stopped" as const, level: v.level })),
+    ],
+  };
+  const groups = [recentGroup, STATIC_GROUPS[0], vmGroup, ...STATIC_GROUPS.slice(1)];
 
   return (
     <>
@@ -76,7 +98,7 @@ export function Nav({ path, open, onClose, levels }: {
         }`}
         style={{ background: "var(--surface-1)", borderRight: "1px solid var(--border)" }}
       >
-        {[recentGroup, ...GROUPS].map((g) =>
+        {groups.map((g) =>
           g.items.length === 0 ? null : (
             <section key={g.title} style={{ borderBottom: "1px solid var(--border)" }}>
               <button
@@ -95,18 +117,24 @@ export function Nav({ path, open, onClose, levels }: {
               </button>
               {!collapsed[g.title] && (
                 <ul className="pb-2">
-                  {g.items.map((it) => (
-                    <li key={`${g.title}:${it.label}`}>
-                      {it.path ? (
-                        <NavLink path={it.path} label={t(it.label)} active={it.path === path} level={levels[it.path]} onNavigate={onClose} />
-                      ) : (
-                        <span className="flex items-center justify-between px-4 py-1.5 text-sm" style={{ color: "var(--text-muted)" }}>
-                          {t(it.label)}
-                          <span className="text-xs">{t("nav.soon")}</span>
-                        </span>
-                      )}
-                    </li>
-                  ))}
+                  {g.items.map((it) => {
+                    const text = it.text ?? (it.label ? t(it.label) : "");
+                    return (
+                      <li key={`${g.title}:${it.path ?? it.label}`}>
+                        {it.path ? (
+                          <NavLink
+                            path={it.path} label={text} active={it.path === path}
+                            level={it.level ?? levels[it.path]} state={it.state} onNavigate={onClose}
+                          />
+                        ) : (
+                          <span className="flex items-center justify-between px-4 py-1.5 text-sm" style={{ color: "var(--text-muted)" }}>
+                            {text}
+                            <span className="text-xs">{t("nav.soon")}</span>
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </section>
@@ -117,10 +145,11 @@ export function Nav({ path, open, onClose, levels }: {
   );
 }
 
-function NavLink({ path, label, active, level, onNavigate }: {
-  path: string; label: string; active: boolean; level?: Level; onNavigate: () => void;
+function NavLink({ path, label, active, level, state, onNavigate }: {
+  path: string; label: string; active: boolean; level?: Level; state?: "running" | "stopped"; onNavigate: () => void;
 }) {
   const { t } = useI18n();
+  const stateText = state ? t(state === "running" ? "vm.state.running" : "vm.state.stopped") : undefined;
   return (
     <Link
       to={path}
@@ -133,7 +162,16 @@ function NavLink({ path, label, active, level, onNavigate }: {
         boxShadow: active ? "inset 3px 0 0 var(--series-1)" : undefined,
       }}
     >
-      <span>{label}</span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        {/* VM entries carry a state mark: filled = running, hollow = stopped (the tooltip and screen-reader text say which) */}
+        {stateText && (
+          <span title={stateText} className="shrink-0 text-[0.6rem]" style={{ color: state === "running" ? "var(--status-good)" : "var(--text-muted)" }}>
+            <span aria-hidden>{state === "running" ? "●" : "○"}</span>
+            <span className="sr-only">{stateText}</span>
+          </span>
+        )}
+        <span className="truncate">{label}</span>
+      </span>
       {level && level !== "ok" && (
         <span style={{ color: LEVEL_COLOR[level] }} title={t(LEVEL_KEY[level])}>
           <span aria-hidden>{LEVEL_ICON[level]}</span>
@@ -164,7 +202,7 @@ function useRecent(path: string): string[] {
       return next;
     });
   }, [path]);
-  return recent.filter((p) => p !== path && ROUTES.some((r) => r.path === p)).slice(0, RECENT_MAX);
+  return recent.filter((p) => p !== path && (ROUTES.some((r) => r.path === p) || matchRoute(p) != null)).slice(0, RECENT_MAX);
 }
 
 export function MenuButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {

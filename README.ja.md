@@ -153,6 +153,14 @@ KVM ホストでは、エージェントが /proc から QEMU プロセスを見
 
 検証機の lab VM で再現: `virsh destroy` → libvirtd の SIGTERM で killed、`virsh shutdown` → 上の理由で同じ、QEMU に `kill -SEGV` → crash、`virsh memtune --hard-limit 256M` とゲスト内の 700MB 確保 → `cgroup_oom`(カーネルの「Memory cgroup out of memory: Killed process … (qemu-system-x86)」と一致)。ホスト全体の OOM で VM を落とすのは検証機では安全にできないので、記録したイベントの形に対する単体テストで押さえている。
 
+## VM の画面
+
+メニューに **VM** のグループ(一覧と、VM ごとの項目。稼働中/停止の印と、新しい出来事があればレベルの印)を、**ホスト**(ホスト自身の資源)の上に置いた。
+
+- **VM 一覧**(`/vms`): 直近 24 時間に見えた VM を 1 行ずつ。状態(いつから稼働 / いつ停止 · 原因)、ホストから見た CPU 待ち p99、CPU 占有率、回収停止(直近 5 秒)、直近の出来事。出来事が新しい VM が上。
+- **VM のページ**(`/vms/<名前>`): ADR 0001 の形の **VM Lens Summary**。原因ごとの見出し、あるフィールドだけから組み立てた **根拠** の箇条書き(誰がシグナルを送ったか、OOM の引き金と cgroup かホストか、直前 1 分の回収停止と CPU 待ち p99)、理由付きの **次にすること**(「VM のメモリ上限を上げるか、ゲストのメモリを減らしてください。上限がそのままなので、再起動だけでは繰り返します」)。その下に、この VM の CPU 待ちのヒートマップと推移(ホスト側)、回収停止、この VM の出来事。
+- ダッシュボードの升目に **VM** の行(稼働数、最も待たされている VM の CPU 待ち、24 時間の停止数)、Lens Summary に **VM** の行。VM の停止は見出しで CPU・メモリ・プロセスより優先される。
+
 ## 保存
 
 `-db` を付けると SQLite に保存する(pure Go の modernc.org/sqlite。cgo 不要)。再起動しても履歴が戻る。
@@ -183,7 +191,7 @@ KVM ホストでは、エージェントが /proc から QEMU プロセスを見
 5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
 6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
 7. ✅ トリガーと通知: 判定をサーバー側で行い、出来事(incident)として記録・webhook で通知。材料はすべて eBPF 由来
-8. 🔶 VM 監視(第一歩「なぜ VM が止まったか」まで完了。VM の画面は次): ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる。VM は独立した画面群にする: メニューを **ホスト**(今の資源)と **VM**(一覧と、VM ごとのページ。それぞれに Lens Summary)に分ける。VM を動かしている人が知りたいのはサーバー全体ではなく「自分の VM」だから
+8. ✅ VM 監視(「なぜ VM が止まったか」と VM の画面まで完了): ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる。VM は独立した画面群にする: メニューを **ホスト**(今の資源)と **VM**(一覧と、VM ごとのページ。それぞれに Lens Summary)に分ける。VM を動かしている人が知りたいのはサーバー全体ではなく「自分の VM」だから
 9. GPU の基本メトリクス(NVML。例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
 10. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
 11. ディスクとネットワーク: biolatency / tcpconnect / tcpretrans
@@ -231,6 +239,13 @@ sh lab/create-vm.sh push     # bin/ebpflens-agent を VM にコピー
 sh lab/create-vm.sh ssh      # VM に入る
 virsh -c qemu:///system shutdown ebpflens-lab   # 止める(ディスクは残る)
 ```
+
+`lab/fleet.sh up 10` でさらに 10 台(`ebpflens-fleet-01..10`、各 1GB / 2 vCPU。ベースイメージと鍵は共有)を起動できる。`ssh N cmd`、`ips`、`down`。
+
+8 コアの検証機で 10 台: `virt-install` から 20 秒で 10 台ともエージェントに見えた。エージェントは RSS 23MB・CPU 0.3%、サンプルは毎秒 2.9KB。うち 3 台の中で `stress-ng --cpu 2` を回す(8 コアに 6 vCPU が張り付き、ホスト 71% busy)と、**何もしていない** VM のホスト側 CPU 待ち p99 が数十 µs から 0.5〜2.3 ms に上がった。ホストから VM ごとに見た steal time である。この回で分かったこと:
+
+- **スワップがあると、cgroup のメモリ上限は VM を殺さず、遅くする。** `virsh memtune --hard-limit 256M` の VM が 700MB を触ると、上限に 4,846 回当たったのに OOM kill は起きなかった。QEMU をスワップに追い出す回収が毎回成功していたため。これは VM の回収停止として見える(`--swap-hard-limit` でスワップも抑えた後の `vm_down` には、直前 1 分の停止 2.9 秒が付いていた)。スワップのあるホストで上限により VM を落とすには、スワップも抑える。
+- 3 台の VM が CPU を約 25% ずつ分け合っていると、ホストの原因の一文は原因を名指ししない(単一プロセスのルールは 30% を要求する)。被害側は正しく名指しされる。隣人の「グループ」を原因にするのは steal の帰属の段階で扱う。
 
 VM のファイルは `LAB_DIR` を指定しなければ `/var/lib/libvirt/images/ebpflens-lab` に置かれる。VM のカーネルは 7.0.0-31、ホストは 7.0.0-34 で、ホストでビルドしたエージェントがそのまま動いた(CO-RE)。
 

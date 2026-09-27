@@ -1,12 +1,14 @@
 import type { Incident, Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, baseline, current, type Level } from "../lib/lens";
-import { areaLevel, asLevel, durationSeconds, isInstantKind, isOngoing, kindKey, latestOf } from "../lib/incidents";
+import { areaLevel, asLevel, isOngoing, latestOf } from "../lib/incidents";
 import { explain, formatMs, impact, samplesBetween } from "../lib/impact";
-import { lifecycleSentence, signalName, type Lifecycle } from "../lib/lifecycle";
-import { formatMsPerSec, memorySentence } from "../lib/memory";
+import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
+import { memorySentence } from "../lib/memory";
+import { runningVms, vmStopsWithin } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
-import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params, type TFn } from "../lib/i18n";
+import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params } from "../lib/i18n";
+import { IncidentTable, incidentDetail } from "./IncidentTable";
 
 const CPU_HEADLINE: Record<Level, Key> = {
   ok: "summary.cpu.ok",
@@ -24,6 +26,7 @@ const MEM_HEADLINE: Record<Level, Key> = {
 
 const PROCESS_KINDS = ["oom_kill", "crash", "crash_loop"] as const;
 const MAX_ROWS = 10;
+const VM_LINGER_MS = 5 * 60 * 1000; // a VM stop keeps the finding at its level this long (same as isActive for instant kinds)
 
 // Headline for the process area, from whichever process incident is currently active (OOM kill > crash loop > crash)
 function lifecycleHeadline(incidents: Incident[], now: number): Key {
@@ -43,8 +46,8 @@ function cpuUtil(samples: Sample[]): number | null {
 
 // "What is happening right now" summary shown at the top of the screen.
 // Levels come from the server's incidents; the numbers in the sentences still come from the samples
-export function LensSummary({ samples, memSamples, life, incidents }: {
-  samples: Sample[]; memSamples: Sample[]; life: Lifecycle; incidents: Incident[];
+export function LensSummary({ samples, memSamples, vmSamples, life, incidents }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; life: Lifecycle; incidents: Incident[];
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -54,17 +57,20 @@ export function LensSummary({ samples, memSamples, life, incidents }: {
   const cpuLevel = areaLevel(incidents, ["cpu_wait"], nowMs);
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
+  const vmLevel = areaLevel(incidents, ["vm_down"], nowMs);
   const agentDown = incidents.find((x) => x.kind === "agent_down" && isOngoing(x));
-  // The overall status follows the worst area, and the headline uses that area's wording (ties: CPU -> memory -> processes).
+  // The overall status follows the worst area, and the headline uses that area's wording (ties: VM -> CPU -> memory -> processes).
   // A host that stopped reporting outranks everything, because no other data is fresh
   const areas: { level: Level; headline: Key }[] = [
+    { level: vmLevel, headline: "summary.vmDown" },
     { level: cpuLevel, headline: CPU_HEADLINE[cpuLevel] },
     { level: memLevel, headline: MEM_HEADLINE[memLevel] },
     { level: procLevel, headline: lifecycleHeadline(incidents, nowMs) },
   ];
   const worstArea = areas.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a));
   const overall: Level = agentDown ? asLevel(agentDown.level) : worstArea.level;
-  const headline = t(agentDown ? "summary.agentDown" : worstArea.headline);
+  // When nothing is wrong, the headline is the CPU's "all quiet" sentence (the VM area only has wording for a stop)
+  const headline = t(agentDown ? "summary.agentDown" : overall === "ok" ? CPU_HEADLINE.ok : worstArea.headline);
   const base = baseline(samples, triggers.cpu.caution);
   const last = latestOf(incidents, "cpu_wait");
   const recent = incidents.slice(0, MAX_ROWS);
@@ -109,50 +115,37 @@ export function LensSummary({ samples, memSamples, life, incidents }: {
         <Finding area={t("resource.processes")} level={procLevel}>
           <p>{lifecycleSentence(life, lang)}</p>
         </Finding>
+        <Finding area={t("resource.vm")} level={vmLevel}>
+          <p>{vmSentence(vmSamples, incidents, lang, nowMs)}</p>
+        </Finding>
       </dl>
 
       {recent.length > 0 && (
         <div className="mt-4">
           <h3 className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>{t("summary.recentIncidents")}</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[36rem] text-sm tabular">
-              <thead style={{ color: "var(--text-muted)" }}>
-                <tr>
-                  <th className="py-1 text-left font-normal">{t("summary.col.level")}</th>
-                  <th className="py-1 text-left font-normal">{t("summary.col.kind")}</th>
-                  <th className="py-1 text-left font-normal">{t("common.process")}</th>
-                  <th className="py-1 text-left font-normal">{t("summary.col.period")}</th>
-                  <th className="py-1 pr-4 text-right font-normal">{t("summary.col.duration")}</th>
-                  <th className="py-1 text-left font-normal">{t("summary.col.detail")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recent.map((x) => {
-                  const level = asLevel(x.level);
-                  const secs = durationSeconds(x, nowMs);
-                  return (
-                    <tr key={x.id} style={{ borderTop: "1px solid var(--grid)" }}>
-                      <td className="py-1 pr-2 whitespace-nowrap">
-                        <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]}</span>{" "}
-                        {t(LEVEL_KEY[level])}
-                      </td>
-                      <td className="py-1 pr-2">{t(kindKey(x.kind))}</td>
-                      <td className="py-1 pr-2">{x.subject ?? ""}</td>
-                      <td className="py-1 pr-2 whitespace-nowrap" style={{ color: "var(--text-secondary)" }}>
-                        {timeSpan(x, lang, t)}
-                      </td>
-                      <td className="py-1 pr-4 text-right whitespace-nowrap">{secs == null ? "" : t("common.seconds", { n: secs })}</td>
-                      <td className="py-1" style={{ color: "var(--text-secondary)" }}>{incidentDetail(x, lang, t)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <IncidentTable incidents={recent} nowMs={nowMs} />
         </div>
       )}
     </section>
   );
+}
+
+// One sentence on the VMs: a stop in the last 5 minutes wins; otherwise how many run and when the last stop was.
+// With no "vms" sample at all we cannot tell whether there are VMs, so say so instead of "none"
+function vmSentence(vmSamples: Sample[], incidents: Incident[], lang: Lang, nowMs: number): string {
+  const tr = (k: Key, p?: Params) => translate(lang, k, p);
+  const running = runningVms(vmSamples);
+  const stops = vmStopsWithin(incidents, nowMs);
+  const last = stops[0];
+  const describe = (x: Incident) => ({
+    name: x.vm ?? x.subject ?? "", time: formatTime(lang, x.start), detail: incidentDetail(x, lang, tr),
+  });
+  if (last && nowMs - Date.parse(last.start) <= VM_LINGER_MS) return tr("summary.vm.down", describe(last));
+  if (running === undefined) return last ? tr("summary.vm.noneRunningLast", describe(last)) : tr("summary.vm.unknown");
+  if (running.length === 0) return last ? tr("summary.vm.noneRunningLast", describe(last)) : tr("summary.vm.none");
+  return last
+    ? tr("summary.vm.runningLast", { n: running.length, ...describe(last) })
+    : tr("summary.vm.running", { n: running.length });
 }
 
 // Finding for one area. The status is shown with an icon and a label, not by color alone
@@ -168,42 +161,6 @@ function Finding({ area, level, children }: { area: string; level: Level; childr
       <dd className="space-y-0.5" style={{ color: "var(--text-secondary)" }}>{children}</dd>
     </div>
   );
-}
-
-// "start – end" for the table; instant incidents show only their time
-function timeSpan(x: Incident, lang: Lang, t: TFn): string {
-  const start = formatTime(lang, x.start);
-  if (isInstantKind(x.kind)) return start;
-  return `${start}${t("range.sep")}${x.end ? formatTime(lang, x.end) : t("common.ongoing")}`;
-}
-
-// Short detail column per kind
-function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
-  switch (x.kind) {
-    case "cpu_wait":
-      return x.peak == null ? "" : formatUs(x.peak);
-    case "mem_stall":
-      return formatMsPerSec(x.peak ?? null, lang);
-    case "crash":
-      return `${signalName(x.signal ?? 0, lang)}${x.coreDump ? t("lp.coreDump") : ""}`;
-    case "oom_kill": {
-      const why = t(x.memcg ? "mem.causeMemcg" : "incident.oomHost");
-      return x.triggerComm ? why + t("incident.triggeredBy", { comm: x.triggerComm }) : why;
-    }
-    case "crash_loop":
-      return t("incident.crashes", { n: x.count ?? x.peak ?? 0 });
-    case "agent_down":
-      return t("incident.silentFor", { n: x.seconds });
-    case "vm_down": {
-      const causeKey = (`incident.cause.${x.cause ?? "shutdown"}` as Key);
-      let d = t(causeKey);
-      if (x.cause === "crash" && x.signal) d += ` (${signalName(x.signal, lang)})`;
-      if (x.triggerComm) d += t("incident.by", { comm: x.triggerComm });
-      return d;
-    }
-    default:
-      return "";
-  }
 }
 
 // One sentence on "who used the CPU and who else was kept waiting" during the incident

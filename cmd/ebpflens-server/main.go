@@ -55,9 +55,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("sqlite: %v", err)
 		}
-		// Restore enough history to fill the UI window (the last keep seconds), then start persisting
+		// Restore enough history to fill the UI window (the last keep seconds) and a day of incidents, then start persisting
 		since := time.Now().Add(-time.Duration(*keep) * time.Second)
-		r, err := db.LoadInto(context.Background(), st, since)
+		r, err := db.LoadInto(context.Background(), st, since, time.Now().Add(-24*time.Hour))
 		if err != nil {
 			log.Fatalf("sqlite: load: %v", err)
 		}

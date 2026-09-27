@@ -7,19 +7,22 @@ import type { Level } from "./lib/lens";
 import { areaLevel } from "./lib/incidents";
 import { useColorSchemeKey } from "./lib/theme";
 import { timeWindow } from "./lib/timeWindow";
-import { Link, ROUTES, usePath } from "./lib/router";
+import { Link, matchRoute, usePath } from "./lib/router";
+import { knownVms } from "./lib/vms";
 import { useI18n, type Key, type Lang } from "./lib/i18n";
-import { MenuButton, Nav } from "./components/Nav";
+import { MenuButton, Nav, type NavVm } from "./components/Nav";
 import { LensSummary } from "./components/LensSummary";
 import { UseMatrix } from "./components/UseMatrix";
 import { ImpactPanel } from "./components/ImpactPanel";
 import { CpuLatencyCard } from "./components/CpuLatencyCard";
 import { LifecyclePanel } from "./components/LifecyclePanel";
 import { MemoryPanel } from "./components/MemoryPanel";
+import { VmListPanel } from "./components/VmListPanel";
+import { VmPanel } from "./components/VmPanel";
 import type { Sample } from "./types/model";
 
 const WINDOW = 300; // last 5 minutes (one column per second)
-const PROBES = ["runqlat", "memstall"] as const;
+const PROBES = ["runqlat", "memstall", "vms"] as const;
 const EMPTY: Sample[] = [];
 const PROCESS_KINDS = ["oom_kill", "crash", "crash_loop"] as const;
 const TICK_MS = 30_000; // re-evaluate "ended within the last 5 minutes" even when no new data arrives
@@ -44,6 +47,7 @@ export default function App() {
   const { samples: byProbe, events, incidents, dropped, status } = useLiveHost(host, PROBES, WINDOW);
   const samples = byProbe.runqlat ?? EMPTY;
   const memSamples = byProbe.memstall ?? EMPTY;
+  const vmSamples = byProbe.vms ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
   // The visible range follows the CPU samples; the memory screen uses the same 5 minutes
   const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
@@ -58,10 +62,15 @@ export default function App() {
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
   const agentLevel = areaLevel(incidents, ["agent_down"], nowMs);
-  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel);
-  const levels = { "/": overall, "/all": overall, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel };
-  const routeKey = ROUTES.find((r) => r.path === path)?.labelKey;
-  const title = routeKey ? t(routeKey) : "";
+  // A VM stop counts toward the headline like any other area (it kept the dashboard green before this was added)
+  const vmLevel = areaLevel(incidents, ["vm_down"], nowMs);
+  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel);
+  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel };
+  // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level
+  const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs).map((v) => ({ name: v.name, running: v.running, level: v.level }));
+  const match = matchRoute(path);
+  const vmName = match?.params.name;
+  const title = match ? t(match.labelKey, match.params) : "";
 
   return (
     <div>
@@ -103,7 +112,7 @@ export default function App() {
           <LangSwitch />
         </div>
       </header>
-      <Nav path={path} open={navOpen} onClose={closeNav} levels={levels} />
+      <Nav path={path} open={navOpen} onClose={closeNav} levels={levels} vms={navVms} />
 
       <main className="mx-auto max-w-6xl px-4 py-6">
         {/* The screen name is shown in the top-bar breadcrumb, so this heading is for screen readers only */}
@@ -131,15 +140,25 @@ export default function App() {
             <PanelSection id="processes" title={t("page.processes")}>
               <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
             </PanelSection>
+            <PanelSection id="vms" title={t("page.vms")}>
+              <VmListPanel vmSamples={vmSamples} samples={samples} memSamples={memSamples} incidents={incidents} />
+            </PanelSection>
           </AllPanels>
         ) : path === "/memory" ? (
           <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} level={memLevel} />
         ) : path === "/processes" ? (
           <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
+        ) : path === "/vms" ? (
+          <VmListPanel vmSamples={vmSamples} samples={samples} memSamples={memSamples} incidents={incidents} />
+        ) : vmName != null ? (
+          <VmPanel
+            name={vmName} vmSamples={vmSamples} samples={samples} memSamples={memSamples}
+            incidents={incidents} win={win} schemeKey={schemeKey}
+          />
         ) : (
           <>
-            <LensSummary samples={samples} memSamples={memSamples} life={life} incidents={incidents} />
-            <UseMatrix samples={samples} memSamples={memSamples} events={events} life={life} incidents={incidents} win={win} />
+            <LensSummary samples={samples} memSamples={memSamples} vmSamples={vmSamples} life={life} incidents={incidents} />
+            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} events={events} life={life} incidents={incidents} win={win} />
           </>
         )}
       </main>
@@ -163,6 +182,7 @@ const SECTIONS: { id: string; titleKey: Key }[] = [
   { id: "impact", titleKey: "page.impact" },
   { id: "memory", titleKey: "page.memory" },
   { id: "processes", titleKey: "page.processes" },
+  { id: "vms", titleKey: "page.vms" },
 ];
 
 function PanelSection({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {

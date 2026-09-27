@@ -232,11 +232,12 @@ func (s *SQLite) prune() {
 // Restored counts what LoadInto put back into the Store.
 type Restored struct{ Samples, Events, Incidents int }
 
-// LoadInto restores samples and events since the given time, plus incidents that ended since then or were still
-// open, into the in-memory Store. It exists so the UI survives a server restart; call it before any subscribers attach.
-// Incidents that were still open are closed at their last update: the rule state that kept them open did not
-// survive the restart, and a stale "ongoing" would be a lie.
-func (s *SQLite) LoadInto(ctx context.Context, st *Store, since time.Time) (Restored, error) {
+// LoadInto restores samples and events since `since` (the UI's live window), plus incidents that ended since
+// `incidentsSince` (the UI's incident list covers a day) or were still open, into the in-memory Store. It exists so
+// the UI survives a server restart; call it before any subscribers attach. Incidents that were still open are
+// closed at their last update: the rule state that kept them open did not survive the restart, and a stale
+// "ongoing" would be a lie.
+func (s *SQLite) LoadInto(ctx context.Context, st *Store, since, incidentsSince time.Time) (Restored, error) {
 	var r Restored
 	rows, err := s.db.QueryContext(ctx, `SELECT body FROM samples WHERE ts_ms >= ? ORDER BY ts_ms`, since.UnixMilli())
 	if err != nil {
@@ -288,7 +289,7 @@ func (s *SQLite) LoadInto(ctx context.Context, st *Store, since time.Time) (Rest
 		st.addEvents(model.EventBatch{Host: host, Events: es}, false)
 	}
 
-	rows, err = s.db.QueryContext(ctx, `SELECT body FROM incidents WHERE end_ms IS NULL OR end_ms >= ? ORDER BY start_ms`, since.UnixMilli())
+	rows, err = s.db.QueryContext(ctx, `SELECT body FROM incidents WHERE end_ms IS NULL OR end_ms >= ? ORDER BY start_ms`, incidentsSince.UnixMilli())
 	if err != nil {
 		return r, err
 	}

@@ -116,6 +116,8 @@ function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: S
   const recentStop = down != null && nowMs - Date.parse(down.start) <= LINGER_MS;
   const cause = down && CAUSES.has(down.cause ?? "") ? (down.cause as Cause) : undefined;
 
+  // An old stop is history, not a status: the header then shows a neutral "stopped" mark rather than "OK"
+  const stale = down != null && !vm.running && !recentStop;
   let level: Level;
   let headline: string;
   if (down && (recentStop || !vm.running)) {
@@ -135,8 +137,8 @@ function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: S
   return (
     <div>
       <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
-        <span aria-hidden style={{ color: LEVEL_COLOR[level] }}>{LEVEL_ICON[level]}</span>
-        <span>{t(LEVEL_KEY[level])}</span>
+        <span aria-hidden style={{ color: stale ? "var(--text-muted)" : LEVEL_COLOR[level] }}>{stale ? "○" : LEVEL_ICON[level]}</span>
+        <span>{stale ? t("vm.state.stopped") : t(LEVEL_KEY[level])}</span>
         <span style={{ color: "var(--text-secondary)" }}>·</span>
         <span>{headline}</span>
       </div>

@@ -96,6 +96,9 @@ Build the new binaries, then on the server `make install && sudo systemctl resta
 
 ## 3. Reading the dashboard
 
+![The dashboard: Lens Summary, recent incidents, and the USE grid (ten VMs, three of them busy)](img/en-dashboard.png)
+
+
 ### Levels
 
 | Mark | Level | Meaning |
@@ -131,9 +134,15 @@ Cells show the latest value, a 5-minute sparkline, and a level mark only when so
 
 ## 4. The screens
 
+![The menu: eBPFLens, VMs (one entry per VM with its state), Host](img/en-menu.png)
+
+
 The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (VM list, then one entry per VM), **Host** (CPU wait, processes, memory; disk, network and GPU are planned).
 
 ### CPU wait (`/cpu`)
+
+![CPU wait: distribution, trend with threshold bands, and cause and impact (three VMs hogging the CPU; the victims beside them)](img/en-cpu.png)
+
 
 *What it is.* How long a runnable task waited for a CPU. On a calm 8-core box the 99th percentile is tens of microseconds; under 4× oversubscription it is 8–16 ms. Waiting here is invisible to CPU-utilization graphs: a host at 70 % can still make tasks wait milliseconds if the wrong ones are runnable at once.
 
@@ -146,6 +155,9 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 
 ### Processes (`/processes`)
 
+![Processes: starts, short-lived commands, abnormal endings, and the raw log](img/en-processes.png)
+
+
 *What it is.* Every exec, exit, OOM kill and terminating signal on the host, from the kernel, including processes that live for a millisecond. Command-line arguments are deliberately **not** recorded (they can contain passwords).
 
 *What you see.* Four tiles (starts, exits under 1 s, error exits, crashes + OOM), a table of abnormal endings, the most frequent short-lived commands (cron and script noise, but also fork bombs), and the raw event log with an "abnormal only" filter.
@@ -153,6 +165,9 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 *Reading it.* An **OOM kill** row tells you the scope (host out of memory vs. a cgroup limit) and *which process's allocation triggered it* — often not the victim. A **crash** is an exit by SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSYS or with a core dump; SIGTERM/SIGKILL are not crashes, they are someone stopping the process. A **signal** row says who sent SIGTERM/SIGKILL/SIGINT/SIGHUP/SIGQUIT to whom.
 
 ### Memory (`/memory`)
+
+![Memory: reclaim stalls per process (four dd processes fighting a 32 MB cgroup), eBPF vs. PSI](img/en-memory.png)
+
 
 *What it is.* Time processes spend stalled in memory reclaim — the moment a process asks for memory and the kernel makes it wait while freeing some. Counted per process with eBPF (`direct reclaim` for a host-wide shortage, `memcg reclaim` for a cgroup limit). Usage and PSI come from `/proc` only to cross-check.
 
@@ -162,9 +177,14 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 
 ### VMs (`/vms` and `/vms/<name>`)
 
+![VM list: state, host-side wait, share, stall, last incident](img/en-vms.png)
+
+
 *What it is.* KVM guests seen from the host. eBPFLens recognises QEMU processes (libvirt and Proxmox naming), so each VM's CPU wait and reclaim stalls are filed under its name, and a VM's death is explained from host-side evidence. No agent inside the guest is needed for this; no libvirt access either.
 
 *VM list.* One row per VM seen in the last 24 h: state (running since / stopped at · cause), host-side CPU wait p99, share of host CPU, reclaim stall, last incident. VMs with an active incident float to the top.
+
+![VM page: the VM Lens Summary for a VM killed by its cgroup limit — headline, evidence, next step — then its own charts and incidents](img/en-vm.png)
 
 *VM page.* A **VM Lens Summary**:
 - **Headline by cause** — *Killed by its cgroup memory limit*, *Killed by the host's OOM killer*, *QEMU crashed*, *Stopped by a signal*, *Exited cleanly*, or *Running*.

@@ -25,6 +25,10 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 - **画面**: React + Vite + TypeScript の SPA。TanStack Query、Tailwind、uPlot、ヒートマップは canvas に描く。型は tygo で Go から生成
 - **概念**: Zabbix に倣ってホスト / アイテム / トリガー / イベント
 
+## マニュアル
+
+[運用マニュアル](docs/manual.ja.md) — 何が見えるか、各画面の読み方、出来事の種類ごとの意味と対応、限界、設定と API の早見表。
+
 ## 設計判断
 
 - [ADR 0001: 誰でも SRE — 当番の人が動けるように障害を説明する](docs/adr/0001-everyone-an-sre.md)(英語)

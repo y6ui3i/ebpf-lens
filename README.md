@@ -25,6 +25,10 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 - **UI**: React + Vite + TypeScript SPA with TanStack Query, Tailwind and uPlot; heatmaps are drawn on a canvas. TypeScript types are generated from the Go model with tygo.
 - **Concepts**: borrowed from Zabbix — hosts, items, triggers, events.
 
+## Manual
+
+[Operator's manual](docs/manual.md) — what eBPFLens can see, how to read each screen, what every incident kind means and what to do, limits, and a configuration/API quick reference.
+
 ## Design decisions
 
 - [ADR 0001: Everyone an SRE — explain incidents so that whoever is on call can act](docs/adr/0001-everyone-an-sre.md)

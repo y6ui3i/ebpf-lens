@@ -11,6 +11,7 @@ export type Triggers = {
   agentDown: { afterSeconds: number };
   gpu: { idleUtil: number; starved: ExcursionRule; vram: ExcursionRule }; // shares 0..1
   disk: ExcursionRule; // block I/O latency p99, in µs
+  network: { connectFails: ExcursionRule; connectLatency: ExcursionRule; retrans: ExcursionRule }; // per second, µs, per second
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -24,6 +25,11 @@ export const DEFAULT_TRIGGERS: Triggers = {
     vram: { caution: 0.9, warning: 0.97, minSeconds: 3, maxGapSeconds: 2 },
   },
   disk: { caution: 10_000, warning: 100_000, minSeconds: 3, maxGapSeconds: 2 },
+  network: {
+    connectFails: { caution: 5, warning: 50, minSeconds: 1, maxGapSeconds: 10 }, // failed connects in the last 10 s
+    connectLatency: { caution: 200_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
+    retrans: { caution: 10, warning: 100, minSeconds: 3, maxGapSeconds: 5 },
+  },
 };
 
 export function useTriggers(): Triggers {
@@ -45,5 +51,10 @@ export function useTriggers(): Triggers {
       vram: { ...DEFAULT_TRIGGERS.gpu.vram, ...d.gpu?.vram },
     },
     disk: { ...DEFAULT_TRIGGERS.disk, ...d.disk },
+    network: {
+      connectFails: { ...DEFAULT_TRIGGERS.network.connectFails, ...d.network?.connectFails },
+      connectLatency: { ...DEFAULT_TRIGGERS.network.connectLatency, ...d.network?.connectLatency },
+      retrans: { ...DEFAULT_TRIGGERS.network.retrans, ...d.network?.retrans },
+    },
   };
 }

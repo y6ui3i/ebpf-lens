@@ -14,6 +14,7 @@ export const ROUTES: Route[] = [
   { path: "/processes", labelKey: "page.processes" },
   { path: "/memory", labelKey: "page.memory" },
   { path: "/disk", labelKey: "page.disk" },
+  { path: "/network", labelKey: "page.network" },
   { path: "/gpu", labelKey: "page.gpu" },
 ];
 

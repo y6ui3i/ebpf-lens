@@ -118,6 +118,7 @@ The overall level is the **worst area**. For the headline, ties go in this order
 - **Processes** — the most recent OOM kill, crash loop or crash; otherwise the number of starts and how many processes lived under one second.
 - **VM** — the most recent VM stop with its cause, or how many VMs are running.
 - **Disk** — how long 99 % of block I/Os take to complete, the throughput, and who issues most of the I/O; failed I/Os in the last 5 minutes if any.
+- **Network** — connects per second and how long 99 % of them take to establish; failed connects and retransmissions in the last 5 minutes, with the destination that took most of them.
 - **GPU** (only on hosts with an NVIDIA GPU) — how busy the GPU is and how much VRAM is in use, then what the busiest CUDA process is doing with its time: keeping the GPU busy, copying, computing on the CPU, waiting for something else, or holding a loaded model idle. If the clocks are being held back (power cap, temperature), it says so.
 
 ### Recent incidents
@@ -130,9 +131,9 @@ Three questions per resource, after Brendan Gregg's USE method:
 
 | Column | Question | Example cells |
 |---|---|---|
-| **Utilization** | how busy is it | CPU %, memory %, process starts, VMs running, disk throughput, GPU busy |
-| **Saturation** | is anything waiting for lack of it | CPU wait p99, ms/s stalled in reclaim, worst VM wait, disk latency p99, VRAM in use |
-| **Errors** | did anything fail or get killed | OOM kills, crashes, VM stops, disk I/O errors, GPU clocks held back |
+| **Utilization** | how busy is it | CPU %, memory %, process starts, VMs running, disk throughput, connects/s, GPU busy |
+| **Saturation** | is anything waiting for lack of it | CPU wait p99, ms/s stalled in reclaim, worst VM wait, disk latency p99, connect p99, VRAM in use |
+| **Errors** | did anything fail or get killed | OOM kills, crashes, VM stops, disk I/O errors, failed connects and retransmits, GPU clocks held back |
 
 Cells show the latest value, a 5-minute sparkline, and a level mark only when something is wrong. "Not implemented (roadmap n)" marks what is not built yet.
 
@@ -211,6 +212,16 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* The p99 is queueing plus device time. A rising p99 with one process issuing most of the bytes is that process saturating the disk — throttle or move it (ionice, a different disk, off-peak). A rising p99 with little traffic is the device itself: look at the errors column, then `dmesg` and SMART. Buffered writes are issued by kernel writeback threads (`kworker`, `jbd2`), so they appear under those names; reads and direct writes are attributed to the process. A sequential direct write at full speed shows a high p99 on its own because the queue is deep, not because the disk is failing — the thresholds are provisional and per host.
 
+### Network (`/network`)
+
+![Network: connect time over time, failed connects and retransmissions per destination, and who connected (40 % packet loss on lo: connects take 1–2 s because the SYN is retransmitted)](img/en-network.png)
+
+*What it is.* Outbound TCP as the socket state machine sees it: how long each connect took to establish, which connects failed, and which destinations needed retransmissions — per destination and per process.
+
+*What you see.* Tiles (connects/s, connect p99, failed connects, retransmissions), a heatmap of connect time, the p50/p99 trend with the caution and warning lines, the destinations, and who connected.
+
+*Reading it.* **Failed** connects are the other side or the path: refused (nothing listens there), unreachable, or timed out. **Retransmissions** to one destination are packet loss or congestion on that path; retransmissions to "clients at addr" are on connections *into* this host. A **connect p99 at 1 s or 3 s** is the tell-tale of loss: the initial SYN was dropped and retransmitted after the 1 s timeout (then 3 s), so a destination that is "slow" at exactly those values is lossy, not far. Retransmits are counted per destination only; the kernel does them without a process context.
+
 ### GPU (`/gpu`)
 
 ![GPU: busy and VRAM over time, the wait per CUDA call, and the per-process verdicts (an OCR job in a container keeping the GPU 66 % busy while using 131 % of a CPU; the clocks held back by the power cap)](img/en-gpu.png)
@@ -242,6 +253,9 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **GPU idle while its process works elsewhere** (`gpu_starved`) | the GPU below 20 % busy while a CUDA process is ≥ 50 % busy on the CPU or inside copy calls, for 10 s | caution; warning at ≥ 90 % | the GPU gets busy, or the process quiets down, for more than 5 s | The GPU is waiting for the process, not the other way round. The incident says which: on the CPU (preprocessing, tokenizing, Python) or copying (pageable memory, small batches). Fix that side; a bigger GPU will not help. |
 | **Slow disk I/O** (`disk_slow`) | block I/O latency p99 ≥ 10 ms for 3 s | caution; warning once ≥ 100 ms for 3 s | below 10 ms for more than 2 s | The disk is slower than it should be, or a queue is building. The incident names who issued most of the bytes (group rule as for CPU). If nobody stands out and traffic is low, suspect the device. |
 | **Disk I/O error** (`disk_error`) | a block device completed I/O with an error | warning | instant | Check `dmesg` and SMART for that device now; an error is the first sign of a failing disk or a bad cable. |
+| **TCP connects failing** (`net_connect_fail`) | ≥ 5 failed connects in the last 10 s | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the destinations that took most of the failures. Refused means nothing listens (the service is down or the port is wrong); unreachable or timed out means the path or a firewall. |
+| **TCP connects slow** (`net_connect_slow`) | connect p99 ≥ 200 ms for 3 s | caution; warning at ≥ 1 s | below 200 ms for more than 5 s | At 1 s the SYN itself was retransmitted: packets to that destination are being lost. Below that, a slow path or an overloaded peer. |
+| **TCP retransmissions** (`net_retrans`) | ≥ 10 retransmitted segments/s for 3 s | caution; warning at ≥ 100/s | below 10/s for more than 5 s | Packet loss or congestion toward the named destinations; "clients at addr" means the loss is on connections into this host. Check the link, the switch port, and the peer. |
 | **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
 ![Dashboard (Japanese) during the same minute: the headline says a VM is waiting for host CPU, the CPU line names the three-VM group and its 76 %, and every incident row says who took the CPU](img/ja-dashboard-steal.png)
@@ -281,6 +295,7 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **A host-wide OOM of a VM** has been reproduced only in unit tests on recorded event shapes, not live.
 - **Thresholds are provisional**, chosen from one 8-core machine. Tune them (§8) to your hosts.
 - **Buffered writes are attributed to the kernel's writeback threads** (`kworker`, `jbd2`), not to the process that wrote; reads and direct writes are attributed to the process. Disk latency includes queueing time, so a saturated disk reads as slow even when healthy.
+- **Retransmissions are per destination only** (no process: the kernel retransmits without one), and inbound connections are folded into one row per client address. Only TCP is watched; UDP and ICMP are not.
 - **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
 - **Windows is not planned** unless there is demand.
@@ -313,11 +328,14 @@ Trigger file (values shown are the defaults):
   "gpu":       {"idleUtil": 0.2,
                 "starved": {"caution": 0.5,  "warning": 0.9,  "minSeconds": 10, "maxGapSeconds": 5},
                 "vram":    {"caution": 0.9,  "warning": 0.97, "minSeconds": 3,  "maxGapSeconds": 2}},
-  "disk":      {"caution": 10000, "warning": 100000, "minSeconds": 3, "maxGapSeconds": 2}
+  "disk":      {"caution": 10000, "warning": 100000, "minSeconds": 3, "maxGapSeconds": 2},
+  "network":   {"connectFails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
+                "connectLatency": {"caution": 200000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5},
+                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}}
 }
 ```
 
-API (all `GET` unless noted): `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
+API (all `GET` unless noted): `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
 
 ## 9. Glossary
 

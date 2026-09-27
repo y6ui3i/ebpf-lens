@@ -20,6 +20,23 @@ type Sample struct {
 	VMs        []VMInfo   `json:"vms,omitempty"`  // probe "vms" only: the VMs running on this host
 	GPU        *GPUStat   `json:"gpu,omitempty"`  // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
 	Disk       *DiskStat  `json:"disk,omitempty"` // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
+	Net        *NetStat   `json:"net,omitempty"`  // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
+}
+
+// NetStat is one interval of outbound TCP activity per destination. Procs on the same sample say who connected.
+type NetStat struct {
+	Dests []NetDest `json:"dests"`
+}
+
+// NetDest is one destination (address and port) during the interval.
+type NetDest struct {
+	Addr     string `json:"addr"`
+	Port     uint16 `json:"port"`     // 0: an inbound connection from Addr (retransmits toward a client), where the client's port is noise
+	Connects uint64 `json:"connects"` // connections established
+	Fails    uint64 `json:"fails"`    // connects that ended in CLOSE without being established (refused, unreachable, timed out)
+	Retrans  uint64 `json:"retrans"`  // segments retransmitted to this destination (established connections included)
+	LatNs    uint64 `json:"latNs"`    // total connect latency of the established ones
+	LatMaxNs uint64 `json:"latMaxNs"`
 }
 
 // DiskStat is one interval of block I/O per device. Procs on the same sample say who issued the I/O.
@@ -140,6 +157,8 @@ type ProcStat struct {
 	// biolat only. In biolat, Wait* means "latency of the block I/O this process issued"
 	ReadBytes  uint64 `json:"readBytes,omitempty"`
 	WriteBytes uint64 `json:"writeBytes,omitempty"`
+	// tcpconn only. In tcpconn, Wait* means "connect latency of the connections this process opened"
+	ConnectFails uint64 `json:"connectFails,omitempty"`
 }
 
 // HostInfo is used for the list of hosts known to the server.
@@ -154,7 +173,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -188,6 +207,8 @@ type Incident struct {
 	// disk_slow: Peak is the latency p99 in µs; Culprits are the processes that issued most of the bytes over the window
 	// disk_error: Subject is the device, Count the failed I/Os in that second
 	Device string `json:"device,omitempty"`
+	// net_connect_fail / net_retrans: Peak is the rate per second; Culprits are the destinations ("addr:port") that took most of it.
+	// net_connect_slow: Peak is the connect latency p99 in µs; Culprits are the destinations with the slowest connects
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

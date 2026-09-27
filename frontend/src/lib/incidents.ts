@@ -4,7 +4,7 @@ import type { Incident } from "../types/model";
 import type { Level } from "./lens";
 import type { Key } from "./i18n";
 
-export type IncidentKind = "cpu_wait" | "vm_cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error";
+export type IncidentKind = "cpu_wait" | "vm_cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans";
 
 // Instant incidents (an OOM kill, a crash) have no duration, so they keep an area at their level for this long afterwards
 const INSTANT_LINGER_MS = 5 * 60 * 1000;
@@ -56,6 +56,9 @@ const KIND_KEY: Record<IncidentKind, Key> = {
   vram_full: "incident.kind.vram_full",
   disk_slow: "incident.kind.disk_slow",
   disk_error: "incident.kind.disk_error",
+  net_connect_fail: "incident.kind.net_connect_fail",
+  net_connect_slow: "incident.kind.net_connect_slow",
+  net_retrans: "incident.kind.net_retrans",
 };
 
 // Translation key for a kind label (unknown kinds from a newer server fall back to a generic label)

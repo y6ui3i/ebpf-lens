@@ -12,6 +12,7 @@ import { VM_AREA_KINDS, levelFor, runningCounts, runningVms, vmStopsWithin, vmWa
 import { useTriggers } from "../lib/useTriggers";
 import { currentGpu, gpuUtil, pct as gpuPct, throttleKey, vramUsed } from "../lib/gpu";
 import { currentDisk, diskBytesPerSec, formatRate } from "../lib/disk";
+import { connectsPerSec, currentNet } from "../lib/net";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -30,8 +31,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -63,6 +64,10 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
   const disk = currentDisk(diskSamples);
   const diskSlowLevel = areaLevel(incidents, ["disk_slow"], nowMs);
   const diskErrLevel = areaLevel(incidents, ["disk_error"], nowMs);
+  // Network: connects per second, connect latency p99, and failed connects + retransmits in the visible range
+  const net = currentNet(netSamples);
+  const netSlowLevel = areaLevel(incidents, ["net_connect_slow"], nowMs);
+  const netErrLevel = areaLevel(incidents, ["net_connect_fail", "net_retrans"], nowMs);
 
   const rows: Row[] = [
     {
@@ -127,7 +132,19 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
           { kind: "value", value: `${disk.errors}`, note: t("use.diskErr"), level: diskErrLevel, to: "/disk" },
         ],
     },
-    { resource: "resource.network", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },
+    {
+      resource: "resource.network",
+      cells: !net.has
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: net.connectsPerSec == null ? "–" : `${net.connectsPerSec.toFixed(1)}/s`, note: t("use.netUtil"), spark: netSamples.map(connectsPerSec), to: "/network" },
+          {
+            kind: "value", value: formatUs(net.p99), note: t("use.netSat"),
+            level: netSlowLevel, spark: netSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/network",
+          },
+          { kind: "value", value: t("use.netErrValue", { fails: net.fails, retrans: net.retrans }), note: t("use.netErr"), level: netErrLevel, to: "/network" },
+        ],
+    },
     {
       resource: "resource.gpu",
       cells: !gpu.gpu

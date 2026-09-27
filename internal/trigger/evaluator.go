@@ -13,18 +13,21 @@ import (
 
 // Incident kinds and levels. Kept as plain strings because they travel as JSON to the UI and to webhooks.
 const (
-	KindCPUWait    = "cpu_wait"
-	KindMemStall   = "mem_stall"
-	KindOOMKill    = "oom_kill"
-	KindCrash      = "crash"
-	KindCrashLoop  = "crash_loop"
-	KindAgentDown  = "agent_down"
-	KindVMDown     = "vm_down"
-	KindVMCPUWait  = "vm_cpu_wait"
-	KindGPUStarved = "gpu_starved" // the GPU sat idle while a CUDA process was busy on the CPU or copying
-	KindVRAMFull   = "vram_full"
-	KindDiskSlow   = "disk_slow"  // block I/O latency p99 above threshold; names who issued the I/O
-	KindDiskError  = "disk_error" // a block device completed I/O with an error
+	KindCPUWait        = "cpu_wait"
+	KindMemStall       = "mem_stall"
+	KindOOMKill        = "oom_kill"
+	KindCrash          = "crash"
+	KindCrashLoop      = "crash_loop"
+	KindAgentDown      = "agent_down"
+	KindVMDown         = "vm_down"
+	KindVMCPUWait      = "vm_cpu_wait"
+	KindGPUStarved     = "gpu_starved" // the GPU sat idle while a CUDA process was busy on the CPU or copying
+	KindVRAMFull       = "vram_full"
+	KindDiskSlow       = "disk_slow"        // block I/O latency p99 above threshold; names who issued the I/O
+	KindDiskError      = "disk_error"       // a block device completed I/O with an error
+	KindNetConnectFail = "net_connect_fail" // outbound TCP connects failing (refused / unreachable / timed out)
+	KindNetConnectSlow = "net_connect_slow" // connect latency p99 high: at 1 s the SYN itself is being retransmitted
+	KindNetRetrans     = "net_retrans"      // TCP segments retransmitted (packet loss or a congested path)
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -60,18 +63,24 @@ type History interface {
 }
 
 type hostState struct {
-	cpu, mem  excursion
-	crashes   map[string][]time.Time     // command -> recent crash times, oldest first
-	crashLoop map[string]*model.Incident // open crash-loop incidents by command
-	lastSeen  time.Time
-	down      *model.Incident
-	ooms      map[uint32]model.ProcEvent // pid -> OOM kill seen recently, matched to the exit that follows
-	signals   map[uint32]model.ProcEvent // pid -> last terminating signal sent to it, matched to the exit that follows
-	vmcpu     map[string]*excursion      // VM name -> its own run-queue wait excursion (host side)
-	gpu, vram excursion
-	gpuLast   gpuStarve // what the latest gpu sample said, copied onto the incident whenever it is published
-	disk      excursion
+	cpu, mem                     excursion
+	crashes                      map[string][]time.Time     // command -> recent crash times, oldest first
+	crashLoop                    map[string]*model.Incident // open crash-loop incidents by command
+	lastSeen                     time.Time
+	down                         *model.Incident
+	ooms                         map[uint32]model.ProcEvent // pid -> OOM kill seen recently, matched to the exit that follows
+	signals                      map[uint32]model.ProcEvent // pid -> last terminating signal sent to it, matched to the exit that follows
+	vmcpu                        map[string]*excursion      // VM name -> its own run-queue wait excursion (host side)
+	gpu, vram                    excursion
+	gpuLast                      gpuStarve // what the latest gpu sample said, copied onto the incident whenever it is published
+	disk                         excursion
+	netFail, netSlow, netRetrans excursion
+	failRing                     [failWindow]uint64 // failed connects per second, last failWindow seconds (a burst of refused connects is an incident even if it lasts one second)
+	failRingSec                  int64
 }
+
+// failWindow is how many seconds of failed connects net_connect_fail sums over.
+const failWindow = 10
 
 // gpuStarve is the process that was starving the GPU in the latest sample, and how.
 type gpuStarve struct {
@@ -155,6 +164,21 @@ func (e *Evaluator) OnSample(x model.Sample) {
 				})
 			}
 		}
+	case "tcpconn":
+		if x.Net == nil || x.IntervalMs <= 0 {
+			return
+		}
+		sec := float64(x.IntervalMs) / 1000
+		var fails, retrans uint64
+		for _, d := range x.Net.Dests {
+			fails += d.Fails
+			retrans += d.Retrans
+		}
+		e.judge(&h.netFail, x.Host, KindNetConnectFail, "", e.cfg.Network.ConnectFails, float64(h.failsInWindow(x.Time, fails)), x.Time, e.destDecorator(x.Host, "fails"))
+		e.judge(&h.netRetrans, x.Host, KindNetRetrans, "", e.cfg.Network.Retrans, float64(retrans)/sec, x.Time, e.destDecorator(x.Host, "retrans"))
+		if p99, ok := Percentile(x.Slots, 0.99); ok {
+			e.judge(&h.netSlow, x.Host, KindNetConnectSlow, "", e.cfg.Network.ConnectLatency, p99, x.Time, e.destDecorator(x.Host, "slow"))
+		}
 	case "gpu":
 		if x.GPU == nil || x.IntervalMs <= 0 {
 			return
@@ -197,6 +221,80 @@ func (h *hostState) gpuDecorator() func(*model.Incident) {
 			return // closing after the GPU got busy: keep the last known culprit
 		}
 		i.Subject, i.GPUUtil, i.CPUShare, i.CopyShare = s.comm, s.util, s.cpuShare, s.copyShare
+	}
+}
+
+// failsInWindow adds this second's failed connects to the ring and returns the total over the last failWindow seconds.
+func (h *hostState) failsInWindow(t time.Time, fails uint64) uint64 {
+	sec := t.Unix()
+	if h.failRingSec == 0 || sec-h.failRingSec >= failWindow {
+		h.failRing = [failWindow]uint64{}
+	} else {
+		for s := h.failRingSec + 1; s <= sec; s++ {
+			h.failRing[s%failWindow] = 0 // seconds that passed without a sample
+		}
+	}
+	h.failRingSec = sec
+	h.failRing[sec%failWindow] += fails
+	var sum uint64
+	for _, v := range h.failRing {
+		sum += v
+	}
+	return sum
+}
+
+// --- which destinations ---
+
+// destCulprits applies the culprit grouping rule to destinations over the tcpconn samples of [from, to]:
+// by their share of failed connects ("fails"), of retransmitted segments ("retrans"), or of connect latency
+// ("slow": total latency, so a destination with many slow connects outranks one slow connect).
+func (e *Evaluator) destCulprits(host string, from, to time.Time, by string) ([]model.Culprit, float64) {
+	if e.history == nil {
+		return nil, 0
+	}
+	shares := map[string]float64{}
+	var all float64
+	for _, s := range e.history.Samples(host, "tcpconn") {
+		if s.Time.Before(from) || s.Time.After(to) || s.Net == nil {
+			continue
+		}
+		for _, d := range s.Net.Dests {
+			var v float64
+			switch by {
+			case "fails":
+				v = float64(d.Fails)
+			case "retrans":
+				v = float64(d.Retrans)
+			default:
+				v = float64(d.LatNs)
+			}
+			if v == 0 {
+				continue
+			}
+			name := fmt.Sprintf("%s:%d", d.Addr, d.Port)
+			if d.Port == 0 {
+				name = fmt.Sprintf("clients at %s", d.Addr) // retransmits on connections into this host
+			}
+			shares[name] += v
+			all += v
+		}
+	}
+	if all == 0 {
+		return nil, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	return GroupCulprits(shares)
+}
+
+func (e *Evaluator) destDecorator(host, by string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare = e.destCulprits(host, i.Start, end, by)
 	}
 }
 
@@ -469,6 +567,9 @@ func (e *Evaluator) Tick(now time.Time) {
 		e.closeIfQuiet(&h.gpu, e.cfg.GPU.Starved, now, h.gpuDecorator())
 		e.closeIfQuiet(&h.vram, e.cfg.GPU.VRAM, now, nil)
 		e.closeIfQuiet(&h.disk, e.cfg.Disk, now, e.ioCulpritDecorator(host))
+		e.closeIfQuiet(&h.netFail, e.cfg.Network.ConnectFails, now, e.destDecorator(host, "fails"))
+		e.closeIfQuiet(&h.netRetrans, e.cfg.Network.Retrans, now, e.destDecorator(host, "retrans"))
+		e.closeIfQuiet(&h.netSlow, e.cfg.Network.ConnectLatency, now, e.destDecorator(host, "slow"))
 		for name, ex := range h.vmcpu {
 			e.closeIfQuiet(ex, e.cfg.CPU, now, e.culpritDecorator(host, "vm:"+name))
 			if !ex.active {

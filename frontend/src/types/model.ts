@@ -38,7 +38,7 @@ export interface NetStat {
  */
 export interface NetDest {
   addr: string;
-  port: number /* uint16 */;
+  port: number /* uint16 */; // 0: an inbound connection from Addr (retransmits toward a client), where the client's port is noise
   connects: number /* uint64 */; // connections established
   fails: number /* uint64 */; // connects that ended in CLOSE without being established (refused, unreachable, timed out)
   retrans: number /* uint64 */; // segments retransmitted to this destination (established connections included)

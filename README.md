@@ -28,6 +28,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 ## Design decisions
 
 - [ADR 0001: Everyone an SRE — explain incidents so that whoever is on call can act](docs/adr/0001-everyone-an-sre.md)
+- [ADR 0002: One agent binary, collectors split per OS](docs/adr/0002-collectors-per-os.md)
 
 ## Screen design principles
 
@@ -161,10 +162,11 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 5. ✅ Layout: overview page (Lens Summary + USE grid) and per-resource pages, responsive menu
 6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
 7. ✅ Triggers and notifications: verdicts run on the server as incidents, with a webhook; all inputs come from eBPF
-8. VM monitoring: watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest
+8. VM monitoring: watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
 9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
 10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
 11. Disk and network: biolatency / tcpconnect / tcpretrans
+12. macOS agent: same server, same UI, same incidents, fed by what macOS exposes without special entitlements (CPU and load, memory pressure level, process exec/exit via kqueue, per-process CPU via libproc). macOS has no eBPF, so run-queue latency distributions and per-process reclaim stalls are out of reach there — the Mac agent is best effort, not the main line. Collectors are split per OS (see [ADR 0002](docs/adr/0002-collectors-per-os.md)). Windows only if there is demand (it would be ETW)
 
 ## Thresholds (provisional)
 

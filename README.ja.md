@@ -28,6 +28,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 ## 設計判断
 
 - [ADR 0001: 誰でも SRE — 当番の人が動けるように障害を説明する](docs/adr/0001-everyone-an-sre.md)(英語)
+- [ADR 0002: エージェントは 1 バイナリ、収集部は OS ごとに分ける](docs/adr/0002-collectors-per-os.md)(英語)
 
 ## 画面設計の原則
 
@@ -161,10 +162,11 @@ ReadWritePaths=/mnt/data/ebpflens
 5. ✅ 画面構成: 概要ページ(Lens Summary + USE メソッドの升目)と、領域ごとの詳細ページ。レスポンシブなメニュー
 6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
 7. ✅ トリガーと通知: 判定をサーバー側で行い、出来事(incident)として記録・webhook で通知。材料はすべて eBPF 由来
-8. VM 監視: ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる
+8. VM 監視: ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる。VM は独立した画面群にする: メニューを **ホスト**(今の資源)と **VM**(一覧と、VM ごとのページ。それぞれに Lens Summary)に分ける。VM を動かしている人が知りたいのはサーバー全体ではなく「自分の VM」だから
 9. GPU の基本メトリクス(NVML。例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
 10. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
 11. ディスクとネットワーク: biolatency / tcpconnect / tcpretrans
+12. macOS エージェント: サーバー・画面・出来事の仕組みは同じまま、macOS が特別な権限なしに公開している範囲(CPU とロード、メモリ圧迫の段階、kqueue によるプロセスの起動・終了、libproc によるプロセス別 CPU)を流す。macOS には eBPF がないので、実行待ち時間の分布やプロセス別の回収停止は取れない。Mac は「できる範囲」であって本線ではない。収集部は OS ごとに分ける([ADR 0002](docs/adr/0002-collectors-per-os.md))。Windows は需要があれば(ETW になる)
 
 ## 判定のしきい値(仮)
 

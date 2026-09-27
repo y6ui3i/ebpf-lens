@@ -11,6 +11,7 @@ import { currentMem, formatBytes, formatMsPerSec, memUsed, stallMsPerSec } from 
 import { VM_AREA_KINDS, levelFor, runningCounts, runningVms, vmStopsWithin, vmWaitP99 } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 import { currentGpu, gpuUtil, pct as gpuPct, throttleKey, vramUsed } from "../lib/gpu";
+import { currentDisk, diskBytesPerSec, formatRate } from "../lib/disk";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -29,8 +30,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -58,6 +59,10 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, events, 
   const gpuStarvedLevel = areaLevel(incidents, ["gpu_starved"], nowMs);
   const vramLevel = areaLevel(incidents, ["vram_full"], nowMs);
   const throttle = gpu.gpu?.throttle ?? [];
+  // Disk: throughput, latency p99, and I/O errors in the visible range
+  const disk = currentDisk(diskSamples);
+  const diskSlowLevel = areaLevel(incidents, ["disk_slow"], nowMs);
+  const diskErrLevel = areaLevel(incidents, ["disk_error"], nowMs);
 
   const rows: Row[] = [
     {
@@ -109,7 +114,19 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, events, 
           { kind: "value", value: `${vmStops}`, note: t("use.vmErr"), level: vmLevel, to: "/vms" },
         ],
     },
-    { resource: "resource.disk", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },
+    {
+      resource: "resource.disk",
+      cells: !disk.has
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: formatRate(disk.bytesPerSec), note: t("use.diskUtil"), spark: diskSamples.map(diskBytesPerSec), to: "/disk" },
+          {
+            kind: "value", value: formatUs(disk.p99), note: t("use.diskSat"),
+            level: diskSlowLevel, spark: diskSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/disk",
+          },
+          { kind: "value", value: `${disk.errors}`, note: t("use.diskErr"), level: diskErrLevel, to: "/disk" },
+        ],
+    },
     { resource: "resource.network", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },
     {
       resource: "resource.gpu",

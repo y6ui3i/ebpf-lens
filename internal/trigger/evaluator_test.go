@@ -498,3 +498,50 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// A biolat sample whose p99 lands in slot i, with processes that issued the given bytes.
+func diskSample(sec, slot int, issuers map[string]uint64, errors uint64) model.Sample {
+	slots := make([]uint64, 27)
+	slots[slot] = 100
+	x := model.Sample{Host: "h", Probe: "biolat", Time: t0.Add(time.Duration(sec) * time.Second), IntervalMs: 1000, Slots: slots,
+		Disk: &model.DiskStat{Devices: []model.DiskDev{{Name: "sda", Reads: 100, Errors: errors}}}}
+	for comm, b := range issuers {
+		x.Procs = append(x.Procs, model.ProcStat{Comm: comm, WriteBytes: b})
+	}
+	return x
+}
+
+// Recorded on the test machine: dd with oflag=direct at 1 MB blocks moves the SATA SSD's per-second p99 from
+// slot 7-8 (128-512 µs) to slot 13 (8-16 ms). The incident names who issued the bytes.
+func TestDiskSlowNamesTheIssuer(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.SetHistory(&fakeHistory{samples: map[string][]model.Sample{}})
+	h := e.history.(*fakeHistory)
+	for s := 0; s < 3; s++ {
+		x := diskSample(s, 13, map[string]uint64{"dd": 950 << 20, "postgres": 50 << 20}, 0)
+		h.samples["biolat"] = append(h.samples["biolat"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindDiskSlow || r.last().Level != LevelCaution {
+		t.Fatalf("expected one disk_slow caution after 3 s, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "dd" || c[0].Share < 0.94 || c[0].Share > 0.96 {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "block I/O is slow") || !contains(text, "I/O issued mostly by dd (95%)") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+func TestDiskErrorIsAnInstantWarning(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.OnSample(diskSample(0, 7, nil, 2))
+	if len(r.got) != 1 || r.last().Kind != KindDiskError || r.last().Level != LevelWarning || r.last().Device != "sda" || r.last().Count != 2 || r.last().Ongoing() {
+		t.Fatalf("expected an instant disk_error warning on sda with 2 errors, got %+v", r.got)
+	}
+	if text := Text("open", r.last()); !contains(text, "sda returned 2 I/O error(s)") {
+		t.Fatalf("text: %s", text)
+	}
+}

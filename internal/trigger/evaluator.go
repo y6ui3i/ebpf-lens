@@ -23,6 +23,8 @@ const (
 	KindVMCPUWait  = "vm_cpu_wait"
 	KindGPUStarved = "gpu_starved" // the GPU sat idle while a CUDA process was busy on the CPU or copying
 	KindVRAMFull   = "vram_full"
+	KindDiskSlow   = "disk_slow"  // block I/O latency p99 above threshold; names who issued the I/O
+	KindDiskError  = "disk_error" // a block device completed I/O with an error
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -68,6 +70,7 @@ type hostState struct {
 	vmcpu     map[string]*excursion      // VM name -> its own run-queue wait excursion (host side)
 	gpu, vram excursion
 	gpuLast   gpuStarve // what the latest gpu sample said, copied onto the incident whenever it is published
+	disk      excursion
 }
 
 // gpuStarve is the process that was starving the GPU in the latest sample, and how.
@@ -137,6 +140,21 @@ func (e *Evaluator) OnSample(x model.Sample) {
 			msPerSec := float64(x.Mem.StallNs) / 1e6 / (float64(x.IntervalMs) / 1000)
 			e.judge(&h.mem, x.Host, KindMemStall, "", e.cfg.Memory, msPerSec, x.Time, nil)
 		}
+	case "biolat":
+		if p99, ok := Percentile(x.Slots, 0.99); ok {
+			e.judge(&h.disk, x.Host, KindDiskSlow, "", e.cfg.Disk, p99, x.Time, e.ioCulpritDecorator(x.Host))
+		}
+		if x.Disk != nil {
+			for _, d := range x.Disk.Devices {
+				if d.Errors == 0 {
+					continue
+				}
+				e.sink.AddIncident(model.Incident{
+					ID: incidentID(x.Host, KindDiskError, d.Name, x.Time), Host: x.Host, Kind: KindDiskError, Level: LevelWarning,
+					Subject: d.Name, Device: d.Name, Start: x.Time, End: &x.Time, Updated: x.Time, Count: int(d.Errors),
+				})
+			}
+		}
 	case "gpu":
 		if x.GPU == nil || x.IntervalMs <= 0 {
 			return
@@ -179,6 +197,46 @@ func (h *hostState) gpuDecorator() func(*model.Incident) {
 			return // closing after the GPU got busy: keep the last known culprit
 		}
 		i.Subject, i.GPUUtil, i.CPUShare, i.CopyShare = s.comm, s.util, s.cpuShare, s.copyShare
+	}
+}
+
+// --- who issued the I/O ---
+
+// ioCulprits applies the culprit grouping rule to bytes issued per process in the biolat samples of [from, to]:
+// shares are of all bytes moved in the window. Buffered writes are issued by kernel writeback threads
+// (kworker), so those show up as the issuer rather than the process that wrote.
+func (e *Evaluator) ioCulprits(host string, from, to time.Time) ([]model.Culprit, float64) {
+	if e.history == nil {
+		return nil, 0
+	}
+	shares := map[string]float64{}
+	var all float64
+	for _, s := range e.history.Samples(host, "biolat") {
+		if s.Time.Before(from) || s.Time.After(to) {
+			continue
+		}
+		for _, p := range s.Procs {
+			b := float64(p.ReadBytes + p.WriteBytes)
+			shares[p.Comm] += b
+			all += b
+		}
+	}
+	if all == 0 {
+		return nil, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	return GroupCulprits(shares)
+}
+
+func (e *Evaluator) ioCulpritDecorator(host string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare = e.ioCulprits(host, i.Start, end)
 	}
 }
 
@@ -410,6 +468,7 @@ func (e *Evaluator) Tick(now time.Time) {
 		e.closeIfQuiet(&h.mem, e.cfg.Memory, now, nil)
 		e.closeIfQuiet(&h.gpu, e.cfg.GPU.Starved, now, h.gpuDecorator())
 		e.closeIfQuiet(&h.vram, e.cfg.GPU.VRAM, now, nil)
+		e.closeIfQuiet(&h.disk, e.cfg.Disk, now, e.ioCulpritDecorator(host))
 		for name, ex := range h.vmcpu {
 			e.closeIfQuiet(ex, e.cfg.CPU, now, e.culpritDecorator(host, "vm:"+name))
 			if !ex.active {

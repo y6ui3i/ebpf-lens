@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/biolat"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/gpu"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/memstall"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
@@ -78,6 +79,12 @@ func main() {
 		}
 	}()
 
+	bl, err := biolat.Open()
+	if err != nil {
+		log.Fatalf("biolat: %v", err)
+	}
+	defer bl.Close()
+
 	// GPU: optional. A host without an NVIDIA driver, or without libcuda, simply sends no "gpu" samples
 	gw := openGPU()
 	defer gw.Close()
@@ -120,6 +127,11 @@ func main() {
 			}
 			mx.Host, mx.Time, mx.IntervalMs, mx.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
 			vx := model.Sample{Host: host, Time: now, Probe: "vms", Slots: []uint64{0}, IntervalMs: now.Sub(prev).Milliseconds(), VMs: vms.List()}
+			dx, err := diskSample(bl, vms, *topN)
+			if err != nil {
+				log.Fatalf("biolat: %v", err)
+			}
+			dx.Host, dx.Time, dx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
 			gx, err := gw.sample(all, vms.Label)
 			if err != nil {
 				log.Fatalf("gpu: %v", err)
@@ -139,6 +151,7 @@ func main() {
 				printText(now, slots)
 				printProcs(procs)
 				printMem(mx)
+				printDisk(dx)
 				if gx != nil {
 					printGPU(*gx)
 				}
@@ -160,6 +173,9 @@ func main() {
 				}
 				if err := send(client, *serverURL, "/api/ingest", vx); err != nil {
 					log.Printf("send vms: %v", err)
+				}
+				if err := send(client, *serverURL, "/api/ingest", dx); err != nil {
+					log.Printf("send biolat: %v", err)
 				}
 				if gx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *gx); err != nil {
@@ -183,6 +199,9 @@ func main() {
 				if err := enc.Encode(vx); err != nil {
 					log.Fatal(err)
 				}
+			}
+			if err := enc.Encode(dx); err != nil {
+				log.Fatal(err)
 			}
 			if gx != nil {
 				if err := enc.Encode(*gx); err != nil {
@@ -236,6 +255,46 @@ func memSample(ms *memstall.Probe, mem *memReader, vms *vm.Map, topN int) (model
 		Probe: "memstall", Unit: "usecs", Slots: slots[:],
 		Procs: topProcs(all, topN), Mem: mem.read(stall),
 	}, nil
+}
+
+// diskSample builds one interval of block I/O data: the latency histogram, the devices, and the processes that
+// issued the most I/O (top by latency total and by bytes; the caller fills in host name, time, etc.).
+func diskSample(bl *biolat.Probe, vms *vm.Map, topN int) (model.Sample, error) {
+	slots, err := bl.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, err := bl.Procs(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	devs, err := bl.Devices()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	if devs == nil {
+		devs = []model.DiskDev{} // an idle second is an empty list, not null, so the UI can reduce over it
+	}
+	slices.SortFunc(devs, func(a, b model.DiskDev) int { return cmpDesc(a.Reads+a.Writes, b.Reads+b.Writes) })
+	procs := topBy(all, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.ReadBytes+a.WriteBytes, b.ReadBytes+b.WriteBytes) },
+	)
+	return model.Sample{
+		Probe: "biolat", Unit: "usecs", Slots: slots[:], Procs: procs, Disk: &model.DiskStat{Devices: devs},
+	}, nil
+}
+
+func printDisk(x model.Sample) {
+	for _, d := range x.Disk.Devices {
+		fmt.Printf("disk %-10s r=%d w=%d rMB=%.1f wMB=%.1f err=%d lat_avg=%.2fms max=%.2fms\n",
+			d.Name, d.Reads, d.Writes, float64(d.ReadBytes)/1e6, float64(d.WriteBytes)/1e6, d.Errors,
+			float64(d.LatNs)/1e6/float64(max(1, d.Reads+d.Writes)), float64(d.LatMaxNs)/1e6)
+	}
+	for _, s := range x.Procs {
+		fmt.Printf("  %-16s x%-3d ios=%d rMB=%.1f wMB=%.1f lat=%.2fms max=%.2fms\n",
+			s.Comm, s.Procs, s.WaitCount, float64(s.ReadBytes)/1e6, float64(s.WriteBytes)/1e6, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6)
+	}
 }
 
 // gpuWatch is the GPU half of the agent: NVML for the GPU's own counters and uprobes on libcuda for what each
@@ -437,11 +496,16 @@ func printEvents(b model.EventBatch) {
 
 // topProcs returns the union of the top n by time spent waiting and the top n by time spent on CPU.
 func topProcs(all []model.ProcStat, n int) []model.ProcStat {
-	pick := map[string]bool{}
-	for _, cmp := range []func(a, b model.ProcStat) int{
+	return topBy(all, n,
 		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
 		func(a, b model.ProcStat) int { return cmpDesc(a.OnCPUNs, b.OnCPUNs) },
-	} {
+	)
+}
+
+// topBy returns the union of the top n processes under each ordering (VMs are always included).
+func topBy(all []model.ProcStat, n int, orders ...func(a, b model.ProcStat) int) []model.ProcStat {
+	pick := map[string]bool{}
+	for _, cmp := range orders {
 		slices.SortFunc(all, cmp)
 		for _, s := range all[:min(n, len(all))] {
 			pick[s.Comm] = true

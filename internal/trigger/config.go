@@ -16,6 +16,7 @@ type Config struct {
 	Processes ProcessRule   `json:"processes"` // crashes and OOM kills
 	AgentDown AgentDownRule `json:"agentDown"` // a host that stopped reporting
 	GPU       GPURule       `json:"gpu"`       // a GPU sitting idle while its process works elsewhere, and VRAM running out
+	Disk      ExcursionRule `json:"disk"`      // block I/O latency p99, in µs
 }
 
 // GPURule: the GPU is "starved" when its utilization is below IdleUtil while a CUDA process is busy on the CPU
@@ -65,6 +66,9 @@ func Default() Config {
 			Starved:  ExcursionRule{Caution: 0.5, Warning: 0.9, MinSeconds: 10, MaxGapSeconds: 5},
 			VRAM:     ExcursionRule{Caution: 0.90, Warning: 0.97, MinSeconds: 3, MaxGapSeconds: 2},
 		},
+		// An SSD completes most I/O under 1 ms and an HDD under 20 ms; p99 at 10 ms is a queue building up on an
+		// SSD and normal on a busy HDD (tune per host). 100 ms is slow for anything
+		Disk: ExcursionRule{Caution: 10_000, Warning: 100_000, MinSeconds: 3, MaxGapSeconds: 2},
 	}
 }
 
@@ -86,7 +90,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

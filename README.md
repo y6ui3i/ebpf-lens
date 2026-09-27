@@ -182,6 +182,14 @@ The menu has a **VMs** group (a list, then one entry per VM with a running/stopp
 
 Two honest limits. Reads and direct writes are issued by the process itself, but a buffered write is issued later by a kernel writeback thread — so `kworker` and `jbd2` appear as issuers, and the process that wrote is not named for those bytes. And latency is queueing time plus device time: a sequential `dd oflag=direct` at 360 MB/s on the SATA SSD in the test host produced 4 MB requests with a p99 of 130–256 ms (a deep queue on a busy device, not a broken one), so the thresholds are provisional and per-host. The same SSD also stalls for 130–260 ms a few times an hour during ordinary writeback flushes (`jbd2`, `kworker`), which the rule reports as short cautions — true, and a hint that this particular disk is not quick under a queue.
 
+## Is it the network, and to whom?
+
+`netstat -s` counts retransmits for the whole host; the question is *to which destination, and did our connects fail*. eBPFLens watches the socket state machine (`inet_sock_set_state`) and `tcp_retransmit_skb` — the tcpconnect / tcpconnlat / tcpretrans ideas in one probe — and keeps, per second: a histogram of **connect latency** (SYN sent → established), and **per destination** (`addr:port`) how many connects succeeded, how many **failed** (SYN_SENT → CLOSE: refused, unreachable, timed out) and how many segments were **retransmitted**; per process, who opened the connections and how many of theirs failed. Retransmits on inbound connections are folded into one "clients at addr" row, because a client's ephemeral port is noise.
+
+Three incidents, each naming the destinations that took most of the trouble (the same group rule as CPU culprits): `net_connect_fail` (≥ 5 failed connects in 10 s; warning at 50 — a burst of refused connects lasts one second and is still an incident), `net_retrans` (≥ 10 segments/s; warning at 100/s), and `net_connect_slow` (connect p99 ≥ 200 ms; **warning at 1 s, because 1 s is the initial retransmission timeout — a connect that takes a second means the SYN itself was lost**, so a "slow" destination at that level is a lossy path, not a far one).
+
+Reproduced on the test host: six connects to a closed port → `net_connect_fail` naming `127.0.0.1:9 (100%)`; `tc qdisc add dev lo root netem loss 40%` while 40 curls hit the local server → connect p99 of 1–2 s (SYN retransmitted once or twice) and 40+ retransmits/s, both naming `127.0.0.1:8080`. Retransmits are counted per destination only: they happen in the kernel's context, where the owning process is not known.
+
 ## Why is the GPU idle?
 
 `nvidia-smi` says the GPU is 30 % busy. It cannot say why. eBPFLens answers from two sides ([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):
@@ -235,7 +243,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 8. ✅ VM monitoring (why a VM stopped; VM screens; who took a VM's CPU): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
 9. ✅ GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, clock throttling, per-process VRAM
 10. ✅ GPU × eBPF: uprobes on libcuda measure kernel launches, transfers and sync waits per process and explain *why the GPU is idle* (see "Why is the GPU idle?" above and [ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md))
-11. Disk ✅ (biolatency: latency per I/O, per disk, and who issued it; `disk_slow` / `disk_error`) and network (tcpconnect / tcpretrans — next)
+11. ✅ Disk (biolatency: latency per I/O, per disk, and who issued it; `disk_slow` / `disk_error`) and network (tcpconnect / tcpconnlat / tcpretrans in one probe; `net_connect_fail` / `net_connect_slow` / `net_retrans`)
 12. macOS agent: same server, same UI, same incidents, fed by what macOS exposes without special entitlements (CPU and load, memory pressure level, process exec/exit via kqueue, per-process CPU via libproc). macOS has no eBPF, so run-queue latency distributions and per-process reclaim stalls are out of reach there — the Mac agent is best effort, not the main line. Collectors are split per OS (see [ADR 0002](docs/adr/0002-collectors-per-os.md)). Windows only if there is demand (it would be ETW)
 
 ## Thresholds (provisional)

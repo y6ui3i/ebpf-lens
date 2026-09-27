@@ -545,3 +545,62 @@ func TestDiskErrorIsAnInstantWarning(t *testing.T) {
 		t.Fatalf("text: %s", text)
 	}
 }
+
+// A tcpconn sample: connect p99 in slot `slot`, and destinations with the given failures / retransmits.
+func netSample(sec, slot int, dests []model.NetDest) model.Sample {
+	slots := make([]uint64, 27)
+	if slot >= 0 {
+		slots[slot] = 100
+	}
+	return model.Sample{Host: "h", Probe: "tcpconn", Time: t0.Add(time.Duration(sec) * time.Second), IntervalMs: 1000, Slots: slots,
+		Net: &model.NetStat{Dests: dests}}
+}
+
+func TestNetConnectFailNamesTheDestination(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		x := netSample(s, -1, []model.NetDest{{Addr: "10.0.0.5", Port: 5432, Fails: 4}, {Addr: "10.0.0.9", Port: 443, Connects: 3}})
+		h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
+		e.OnSample(x)
+	}
+	// 4 failures per second: the 10 s window holds 4, then 8 (opens: caution is 5 in 10 s). The third second
+	// (12) is progress, which is published every 5 s, so the last upsert still says 8
+	if len(r.got) != 1 || r.last().Kind != KindNetConnectFail || r.last().Level != LevelCaution || r.last().Peak != 8 || !r.got[0].Start.Equal(t0.Add(time.Second)) {
+		t.Fatalf("expected a net_connect_fail caution opening at second 1 with peak 8, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "10.0.0.5:5432" || c[0].Share != 1 {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "connects are failing (8 in 10 s") || !contains(text, "mostly to 10.0.0.5:5432 (100%)") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+// A connect p99 in slot 20 (1-2 s) means the SYN was retransmitted: warning, not just caution.
+func TestNetConnectSlowAtOneSecondIsPacketLoss(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 3; s++ {
+		e.OnSample(netSample(s, 20, nil))
+	}
+	if len(r.got) != 1 || r.last().Kind != KindNetConnectSlow || r.last().Level != LevelWarning {
+		t.Fatalf("expected a net_connect_slow warning, got %+v", r.got)
+	}
+	if text := Text("open", r.last()); !contains(text, "SYN itself is being retransmitted") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+func TestNetRetransOpensAtTenPerSecond(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 3; s++ {
+		e.OnSample(netSample(s, -1, []model.NetDest{{Addr: "192.168.10.250", Port: 8080, Retrans: 12}}))
+	}
+	if len(r.got) != 1 || r.last().Kind != KindNetRetrans || r.last().Level != LevelCaution || r.last().Peak != 12 {
+		t.Fatalf("expected a net_retrans caution at 12/s, got %+v", r.got)
+	}
+}

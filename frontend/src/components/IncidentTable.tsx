@@ -85,6 +85,12 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
       return (x.peak == null ? "" : formatUs(x.peak)) + ioCulpritSummary(x, t);
     case "disk_error":
       return t("incident.diskErrors", { n: x.count ?? 0 });
+    case "net_connect_fail":
+      return t("incident.inTenSec", { n: (x.peak ?? 0).toFixed(0) }) + destSummary(x, t);
+    case "net_retrans":
+      return t("incident.perSec", { n: (x.peak ?? 0).toFixed(0) }) + destSummary(x, t);
+    case "net_connect_slow":
+      return (x.peak == null ? "" : formatUs(x.peak)) + destSummary(x, t);
     case "vram_full":
       return t("incident.vramFull", { pct: Math.round((x.peak ?? 0) * 100) });
     case "vm_down": {
@@ -97,6 +103,12 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
     default:
       return "";
   }
+}
+
+// " · mostly to 10.0.0.5:5432 (80%)", or "" when the incident carries no group
+function destSummary(x: Incident, t: TFn): string {
+  if (!x.culprits?.length) return "";
+  return t("incident.mostlyTo", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) });
 }
 
 // " · issued mostly by dd (95%)", or "" when the incident carries no group

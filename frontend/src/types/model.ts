@@ -25,6 +25,25 @@ export interface Sample {
   vms?: VMInfo[]; // probe "vms" only: the VMs running on this host
   gpu?: GPUStat; // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
   disk?: DiskStat; // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
+  net?: NetStat; // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
+}
+/**
+ * NetStat is one interval of outbound TCP activity per destination. Procs on the same sample say who connected.
+ */
+export interface NetStat {
+  dests: NetDest[];
+}
+/**
+ * NetDest is one destination (address and port) during the interval.
+ */
+export interface NetDest {
+  addr: string;
+  port: number /* uint16 */; // 0: an inbound connection from Addr (retransmits toward a client), where the client's port is noise
+  connects: number /* uint64 */; // connections established
+  fails: number /* uint64 */; // connects that ended in CLOSE without being established (refused, unreachable, timed out)
+  retrans: number /* uint64 */; // segments retransmitted to this destination (established connections included)
+  latNs: number /* uint64 */; // total connect latency of the established ones
+  latMaxNs: number /* uint64 */;
 }
 /**
  * DiskStat is one interval of block I/O per device. Procs on the same sample say who issued the I/O.
@@ -164,6 +183,10 @@ export interface ProcStat {
    */
   readBytes?: number /* uint64 */;
   writeBytes?: number /* uint64 */;
+  /**
+   * tcpconn only. In tcpconn, Wait* means "connect latency of the connections this process opened"
+   */
+  connectFails?: number /* uint64 */;
 }
 /**
  * HostInfo is used for the list of hosts known to the server.
@@ -180,7 +203,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;

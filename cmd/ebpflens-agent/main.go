@@ -24,6 +24,7 @@ import (
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/memstall"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/tcpconn"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/procfs"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/vm"
 )
@@ -85,6 +86,12 @@ func main() {
 	}
 	defer bl.Close()
 
+	tc, err := tcpconn.Open()
+	if err != nil {
+		log.Fatalf("tcpconn: %v", err)
+	}
+	defer tc.Close()
+
 	// GPU: optional. A host without an NVIDIA driver, or without libcuda, simply sends no "gpu" samples
 	gw := openGPU()
 	defer gw.Close()
@@ -132,6 +139,11 @@ func main() {
 				log.Fatalf("biolat: %v", err)
 			}
 			dx.Host, dx.Time, dx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			nx, err := netSample(tc, vms, *topN)
+			if err != nil {
+				log.Fatalf("tcpconn: %v", err)
+			}
+			nx.Host, nx.Time, nx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
 			gx, err := gw.sample(all, vms.Label)
 			if err != nil {
 				log.Fatalf("gpu: %v", err)
@@ -152,6 +164,7 @@ func main() {
 				printProcs(procs)
 				printMem(mx)
 				printDisk(dx)
+				printNet(nx)
 				if gx != nil {
 					printGPU(*gx)
 				}
@@ -177,6 +190,9 @@ func main() {
 				if err := send(client, *serverURL, "/api/ingest", dx); err != nil {
 					log.Printf("send biolat: %v", err)
 				}
+				if err := send(client, *serverURL, "/api/ingest", nx); err != nil {
+					log.Printf("send tcpconn: %v", err)
+				}
 				if gx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *gx); err != nil {
 						log.Printf("send gpu: %v", err)
@@ -201,6 +217,9 @@ func main() {
 				}
 			}
 			if err := enc.Encode(dx); err != nil {
+				log.Fatal(err)
+			}
+			if err := enc.Encode(nx); err != nil {
 				log.Fatal(err)
 			}
 			if gx != nil {
@@ -294,6 +313,54 @@ func printDisk(x model.Sample) {
 	for _, s := range x.Procs {
 		fmt.Printf("  %-16s x%-3d ios=%d rMB=%.1f wMB=%.1f lat=%.2fms max=%.2fms\n",
 			s.Comm, s.Procs, s.WaitCount, float64(s.ReadBytes)/1e6, float64(s.WriteBytes)/1e6, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6)
+	}
+}
+
+// netSample builds one interval of outbound TCP data: the connect latency histogram, the destinations, and the
+// processes that connected the most (top by connects and by failures).
+func netSample(tc *tcpconn.Probe, vms *vm.Map, topN int) (model.Sample, error) {
+	slots, err := tc.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, err := tc.Procs(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	dests, err := tc.Dests()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	if dests == nil {
+		dests = []model.NetDest{}
+	}
+	slices.SortFunc(dests, func(a, b model.NetDest) int {
+		return cmpDesc(a.Connects+a.Fails*4+a.Retrans, b.Connects+b.Fails*4+b.Retrans) // trouble first
+	})
+	if len(dests) > maxDests {
+		dests = dests[:maxDests]
+	}
+	procs := topBy(all, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitCount, b.WaitCount) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.ConnectFails, b.ConnectFails) },
+	)
+	return model.Sample{
+		Probe: "tcpconn", Unit: "usecs", Slots: slots[:], Procs: procs, Net: &model.NetStat{Dests: dests},
+	}, nil
+}
+
+// A busy host talks to many destinations; the sample must stay under the server's 64 KiB body limit
+const maxDests = 50
+
+func printNet(x model.Sample) {
+	for _, d := range x.Net.Dests {
+		fmt.Printf("net  %-21s ok=%d fail=%d retrans=%d lat_avg=%.2fms max=%.2fms\n",
+			fmt.Sprintf("%s:%d", d.Addr, d.Port), d.Connects, d.Fails, d.Retrans,
+			float64(d.LatNs)/1e6/float64(max(1, d.Connects)), float64(d.LatMaxNs)/1e6)
+	}
+	for _, s := range x.Procs {
+		fmt.Printf("  %-16s x%-3d connects=%d fails=%d lat=%.2fms max=%.2fms\n",
+			s.Comm, s.Procs, s.WaitCount, s.ConnectFails, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6)
 	}
 }
 

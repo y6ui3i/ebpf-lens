@@ -17,6 +17,17 @@ type Config struct {
 	AgentDown AgentDownRule `json:"agentDown"` // a host that stopped reporting
 	GPU       GPURule       `json:"gpu"`       // a GPU sitting idle while its process works elsewhere, and VRAM running out
 	Disk      ExcursionRule `json:"disk"`      // block I/O latency p99, in µs
+	Network   NetworkRule   `json:"network"`   // outbound TCP: failed connects, slow connects, retransmissions
+}
+
+// NetworkRule: ConnectFails is the number of failed connects in the last 10 s (a burst of refused connects lasts
+// one second and is still an incident); Retrans is a rate per second; ConnectLatency is the connect p99 in µs.
+// A connect p99 at 1 s means the SYN itself was retransmitted (the initial RTO), i.e. packets to that destination
+// are being lost, so the warning sits there.
+type NetworkRule struct {
+	ConnectFails   ExcursionRule `json:"connectFails"`
+	ConnectLatency ExcursionRule `json:"connectLatency"`
+	Retrans        ExcursionRule `json:"retrans"`
 }
 
 // GPURule: the GPU is "starved" when its utilization is below IdleUtil while a CUDA process is busy on the CPU
@@ -69,6 +80,11 @@ func Default() Config {
 		// An SSD completes most I/O under 1 ms and an HDD under 20 ms; p99 at 10 ms is a queue building up on an
 		// SSD and normal on a busy HDD (tune per host). 100 ms is slow for anything
 		Disk: ExcursionRule{Caution: 10_000, Warning: 100_000, MinSeconds: 3, MaxGapSeconds: 2},
+		Network: NetworkRule{
+			ConnectFails:   ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
+			ConnectLatency: ExcursionRule{Caution: 200_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
+			Retrans:        ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 5},
+		},
 	}
 }
 
@@ -90,7 +106,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

@@ -7,6 +7,7 @@ import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
 import { memorySentence } from "../lib/memory";
 import { GPU_KINDS, gpuSentence } from "../lib/gpu";
 import { DISK_KINDS, diskSentence } from "../lib/disk";
+import { NET_KINDS, netSentence } from "../lib/net";
 import { VM_AREA_KINDS, runningVms, vmStopsWithin, vmsWaitingForCpu } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params } from "../lib/i18n";
@@ -48,8 +49,8 @@ function cpuUtil(samples: Sample[]): number | null {
 
 // "What is happening right now" summary shown at the top of the screen.
 // Levels come from the server's incidents; the numbers in the sentences still come from the samples
-export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSamples, life, incidents }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; life: Lifecycle; incidents: Incident[];
+export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, life, incidents }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; life: Lifecycle; incidents: Incident[];
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -62,6 +63,9 @@ export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSa
   const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
   const gpuLevel = areaLevel(incidents, GPU_KINDS, nowMs);
   const diskLevel = areaLevel(incidents, DISK_KINDS, nowMs);
+  const netLevel = areaLevel(incidents, NET_KINDS, nowMs);
+  const netHeadline: Key = areaLevel(incidents, ["net_connect_fail"], nowMs) !== "ok" ? "summary.net.fail"
+    : areaLevel(incidents, ["net_retrans"], nowMs) !== "ok" ? "summary.net.retrans" : "summary.net.slow";
   const diskHeadline: Key = areaLevel(incidents, ["disk_error"], nowMs) !== "ok" ? "summary.disk.error" : "summary.disk.slow";
   const gpuHeadline: Key = areaLevel(incidents, ["vram_full"], nowMs) !== "ok" && areaLevel(incidents, ["gpu_starved"], nowMs) === "ok"
     ? "summary.gpu.vram"
@@ -80,6 +84,7 @@ export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSa
     { level: memLevel, headline: MEM_HEADLINE[memLevel] },
     { level: procLevel, headline: lifecycleHeadline(incidents, nowMs) },
     { level: diskLevel, headline: diskHeadline },
+    { level: netLevel, headline: netHeadline },
     { level: gpuLevel, headline: gpuHeadline },
   ];
   const worstArea = areas.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a));
@@ -136,6 +141,11 @@ export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSa
         {diskSamples.length > 0 && (
           <Finding area={t("resource.disk")} level={diskLevel}>
             <p>{diskSentence(diskSamples, lang, diskLevel)}</p>
+          </Finding>
+        )}
+        {netSamples.length > 0 && (
+          <Finding area={t("resource.network")} level={netLevel}>
+            <p>{netSentence(netSamples, lang, netLevel)}</p>
           </Finding>
         )}
         {/* Only hosts with a GPU send gpu samples; the row stays away elsewhere rather than saying "no GPU" forever */}

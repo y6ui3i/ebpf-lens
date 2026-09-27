@@ -107,14 +107,15 @@ Build the new binaries, then on the server `make install && sudo systemctl resta
 | ▲ | Caution | worth a look; the threshold was crossed for a few seconds, or something abnormal but survivable happened |
 | ◆ | Warning | act: a hard threshold was crossed for a while, a process was killed or is crash-looping, a host or VM stopped |
 
-The overall level is the **worst area**. For the headline, ties go in this order: a host that stopped reporting, then VM, then CPU, memory, processes — because when the agent is silent nothing else is fresh, and a VM death matters more than a process crash.
+The overall level is the **worst area**. For the headline, ties go in this order: a host that stopped reporting, then VM, then CPU, memory, processes, GPU — because when the agent is silent nothing else is fresh, and a VM death matters more than a process crash.
 
-### The four finding lines
+### The finding lines
 
 - **CPU** — "99 % of tasks got a CPU within 30 µs (usually 29 µs). CPU utilization is 1 %." The first number is the run-queue latency p99 over the last 5 s: how long a task that was *ready to run* waited for a CPU. "Usually" is the median of the calm seconds in view. If there was a recent contention episode, a second sentence gives when, how long and the peak, and a third one names the cause ("stress-ng-cpu (32 processes) was using 93 % of total CPU") and the victims ("Other processes kept waiting: steam (437 ms total, 99 % within 989 µs)").
 - **Memory** — whether any process is stalled right now in memory reclaim (a process that has to free memory itself before it can allocate), plus usage and free memory from `/proc`. If something stalled in the last 5 minutes, it says who and how much.
 - **Processes** — the most recent OOM kill, crash loop or crash; otherwise the number of starts and how many processes lived under one second.
 - **VM** — the most recent VM stop with its cause, or how many VMs are running.
+- **GPU** (only on hosts with an NVIDIA GPU) — how busy the GPU is and how much VRAM is in use, then what the busiest CUDA process is doing with its time: keeping the GPU busy, copying, computing on the CPU, waiting for something else, or holding a loaded model idle. If the clocks are being held back (power cap, temperature), it says so.
 
 ### Recent incidents
 
@@ -126,9 +127,9 @@ Three questions per resource, after Brendan Gregg's USE method:
 
 | Column | Question | Example cells |
 |---|---|---|
-| **Utilization** | how busy is it | CPU %, memory %, process starts, VMs running |
-| **Saturation** | is anything waiting for lack of it | CPU wait p99, ms/s stalled in reclaim, worst VM wait |
-| **Errors** | did anything fail or get killed | OOM kills, crashes, VM stops |
+| **Utilization** | how busy is it | CPU %, memory %, process starts, VMs running, GPU busy |
+| **Saturation** | is anything waiting for lack of it | CPU wait p99, ms/s stalled in reclaim, worst VM wait, VRAM in use |
+| **Errors** | did anything fail or get killed | OOM kills, crashes, VM stops, GPU clocks held back |
 
 Cells show the latest value, a 5-minute sparkline, and a level mark only when something is wrong. "Not implemented (roadmap n)" marks what is not built yet.
 
@@ -197,6 +198,16 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* A running VM whose wait p99 sits above 1 ms while its own CPU share is small is a **victim of noisy neighbours**; its `vm_cpu_wait` incident and the *Who took this VM's CPU* table name them. A VM that stalled in reclaim before dying was thrashing against a limit — with swap on the host, a limit makes a VM crawl rather than die.
 
+### GPU (`/gpu`)
+
+![GPU: busy and VRAM over time, the wait per CUDA call, and the per-process verdicts (an OCR job in a container keeping the GPU 66 % busy while using 131 % of a CPU; the clocks held back by the power cap)](img/en-gpu.png)
+
+*What it is.* The GPU seen from both sides: the device through NVML (utilization, VRAM, temperature, power, clock throttling — the one source in eBPFLens that is not eBPF, because the kernel does not know what the GPU does), and each CUDA process through uprobes on `libcuda`: kernel launches, bytes copied each way, time blocked inside copy calls, time waiting in synchronize calls, plus its CPU time from runqlat. Container processes are included.
+
+*What you see.* Tiles (GPU busy, VRAM, temperature with the throttle reason, power), GPU busy and VRAM over time with the idle line and the VRAM caution line, a heatmap of how long each copy or synchronize call waited, and the CUDA processes with a **verdict** on where their time goes.
+
+*Reading it.* Start from the verdict. *GPU-bound* is the good case — the GPU is the bottleneck and the process waits for it. *Transfer-bound* means the process spends its time inside copy calls: it is copying from pageable host memory (each call blocks) or in small batches — pinned memory or larger batches help. *GPU and CPU* means the GPU is busy only part of the time and the process computes on the CPU the rest: preprocessing, tokenizing or Python overhead is the next limit. *CPU-bound* is the same with the GPU nearly idle. *Waiting elsewhere* means the process is neither on the CPU nor in a CUDA call — it waits for I/O, a lock, or its input. *Idle* is a loaded model with no requests, holding VRAM. A temperature tile that says the clocks are held back explains a GPU that is "busy" yet slow.
+
 ### All panels (`/all`)
 
 Every panel from the screens above on one long page, with jump links. For when you want to scroll rather than click.
@@ -215,6 +226,8 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **Agent stopped reporting** (`agent_down`) | no sample for 30 s | warning | the host reports again | The host, the network, or the agent is down — nothing else on this host is fresh. Check the host first. |
 | **VM waiting for CPU** (`vm_cpu_wait`) | a VM's host-side wait p99 ≥ 1 ms for 3 s | caution; warning once ≥ 10 ms for 3 s | below 1 ms for more than 2 s | The VM is losing time to neighbours. The incident names who took the CPU (a group, see below); the VM page says what to do. |
 | **VM stopped** (`vm_down`) | a VM's QEMU process exited | warning for OOM / crash; caution for killed / clean exit | instant | Open the VM page: cause, evidence and next step are there. |
+| **GPU idle while its process works elsewhere** (`gpu_starved`) | the GPU below 20 % busy while a CUDA process is ≥ 50 % busy on the CPU or inside copy calls, for 10 s | caution; warning at ≥ 90 % | the GPU gets busy, or the process quiets down, for more than 5 s | The GPU is waiting for the process, not the other way round. The incident says which: on the CPU (preprocessing, tokenizing, Python) or copying (pageable memory, small batches). Fix that side; a bigger GPU will not help. |
+| **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
 ![Dashboard (Japanese) during the same minute: the headline says a VM is waiting for host CPU, the CPU line names the three-VM group and its 76 %, and every incident row says who took the CPU](img/ja-dashboard-steal.png)
 
@@ -252,6 +265,7 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **Per-process tables are top-N.** The agent sends the top 8 by wait and by CPU each second (VMs always). Totals over long ranges are therefore approximate; the screens say so.
 - **A host-wide OOM of a VM** has been reproduced only in unit tests on recorded event shapes, not live.
 - **Thresholds are provisional**, chosen from one 8-core machine. Tune them (§8) to your hosts.
+- **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
 - **Windows is not planned** unless there is demand.
 - **The dashboard shows the last 5 minutes of samples and 24 hours of incidents.** The DB keeps samples 24 h, events 7 days, incidents 30 days; there is no long-range history screen yet.
@@ -279,11 +293,14 @@ Trigger file (values shown are the defaults):
   "cpu":       {"caution": 1000, "warning": 10000, "minSeconds": 3, "maxGapSeconds": 2},
   "memory":    {"caution": 10,   "warning": 100,   "minSeconds": 3, "maxGapSeconds": 2},
   "processes": {"crashLoopCount": 3, "crashLoopWindowSeconds": 300},
-  "agentDown": {"afterSeconds": 30}
+  "agentDown": {"afterSeconds": 30},
+  "gpu":       {"idleUtil": 0.2,
+                "starved": {"caution": 0.5,  "warning": 0.9,  "minSeconds": 10, "maxGapSeconds": 5},
+                "vram":    {"caution": 0.9,  "warning": 0.97, "minSeconds": 3,  "maxGapSeconds": 2}}
 }
 ```
 
-API (all `GET` unless noted): `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
+API (all `GET` unless noted): `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
 
 ## 9. Glossary
 

@@ -13,6 +13,7 @@ export const ROUTES: Route[] = [
   { path: "/cpu", labelKey: "page.cpu" },
   { path: "/processes", labelKey: "page.processes" },
   { path: "/memory", labelKey: "page.memory" },
+  { path: "/gpu", labelKey: "page.gpu" },
 ];
 
 // Pattern routes: `route` is the template the app switches on, `params` carries the decoded segments

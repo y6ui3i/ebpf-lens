@@ -10,6 +10,7 @@ import { Sparkline } from "./Sparkline";
 import { currentMem, formatBytes, formatMsPerSec, memUsed, stallMsPerSec } from "../lib/memory";
 import { VM_AREA_KINDS, levelFor, runningCounts, runningVms, vmStopsWithin, vmWaitP99 } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
+import { currentGpu, gpuUtil, pct as gpuPct, throttleKey, vramUsed } from "../lib/gpu";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -28,8 +29,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -52,6 +53,11 @@ export function UseMatrix({ samples, memSamples, vmSamples, events, life, incide
     return p != null && (acc == null || p > acc) ? p : acc;
   }, null) ?? null;
   const vmStops = vmStopsWithin(incidents, nowMs).length;
+  // GPU: utilization, VRAM, and whether the clocks are being held back (power or thermal cap). Blank without a GPU
+  const gpu = currentGpu(gpuSamples);
+  const gpuStarvedLevel = areaLevel(incidents, ["gpu_starved"], nowMs);
+  const vramLevel = areaLevel(incidents, ["vram_full"], nowMs);
+  const throttle = gpu.gpu?.throttle ?? [];
 
   const rows: Row[] = [
     {
@@ -105,7 +111,25 @@ export function UseMatrix({ samples, memSamples, vmSamples, events, life, incide
     },
     { resource: "resource.disk", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },
     { resource: "resource.network", cells: [{ kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }, { kind: "planned", roadmap: "11" }] },
-    { resource: "resource.gpu", cells: [{ kind: "planned", roadmap: "9" }, { kind: "planned", roadmap: "10" }, { kind: "planned", roadmap: "9" }] },
+    {
+      resource: "resource.gpu",
+      cells: !gpu.gpu
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          {
+            kind: "value", value: gpuPct(gpu.util), note: t("use.gpuUtil"),
+            level: gpuStarvedLevel, spark: gpuSamples.map(gpuUtil), to: "/gpu",
+          },
+          {
+            kind: "value", value: gpuPct(gpu.vram), note: t("use.gpuSat", { total: formatBytes(gpu.gpu.totalBytes) }),
+            level: vramLevel, spark: gpuSamples.map(vramUsed), to: "/gpu",
+          },
+          {
+            kind: "value", value: throttle.length ? throttle.map((x) => t(throttleKey(x))).join(t("list.sep")) : t("use.gpuNoThrottle"),
+            note: t("use.gpuErr"), level: throttle.length ? "caution" : "ok", to: "/gpu",
+          },
+        ],
+    },
   ];
 
   return (

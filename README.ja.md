@@ -176,6 +176,25 @@ lab での webhook の文面: `[CAUTION] hal: VM fleet-04 is waiting for host CP
 - **VM のページ**(`/vms/<名前>`): ADR 0001 の形の **VM Lens Summary**。原因ごとの見出し、あるフィールドだけから組み立てた **根拠** の箇条書き(誰がシグナルを送ったか、OOM の引き金と cgroup かホストか、直前 1 分の回収停止と CPU 待ち p99)、理由付きの **次にすること**(「VM のメモリ上限を上げるか、ゲストのメモリを減らしてください。上限がそのままなので、再起動だけでは繰り返します」)。その下に、この VM の CPU 待ちのヒートマップと推移(ホスト側)、回収停止、この VM の出来事。
 - ダッシュボードの升目に **VM** の行(稼働数、最も待たされている VM の CPU 待ち、24 時間の停止数)、Lens Summary に **VM** の行。VM の停止は見出しで CPU・メモリ・プロセスより優先される。
 
+## なぜ GPU が遊んでいるのか
+
+`nvidia-smi` は「GPU は 30% 稼働」とは言うが、なぜかは言えない。eBPFLens は両側から答える([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):
+
+- **デバイス側**は NVML から。eBPFLens で唯一 eBPF でない源で、カーネルは GPU が何をしているか知らないため: 稼働率、VRAM、温度、電力、クロック抑制(電力上限 / 温度)、どの pid がどれだけ VRAM を持っているか。
+- **プロセス側**は **`libcuda.so.1` への uprobe** から。CUDA を使うプログラム(PyTorch、llama.cpp、TensorRT、自作)は最後にはこのドライバ API を通る。プロセスごと・秒ごとに、カーネル起動(`cuLaunchKernel`、`cuGraphLaunch`)、方向別の転送バイト数と転送呼び出しの中で止まっていた時間(`cuMemcpy*Async`。ページング可能なホストメモリからのコピーは呼び出しの中で止まる)、GPU を待っていた時間(`cuStreamSynchronize` / `cuCtxSynchronize` / `cuEventSynchronize`)。エージェントは runqlat からそのプロセスの CPU 時間を突き合わせる。コンテナ内のプロセスも見える: NVIDIA container toolkit はホストの `libcuda.so.1` をそのまま bind mount するので、同じ inode だから。uprobe は multi-uprobe の BPF リンク(カーネル 6.6 以上)で付けるので、CAP_PERFMON だけで足りる。
+
+プロセスごとに画面が**判定**を出す: *GPU が上限*(GPU が 80% 以上稼働。プロセスは GPU を待っていて、それが正常)、*転送が上限*(時間の 30% 以上が転送呼び出しの中)、*GPU と CPU*(GPU は時間の一部だけ働き、残りはプロセスが CPU で計算)、*CPU が上限*(GPU は遊んでいて、プロセスは 1 コアの 50% 以上を使っている: 前処理、トークナイズ、Python)、*別の待ち*(どちらでもない: I/O、ロック、入力)、*何もしていない*(モデルを載せたまま要求なし)。サーバーの **`gpu_starved`** は同じ考えを 10 秒で見る: GPU が 20% 未満のまま、プロセスが CPU か転送で 50% 以上忙しい。webhook の文面は "the GPU is idle (5% busy) while python is working on the CPU (95% of a CPU, 4% of the time in copies)"。**`vram_full`** は VRAM の 90% で開く(97% で警告)。次の大きな確保でジョブが死ぬから。
+
+検証機(RTX 2070、ドライバ 595)での実測:
+
+| 負荷 | GPU 稼働 | uprobe が見たもの | 判定 |
+|---|---|---|---|
+| PyTorch のループ: 4096² の行列積 + 毎回ページング可能メモリから 256 MB を GPU へ | 30〜78% | GPU へ 5.1 GB/s、`cuMemcpyHtoDAsync` の中で 982 ms/s、同期呼び出しは 64〜128 µs だけ | 転送が上限。止まるのは同期ではなく転送の呼び出しの中。pinned メモリで直る |
+| 1200 dpi の自炊本を YomiToku で OCR(paperlake、コンテナ内) | 64% | カーネル起動 4,800 回/秒、GPU へ 48 MB/s、時間の 23% は同期、CPU は 1 コアの 112%。クロックは電力上限で抑制 | GPU と CPU。残りの時間は CPU 側の処理で、次に効くのはそこ |
+| lakebed(埋め込みモデルを載せたまま要求なし) | 0% | VRAM 1.8 GB、CUDA 呼び出しなし | 何もしていない |
+
+GPU の画面(`/gpu`)には、タイル、稼働率と VRAM の推移(遊んでいる線と VRAM 注意の線付き)、転送・同期 1 回あたりの待ち時間のヒートマップ、判定付きのプロセス表。ダッシュボードの升目に **GPU** の行(稼働率、VRAM、クロック抑制)、Lens Summary に **GPU** の行。NVIDIA ドライバのないホストは GPU サンプルを送らず、行も出ない。見るのは 1 枚目の GPU だけ。GeForce では NVML のプロセス別稼働率が取れない(Not Found)ので、判定はプロセスが何をしていたかから組み立てる。
+
 ## 保存
 
 `-db` を付けると SQLite に保存する(pure Go の modernc.org/sqlite。cgo 不要)。再起動しても履歴が戻る。
@@ -207,8 +226,8 @@ lab での webhook の文面: `[CAUTION] hal: VM fleet-04 is waiting for host CP
 6. ✅ メモリの詰まり: 回収(direct reclaim / memcg reclaim)で止まった時間をプロセス別に。PSI と使用率は /proc から答え合わせ
 7. ✅ トリガーと通知: 判定をサーバー側で行い、出来事(incident)として記録・webhook で通知。材料はすべて eBPF 由来
 8. ✅ VM 監視(なぜ VM が止まったか、VM の画面、VM の CPU を取ったのは誰か): ホストから KVM のゲストを見る。vCPU の CPU 待ち(原因付きの steal time)、QEMU のメモリ停止、VM が落ちた理由(ホストの OOM、QEMU のクラッシュ、KVM の tracepoint で見るゲストのパニック・シャットダウン)を、ゲスト内のエージェントと突き合わせる。VM は独立した画面群にする: メニューを **ホスト**(今の資源)と **VM**(一覧と、VM ごとのページ。それぞれに Lens Summary)に分ける。VM を動かしている人が知りたいのはサーバー全体ではなく「自分の VM」だから
-9. GPU の基本メトリクス(NVML。例外的に eBPF ではない): 使用率・VRAM・温度・電力、プロセスごとの VRAM
-10. GPU × eBPF: libcudart / libcuda への uprobe で、推論プロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す
+9. ✅ GPU の基本メトリクス(NVML。例外的に eBPF ではない): 使用率・VRAM・温度・電力・クロック抑制、プロセスごとの VRAM
+10. ✅ GPU × eBPF: libcuda への uprobe でプロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す(上の「なぜ GPU が遊んでいるのか」と [ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md))
 11. ディスクとネットワーク: biolatency / tcpconnect / tcpretrans
 12. macOS エージェント: サーバー・画面・出来事の仕組みは同じまま、macOS が特別な権限なしに公開している範囲(CPU とロード、メモリ圧迫の段階、kqueue によるプロセスの起動・終了、libproc によるプロセス別 CPU)を流す。macOS には eBPF がないので、実行待ち時間の分布やプロセス別の回収停止は取れない。Mac は「できる範囲」であって本線ではない。収集部は OS ごとに分ける([ADR 0002](docs/adr/0002-collectors-per-os.md))。Windows は需要があれば(ETW になる)
 

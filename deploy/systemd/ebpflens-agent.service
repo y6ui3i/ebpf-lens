@@ -7,7 +7,9 @@ Wants=network-online.target
 [Service]
 # Run as a dedicated user, not root, with only the capabilities eBPF needs:
 #   CAP_BPF:     create BPF programs and maps
-#   CAP_PERFMON: attach to tracepoints / fentry and read kernel memory (bpf_probe_read_kernel)
+#   CAP_PERFMON: attach to tracepoints / fentry / uprobes (as BPF links) and read kernel memory (bpf_probe_read_kernel)
+# The GPU probe attaches its uprobes on libcuda as multi-uprobe BPF links (kernel 6.6+). On older kernels it falls
+# back to perf_event uprobes, which Ubuntu's kernel.perf_event_paranoid=4 refuses without CAP_SYS_ADMIN
 User=ebpflens
 Group=ebpflens
 AmbientCapabilities=CAP_BPF CAP_PERFMON

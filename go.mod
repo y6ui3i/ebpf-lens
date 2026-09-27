@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/NVIDIA/go-nvml v0.13.4-0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/structtag v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect

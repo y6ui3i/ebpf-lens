@@ -9,6 +9,7 @@ export type Triggers = {
   memory: ExcursionRule; // time stalled in reclaim, in ms per second
   processes: { crashLoopCount: number; crashLoopWindowSeconds: number };
   agentDown: { afterSeconds: number };
+  gpu: { idleUtil: number; starved: ExcursionRule; vram: ExcursionRule }; // shares 0..1
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -16,6 +17,11 @@ export const DEFAULT_TRIGGERS: Triggers = {
   memory: { caution: 10, warning: 100, minSeconds: 3, maxGapSeconds: 2 },
   processes: { crashLoopCount: 3, crashLoopWindowSeconds: 300 },
   agentDown: { afterSeconds: 30 },
+  gpu: {
+    idleUtil: 0.2,
+    starved: { caution: 0.5, warning: 0.9, minSeconds: 10, maxGapSeconds: 5 },
+    vram: { caution: 0.9, warning: 0.97, minSeconds: 3, maxGapSeconds: 2 },
+  },
 };
 
 export function useTriggers(): Triggers {
@@ -31,5 +37,10 @@ export function useTriggers(): Triggers {
     memory: { ...DEFAULT_TRIGGERS.memory, ...d.memory },
     processes: { ...DEFAULT_TRIGGERS.processes, ...d.processes },
     agentDown: { ...DEFAULT_TRIGGERS.agentDown, ...d.agentDown },
+    gpu: {
+      idleUtil: d.gpu?.idleUtil ?? DEFAULT_TRIGGERS.gpu.idleUtil,
+      starved: { ...DEFAULT_TRIGGERS.gpu.starved, ...d.gpu?.starved },
+      vram: { ...DEFAULT_TRIGGERS.gpu.vram, ...d.gpu?.vram },
+    },
   };
 }

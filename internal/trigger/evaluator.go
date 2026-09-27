@@ -13,14 +13,16 @@ import (
 
 // Incident kinds and levels. Kept as plain strings because they travel as JSON to the UI and to webhooks.
 const (
-	KindCPUWait   = "cpu_wait"
-	KindMemStall  = "mem_stall"
-	KindOOMKill   = "oom_kill"
-	KindCrash     = "crash"
-	KindCrashLoop = "crash_loop"
-	KindAgentDown = "agent_down"
-	KindVMDown    = "vm_down"
-	KindVMCPUWait = "vm_cpu_wait"
+	KindCPUWait    = "cpu_wait"
+	KindMemStall   = "mem_stall"
+	KindOOMKill    = "oom_kill"
+	KindCrash      = "crash"
+	KindCrashLoop  = "crash_loop"
+	KindAgentDown  = "agent_down"
+	KindVMDown     = "vm_down"
+	KindVMCPUWait  = "vm_cpu_wait"
+	KindGPUStarved = "gpu_starved" // the GPU sat idle while a CUDA process was busy on the CPU or copying
+	KindVRAMFull   = "vram_full"
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -64,6 +66,14 @@ type hostState struct {
 	ooms      map[uint32]model.ProcEvent // pid -> OOM kill seen recently, matched to the exit that follows
 	signals   map[uint32]model.ProcEvent // pid -> last terminating signal sent to it, matched to the exit that follows
 	vmcpu     map[string]*excursion      // VM name -> its own run-queue wait excursion (host side)
+	gpu, vram excursion
+	gpuLast   gpuStarve // what the latest gpu sample said, copied onto the incident whenever it is published
+}
+
+// gpuStarve is the process that was starving the GPU in the latest sample, and how.
+type gpuStarve struct {
+	comm                             string
+	util, cpuShare, copyShare, score float64
 }
 
 // excursion tracks one value that may be above its threshold. It exists before the incident opens
@@ -127,6 +137,48 @@ func (e *Evaluator) OnSample(x model.Sample) {
 			msPerSec := float64(x.Mem.StallNs) / 1e6 / (float64(x.IntervalMs) / 1000)
 			e.judge(&h.mem, x.Host, KindMemStall, "", e.cfg.Memory, msPerSec, x.Time, nil)
 		}
+	case "gpu":
+		if x.GPU == nil || x.IntervalMs <= 0 {
+			return
+		}
+		h.gpuLast = starving(*x.GPU, x.IntervalMs, e.cfg.GPU.IdleUtil)
+		e.judge(&h.gpu, x.Host, KindGPUStarved, h.gpuLast.comm, e.cfg.GPU.Starved, h.gpuLast.score, x.Time, h.gpuDecorator())
+		if x.GPU.TotalBytes > 0 {
+			e.judge(&h.vram, x.Host, KindVRAMFull, "", e.cfg.GPU.VRAM, float64(x.GPU.UsedBytes)/float64(x.GPU.TotalBytes), x.Time, nil)
+		}
+	}
+}
+
+// --- why is the GPU idle ---
+
+// starving finds the CUDA process that is working hardest while the GPU sits below idleUtil: the score is the
+// share of the interval it spent on the CPU or inside copy calls (whichever is larger; a copy from pageable memory
+// is CPU work too), capped at 1. When the GPU is busy enough the score is 0, whatever the processes do.
+func starving(g model.GPUStat, intervalMs int64, idleUtil float64) gpuStarve {
+	best := gpuStarve{util: g.Util}
+	if g.Util >= idleUtil {
+		return best
+	}
+	interval := float64(intervalMs) * 1e6
+	for _, p := range g.Procs {
+		cpu := min(1, float64(p.OnCPUNs)/interval)
+		cp := min(1, float64(p.CopyNs)/interval)
+		if s := max(cpu, cp); s > best.score {
+			best = gpuStarve{comm: p.Comm, util: g.Util, cpuShare: cpu, copyShare: cp, score: s}
+		}
+	}
+	return best
+}
+
+// gpuDecorator copies the latest starving process onto the incident. The incident keeps the subject it opened
+// with in its ID; the fields say who is starving the GPU now.
+func (h *hostState) gpuDecorator() func(*model.Incident) {
+	return func(i *model.Incident) {
+		s := h.gpuLast
+		if s.comm == "" {
+			return // closing after the GPU got busy: keep the last known culprit
+		}
+		i.Subject, i.GPUUtil, i.CPUShare, i.CopyShare = s.comm, s.util, s.cpuShare, s.copyShare
 	}
 }
 
@@ -356,6 +408,8 @@ func (e *Evaluator) Tick(now time.Time) {
 	for host, h := range e.host {
 		e.closeIfQuiet(&h.cpu, e.cfg.CPU, now, e.culpritDecorator(host, ""))
 		e.closeIfQuiet(&h.mem, e.cfg.Memory, now, nil)
+		e.closeIfQuiet(&h.gpu, e.cfg.GPU.Starved, now, h.gpuDecorator())
+		e.closeIfQuiet(&h.vram, e.cfg.GPU.VRAM, now, nil)
 		for name, ex := range h.vmcpu {
 			e.closeIfQuiet(ex, e.cfg.CPU, now, e.culpritDecorator(host, "vm:"+name))
 			if !ex.active {

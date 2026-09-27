@@ -12,6 +12,9 @@ jobs:
   go:
     name: Go (eBPF build, vet, test)
     runs-on: ubuntu-24.04
+    env:
+      # go-nvml (cgo) compiles NVIDIA's header, which marks older entry points deprecated; the warnings are theirs
+      CGO_CFLAGS: -Wno-deprecated-declarations
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

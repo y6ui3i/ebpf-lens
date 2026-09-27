@@ -15,6 +15,16 @@ type Config struct {
 	Memory    ExcursionRule `json:"memory"`    // time stalled in reclaim, in ms per second
 	Processes ProcessRule   `json:"processes"` // crashes and OOM kills
 	AgentDown AgentDownRule `json:"agentDown"` // a host that stopped reporting
+	GPU       GPURule       `json:"gpu"`       // a GPU sitting idle while its process works elsewhere, and VRAM running out
+}
+
+// GPURule: the GPU is "starved" when its utilization is below IdleUtil while a CUDA process is busy on the CPU
+// or inside copy calls (Starved judges that busy share, 0..1: the process is working, just not on the GPU).
+// VRAM judges the share of VRAM in use (0..1); a CUDA allocation that fails kills the job, so this is an early warning.
+type GPURule struct {
+	IdleUtil float64       `json:"idleUtil"`
+	Starved  ExcursionRule `json:"starved"`
+	VRAM     ExcursionRule `json:"vram"`
 }
 
 // ExcursionRule describes "a value stayed above a threshold for a while".
@@ -48,6 +58,13 @@ func Default() Config {
 		Memory:    ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 2},
 		Processes: ProcessRule{CrashLoopCount: 3, CrashLoopWindowSeconds: 300},
 		AgentDown: AgentDownRule{AfterSeconds: 30},
+		// GPU work is bursty (a model loads, a batch is prepared), so a starved GPU must persist 10 s before it
+		// counts, and 5 s of GPU activity ends it. Warning means the process is fully busy elsewhere
+		GPU: GPURule{
+			IdleUtil: 0.2,
+			Starved:  ExcursionRule{Caution: 0.5, Warning: 0.9, MinSeconds: 10, MaxGapSeconds: 5},
+			VRAM:     ExcursionRule{Caution: 0.90, Warning: 0.97, MinSeconds: 3, MaxGapSeconds: 2},
+		},
 	}
 }
 
@@ -66,7 +83,10 @@ func Load(path string) (Config, error) {
 
 // Validate rejects values that would make the rules meaningless (e.g. warning below caution).
 func (c Config) Validate() error {
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory} {
+	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
+		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
+	}
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

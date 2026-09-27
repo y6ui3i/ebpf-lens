@@ -23,6 +23,44 @@ export interface Sample {
   procs?: ProcStat[];
   mem?: MemStat; // memstall only
   vms?: VMInfo[]; // probe "vms" only: the VMs running on this host
+  gpu?: GPUStat; // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+}
+/**
+ * GPUStat is one interval of the first GPU (NVML) plus what the CUDA processes did meanwhile (eBPF uprobes on libcuda).
+ * NVML is the one source in eBPFLens that is not eBPF: the GPU's own counters live in the driver, not in the kernel's
+ * tracepoints (docs/adr/0003). Everything per process comes from the uprobes.
+ */
+export interface GPUStat {
+  name: string;
+  util: number /* float64 */; // share of the interval a kernel was running, 0..1 (NVML "GPU utilization")
+  memUtil: number /* float64 */; // share of the interval the memory bus was busy, 0..1
+  usedBytes: number /* uint64 */; // VRAM in use
+  totalBytes: number /* uint64 */; // VRAM total
+  tempC: number /* int */;
+  powerW: number /* float64 */;
+  throttle?: string[]; // why the clocks are held back right now: "power", "thermal", "hw" (empty when they are not)
+  uprobes: boolean; // whether the libcuda uprobes are attached (false: no libcuda on this host, per-process fields stay 0)
+  procs?: GPUProc[];
+}
+/**
+ * GPUProc is what one CUDA process (merged by name) did on the GPU during the interval.
+ * The verdict "why is the GPU idle" is drawn from these by the UI and the trigger rules:
+ * a process that is on the CPU or copying while the GPU is idle is starving it; one that is inside a
+ * synchronize call is waiting for it; one that does neither is waiting for something else (I/O, a lock, input).
+ */
+export interface GPUProc {
+  comm: string;
+  procs: number /* int */;
+  pids: number /* uint32 */[];
+  vramBytes: number /* uint64 */; // from NVML (the driver's view of the process)
+  launches: number /* uint64 */; // kernel launches (cuLaunchKernel, cuGraphLaunch)
+  h2dBytes: number /* uint64 */; // bytes copied host -> GPU
+  d2hBytes: number /* uint64 */; // bytes copied GPU -> host
+  copyNs: number /* uint64 */; // time inside copy calls (a copy from pageable memory blocks in the call)
+  copyCount: number /* uint64 */;
+  syncNs: number /* uint64 */; // time inside cuStreamSynchronize / cuCtxSynchronize / cuEventSynchronize: waiting for the GPU
+  syncCount: number /* uint64 */;
+  onCpuNs: number /* uint64 */; // CPU time of the process in the same interval (from runqlat), for "busy on the CPU instead"
 }
 /**
  * VMInfo is one virtual machine (a QEMU process) running on the host.
@@ -116,7 +154,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;
@@ -148,6 +186,12 @@ export interface Incident {
   culprits?: Culprit[];
   culpritShare?: number /* float64 */; // combined share of the host's CPU used by the group
   hostBusy?: number /* float64 */; // share of the host's CPU that was busy over the same window
+  /**
+   * gpu_starved: the GPU sat idle while Subject (a CUDA process) was busy elsewhere. Peak is the busy share (0..1)
+   */
+  gpuUtil?: number /* float64 */; // GPU utilization at the peak, 0..1
+  cpuShare?: number /* float64 */; // share of the interval the process spent on the CPU at the peak
+  copyShare?: number /* float64 */; // share of the interval it spent inside copy calls at the peak
 }
 /**
  * Culprit is one member of the group that was using the CPU while an incident's subject waited.

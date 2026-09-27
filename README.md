@@ -176,6 +176,25 @@ The menu has a **VMs** group (a list, then one entry per VM with a running/stopp
 - **VM page** (`/vms/<name>`): a **VM Lens Summary** in the form ADR 0001 asks for — headline by cause, an **Evidence** list built only from fields that are present (who sent the signal; what triggered the OOM and whether it was the cgroup limit or the host; the minute before: reclaim stall, CPU wait p99), and a **Next step** with its reason ("Raise the VM's memory limit or reduce guest memory; restarting alone will repeat this, because the limit is unchanged"). Below: the VM's CPU wait heatmap and trend (host side), its reclaim stalls, and its incidents.
 - The dashboard's USE grid has a **VMs** row (running count, worst VM CPU wait, stops in 24 h), and the Lens Summary a **VM** line; a VM stop outranks CPU/memory/process findings for the headline.
 
+## Why is the GPU idle?
+
+`nvidia-smi` says the GPU is 30 % busy. It cannot say why. eBPFLens answers from two sides ([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):
+
+- **The device**, through NVML — the one source in eBPFLens that is not eBPF, because the kernel does not know what the GPU is doing: utilization, VRAM, temperature, power, clock throttling (power cap / thermal), and which pid holds how much VRAM.
+- **The processes**, through **uprobes on `libcuda.so.1`**, the driver API every CUDA program ends up in (PyTorch, llama.cpp, TensorRT, hand-written): per process and second, kernel launches (`cuLaunchKernel`, `cuGraphLaunch`), bytes copied in each direction and the time blocked inside copy calls (`cuMemcpy*Async` — a copy from pageable host memory blocks inside the call), and the time spent waiting for the GPU (`cuStreamSynchronize` / `cuCtxSynchronize` / `cuEventSynchronize`). The agent joins each process's CPU time from runqlat. Container processes are seen too: the NVIDIA container toolkit bind-mounts the host's `libcuda.so.1`, so it is the same inode. The uprobes are attached as multi-uprobe BPF links (kernel 6.6+), which need only CAP_PERFMON.
+
+Per process the UI gives a **verdict**: *GPU-bound* (the GPU is ≥ 80 % busy; the process waits for it, as it should), *transfer-bound* (≥ 30 % of its time inside copy calls), *GPU and CPU* (the GPU is busy part of the time and the process is on the CPU the rest), *CPU-bound* (the GPU is idle and the process is ≥ 50 % on a CPU: preprocessing, tokenizing, Python), *waiting elsewhere* (neither: I/O, a lock, its input), or *idle* (a loaded model with no requests). The server's **`gpu_starved`** incident is the same idea over 10 s: the GPU below 20 % busy while a process is ≥ 50 % busy on the CPU or copying — the webhook says "the GPU is idle (5 % busy) while python is working on the CPU (95 % of a CPU, 4 % of the time in copies)". **`vram_full`** opens at 90 % of VRAM (97 % warning), because the next large allocation will kill the job.
+
+Measured on the test host (RTX 2070, driver 595):
+
+| Workload | GPU busy | What the uprobes saw | Verdict |
+|---|---|---|---|
+| PyTorch loop: 4096² matmul + a 256 MB host→GPU copy from pageable memory each step | 30–78 % | 5.1 GB/s to the GPU, 982 ms/s inside `cuMemcpyHtoDAsync`, sync calls only 64–128 µs | transfer-bound. The blocking happens in the copy call, not in synchronize — pinned memory would fix it |
+| YomiToku OCR of a 1200 dpi scanned book (paperlake, in a container) | 64 % | 4,800 kernel launches/s, 48 MB/s to the GPU, 23 % of its time in sync, 112 % of a CPU; clocks held back by the power cap | GPU and CPU: the rest of the time goes to CPU-side work, which is the next limit |
+| lakebed (embedding model loaded, no requests) | 0 % | 1.8 GB of VRAM, no CUDA call | idle |
+
+The GPU screen (`/gpu`) shows the tiles, GPU busy and VRAM over time with the idle and VRAM lines, a heatmap of how long each copy or sync call waited, and the per-process table with the verdicts; the dashboard has a **GPU** row in the USE grid (busy, VRAM, clock throttling) and a **GPU** line in the Lens Summary. A host without an NVIDIA driver sends no GPU samples and shows no GPU row. Only the first GPU is watched; per-process GPU utilization is not available on GeForce (NVML returns Not Found), which is why the verdict reasons from what the process was doing instead.
+
 ## Storage
 
 With `-db`, samples and events are stored in SQLite (pure-Go modernc.org/sqlite, no cgo). History survives restarts.
@@ -207,8 +226,8 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
 7. ✅ Triggers and notifications: verdicts run on the server as incidents, with a webhook; all inputs come from eBPF
 8. ✅ VM monitoring (why a VM stopped; VM screens; who took a VM's CPU): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
-9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
-10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
+9. ✅ GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, clock throttling, per-process VRAM
+10. ✅ GPU × eBPF: uprobes on libcuda measure kernel launches, transfers and sync waits per process and explain *why the GPU is idle* (see "Why is the GPU idle?" above and [ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md))
 11. Disk and network: biolatency / tcpconnect / tcpretrans
 12. macOS agent: same server, same UI, same incidents, fed by what macOS exposes without special entitlements (CPU and load, memory pressure level, process exec/exit via kqueue, per-process CPU via libproc). macOS has no eBPF, so run-queue latency distributions and per-process reclaim stalls are out of reach there — the Mac agent is best effort, not the main line. Collectors are split per OS (see [ADR 0002](docs/adr/0002-collectors-per-os.md)). Windows only if there is demand (it would be ETW)
 

@@ -138,6 +138,10 @@ func Text(event string, i model.Incident) string {
 		}
 		what = fmt.Sprintf("the GPU is idle (%.0f%% busy) while %s is working %s (%.0f%% of a CPU, %.0f%% of the time in copies; %d s since %s)",
 			i.GPUUtil*100, i.Subject, how, i.CPUShare*100, i.CopyShare*100, i.Seconds, when)
+	case KindDiskSlow:
+		what = fmt.Sprintf("block I/O is slow (99%% of I/Os completed within %s, %d s since %s)%s", formatUs(i.Peak), i.Seconds, when, ioCulpritText(i))
+	case KindDiskError:
+		what = fmt.Sprintf("%s returned %d I/O error(s) at %s; check dmesg and SMART", i.Device, i.Count, when)
 	case KindVRAMFull:
 		what = fmt.Sprintf("VRAM is %.0f%% full (%d s since %s); the next large allocation may fail", i.Peak*100, i.Seconds, when)
 	case KindOOMKill:
@@ -190,6 +194,21 @@ func Text(event string, i model.Incident) string {
 		what = i.Kind
 	}
 	return fmt.Sprintf("[%s] %s: %s", level, i.Host, what)
+}
+
+// ioCulpritText renders "; I/O issued mostly by a (60%), b (25%) — 85% of the bytes", or "" when no one stands out.
+func ioCulpritText(i model.Incident) string {
+	if len(i.Culprits) == 0 {
+		return ""
+	}
+	parts := make([]string, len(i.Culprits))
+	for k, c := range i.Culprits {
+		parts[k] = fmt.Sprintf("%s (%.0f%%)", c.Name, c.Share*100)
+	}
+	if len(parts) == 1 {
+		return "; I/O issued mostly by " + parts[0]
+	}
+	return fmt.Sprintf("; I/O issued mostly by %s — %.0f%% of the bytes", strings.Join(parts, ", "), i.CulpritShare*100)
 }
 
 // culpritText renders "; CPU taken by a (34%), b (24%) — 81% together", or the honest alternative when no one stands out.

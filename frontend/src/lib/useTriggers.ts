@@ -10,6 +10,7 @@ export type Triggers = {
   processes: { crashLoopCount: number; crashLoopWindowSeconds: number };
   agentDown: { afterSeconds: number };
   gpu: { idleUtil: number; starved: ExcursionRule; vram: ExcursionRule }; // shares 0..1
+  disk: ExcursionRule; // block I/O latency p99, in µs
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -22,6 +23,7 @@ export const DEFAULT_TRIGGERS: Triggers = {
     starved: { caution: 0.5, warning: 0.9, minSeconds: 10, maxGapSeconds: 5 },
     vram: { caution: 0.9, warning: 0.97, minSeconds: 3, maxGapSeconds: 2 },
   },
+  disk: { caution: 10_000, warning: 100_000, minSeconds: 3, maxGapSeconds: 2 },
 };
 
 export function useTriggers(): Triggers {
@@ -42,5 +44,6 @@ export function useTriggers(): Triggers {
       starved: { ...DEFAULT_TRIGGERS.gpu.starved, ...d.gpu?.starved },
       vram: { ...DEFAULT_TRIGGERS.gpu.vram, ...d.gpu?.vram },
     },
+    disk: { ...DEFAULT_TRIGGERS.disk, ...d.disk },
   };
 }

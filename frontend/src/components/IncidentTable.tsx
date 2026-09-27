@@ -81,6 +81,10 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
       return t((x.copyShare ?? 0) > (x.cpuShare ?? 0) ? "incident.gpuCopy" : "incident.gpuCpu", {
         util: Math.round((x.gpuUtil ?? 0) * 100), cpu: Math.round((x.cpuShare ?? 0) * 100), copy: Math.round((x.copyShare ?? 0) * 100),
       });
+    case "disk_slow":
+      return (x.peak == null ? "" : formatUs(x.peak)) + ioCulpritSummary(x, t);
+    case "disk_error":
+      return t("incident.diskErrors", { n: x.count ?? 0 });
     case "vram_full":
       return t("incident.vramFull", { pct: Math.round((x.peak ?? 0) * 100) });
     case "vm_down": {
@@ -93,6 +97,12 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
     default:
       return "";
   }
+}
+
+// " · issued mostly by dd (95%)", or "" when the incident carries no group
+function ioCulpritSummary(x: Incident, t: TFn): string {
+  if (!x.culprits?.length) return "";
+  return t("incident.issuedBy", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) });
 }
 
 // " · taken by a (34%), b (24%), c (23%) +2", or "" when the incident carries no group

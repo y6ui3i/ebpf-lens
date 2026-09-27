@@ -16,9 +16,28 @@ type Sample struct {
 	CPUs       int        `json:"cpus"`       // Used as the denominator for CPU utilization
 	BusyNs     uint64     `json:"busyNs"`     // Total CPU time used by all processes (measured with eBPF; excludes idle)
 	Procs      []ProcStat `json:"procs,omitempty"`
-	Mem        *MemStat   `json:"mem,omitempty"` // memstall only
-	VMs        []VMInfo   `json:"vms,omitempty"` // probe "vms" only: the VMs running on this host
-	GPU        *GPUStat   `json:"gpu,omitempty"` // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+	Mem        *MemStat   `json:"mem,omitempty"`  // memstall only
+	VMs        []VMInfo   `json:"vms,omitempty"`  // probe "vms" only: the VMs running on this host
+	GPU        *GPUStat   `json:"gpu,omitempty"`  // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+	Disk       *DiskStat  `json:"disk,omitempty"` // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
+}
+
+// DiskStat is one interval of block I/O per device. Procs on the same sample say who issued the I/O.
+type DiskStat struct {
+	Devices []DiskDev `json:"devices"`
+}
+
+// DiskDev is one block device's I/O during the interval.
+type DiskDev struct {
+	Name       string   `json:"name"` // "nvme0n1", "sda"
+	Reads      uint64   `json:"reads"`
+	Writes     uint64   `json:"writes"`
+	ReadBytes  uint64   `json:"readBytes"`
+	WriteBytes uint64   `json:"writeBytes"`
+	Errors     uint64   `json:"errors"` // completions with a block status other than OK
+	LatNs      uint64   `json:"latNs"`  // total latency of the completed I/Os
+	LatMaxNs   uint64   `json:"latMaxNs"`
+	Slots      []uint64 `json:"slots"` // log2 histogram of latency (µs)
 }
 
 // GPUStat is one interval of the first GPU (NVML) plus what the CUDA processes did meanwhile (eBPF uprobes on libcuda).
@@ -118,6 +137,9 @@ type ProcStat struct {
 	// memstall only. In memstall, Wait* means "stalled in memory reclaim"
 	ReclaimedPages uint64 `json:"reclaimedPages,omitempty"`
 	MemcgCount     uint64 `json:"memcgCount,omitempty"` // Of those, the number of reclaims caused by a cgroup limit
+	// biolat only. In biolat, Wait* means "latency of the block I/O this process issued"
+	ReadBytes  uint64 `json:"readBytes,omitempty"`
+	WriteBytes uint64 `json:"writeBytes,omitempty"`
 }
 
 // HostInfo is used for the list of hosts known to the server.
@@ -132,7 +154,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -163,6 +185,9 @@ type Incident struct {
 	CPUShare  float64 `json:"cpuShare,omitempty"`  // share of the interval the process spent on the CPU at the peak
 	CopyShare float64 `json:"copyShare,omitempty"` // share of the interval it spent inside copy calls at the peak
 	// vram_full: Peak is the share of VRAM in use (0..1)
+	// disk_slow: Peak is the latency p99 in µs; Culprits are the processes that issued most of the bytes over the window
+	// disk_error: Subject is the device, Count the failed I/Os in that second
+	Device string `json:"device,omitempty"`
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

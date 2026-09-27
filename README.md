@@ -176,6 +176,12 @@ The menu has a **VMs** group (a list, then one entry per VM with a running/stopp
 - **VM page** (`/vms/<name>`): a **VM Lens Summary** in the form ADR 0001 asks for — headline by cause, an **Evidence** list built only from fields that are present (who sent the signal; what triggered the OOM and whether it was the cgroup limit or the host; the minute before: reclaim stall, CPU wait p99), and a **Next step** with its reason ("Raise the VM's memory limit or reduce guest memory; restarting alone will repeat this, because the limit is unchanged"). Below: the VM's CPU wait heatmap and trend (host side), its reclaim stalls, and its incidents.
 - The dashboard's USE grid has a **VMs** row (running count, worst VM CPU wait, stops in 24 h), and the Lens Summary a **VM** line; a VM stop outranks CPU/memory/process findings for the headline.
 
+## Is the disk slow, and who is hammering it?
+
+`iostat` gives averages. eBPFLens times **every block I/O from issue to completion** (`block_rq_issue` → `block_rq_complete`, the biolatency idea) and keeps three views of it per second: a histogram of latency (the heatmap and the p50/p99 trend, judged with the same thresholds as everything else), **per disk** (I/Os, bytes read and written, max latency, and completions that came back with an error), and **per issuing process** (who caused the I/O, with how many bytes and what latency it got). The `disk_slow` incident opens when the p99 stays above 10 ms for 3 s (100 ms warning) and names the processes that issued most of the bytes over the window with the same group rule as CPU culprits; `disk_error` is an instant warning naming the device.
+
+Two honest limits. Reads and direct writes are issued by the process itself, but a buffered write is issued later by a kernel writeback thread — so `kworker` and `jbd2` appear as issuers, and the process that wrote is not named for those bytes. And latency is queueing time plus device time: a sequential `dd oflag=direct` at 360 MB/s on the SATA SSD in the test host produced 4 MB requests with a p99 of 130–256 ms (a deep queue on a busy device, not a broken one), so the thresholds are provisional and per-host. The same SSD also stalls for 130–260 ms a few times an hour during ordinary writeback flushes (`jbd2`, `kworker`), which the rule reports as short cautions — true, and a hint that this particular disk is not quick under a queue.
+
 ## Why is the GPU idle?
 
 `nvidia-smi` says the GPU is 30 % busy. It cannot say why. eBPFLens answers from two sides ([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):
@@ -229,7 +235,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 8. ✅ VM monitoring (why a VM stopped; VM screens; who took a VM's CPU): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
 9. ✅ GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, clock throttling, per-process VRAM
 10. ✅ GPU × eBPF: uprobes on libcuda measure kernel launches, transfers and sync waits per process and explain *why the GPU is idle* (see "Why is the GPU idle?" above and [ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md))
-11. Disk and network: biolatency / tcpconnect / tcpretrans
+11. Disk ✅ (biolatency: latency per I/O, per disk, and who issued it; `disk_slow` / `disk_error`) and network (tcpconnect / tcpretrans — next)
 12. macOS agent: same server, same UI, same incidents, fed by what macOS exposes without special entitlements (CPU and load, memory pressure level, process exec/exit via kqueue, per-process CPU via libproc). macOS has no eBPF, so run-queue latency distributions and per-process reclaim stalls are out of reach there — the Mac agent is best effort, not the main line. Collectors are split per OS (see [ADR 0002](docs/adr/0002-collectors-per-os.md)). Windows only if there is demand (it would be ETW)
 
 ## Thresholds (provisional)

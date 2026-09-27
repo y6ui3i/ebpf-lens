@@ -24,6 +24,27 @@ export interface Sample {
   mem?: MemStat; // memstall only
   vms?: VMInfo[]; // probe "vms" only: the VMs running on this host
   gpu?: GPUStat; // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+  disk?: DiskStat; // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
+}
+/**
+ * DiskStat is one interval of block I/O per device. Procs on the same sample say who issued the I/O.
+ */
+export interface DiskStat {
+  devices: DiskDev[];
+}
+/**
+ * DiskDev is one block device's I/O during the interval.
+ */
+export interface DiskDev {
+  name: string; // "nvme0n1", "sda"
+  reads: number /* uint64 */;
+  writes: number /* uint64 */;
+  readBytes: number /* uint64 */;
+  writeBytes: number /* uint64 */;
+  errors: number /* uint64 */; // completions with a block status other than OK
+  latNs: number /* uint64 */; // total latency of the completed I/Os
+  latMaxNs: number /* uint64 */;
+  slots: number /* uint64 */[]; // log2 histogram of latency (µs)
 }
 /**
  * GPUStat is one interval of the first GPU (NVML) plus what the CUDA processes did meanwhile (eBPF uprobes on libcuda).
@@ -138,6 +159,11 @@ export interface ProcStat {
    */
   reclaimedPages?: number /* uint64 */;
   memcgCount?: number /* uint64 */; // Of those, the number of reclaims caused by a cgroup limit
+  /**
+   * biolat only. In biolat, Wait* means "latency of the block I/O this process issued"
+   */
+  readBytes?: number /* uint64 */;
+  writeBytes?: number /* uint64 */;
 }
 /**
  * HostInfo is used for the list of hosts known to the server.
@@ -154,7 +180,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;
@@ -192,6 +218,12 @@ export interface Incident {
   gpuUtil?: number /* float64 */; // GPU utilization at the peak, 0..1
   cpuShare?: number /* float64 */; // share of the interval the process spent on the CPU at the peak
   copyShare?: number /* float64 */; // share of the interval it spent inside copy calls at the peak
+  /**
+   * vram_full: Peak is the share of VRAM in use (0..1)
+   * disk_slow: Peak is the latency p99 in µs; Culprits are the processes that issued most of the bytes over the window
+   * disk_error: Subject is the device, Count the failed I/Os in that second
+   */
+  device?: string;
 }
 /**
  * Culprit is one member of the group that was using the CPU while an incident's subject waited.

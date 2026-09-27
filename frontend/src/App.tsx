@@ -8,8 +8,10 @@ import { areaLevel } from "./lib/incidents";
 import { useColorSchemeKey } from "./lib/theme";
 import { timeWindow } from "./lib/timeWindow";
 import { Link, matchRoute, usePath } from "./lib/router";
-import { VM_AREA_KINDS, knownVms } from "./lib/vms";
-import { useI18n, type Key, type Lang } from "./lib/i18n";
+import { VM_AREA_KINDS, knownVms, lifecycleFrom } from "./lib/vms";
+import { useSettings } from "./lib/useSettings";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { useI18n, type Key } from "./lib/i18n";
 import { MenuButton, Nav, type NavVm } from "./components/Nav";
 import { LensSummary } from "./components/LensSummary";
 import { UseMatrix } from "./components/UseMatrix";
@@ -79,7 +81,8 @@ export default function App() {
   const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel, diskLevel, netLevel);
   const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel, "/disk": diskLevel, "/network": netLevel };
   // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level
-  const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs).map((v) => ({ name: v.name, running: v.running, level: v.level, phase: v.phase }));
+  const lifecycle = lifecycleFrom(useSettings().ui.vm);
+  const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs, lifecycle).map((v) => ({ name: v.name, running: v.running, level: v.level, phase: v.phase }));
   const match = matchRoute(path);
   const vmName = match?.params.name;
   const title = match ? t(match.labelKey, match.params) : "";
@@ -121,7 +124,6 @@ export default function App() {
             ))}
           </select>
           {host && <StatusBadge status={status} />}
-          <LangSwitch />
         </div>
       </header>
       <Nav path={path} open={navOpen} onClose={closeNav} levels={levels} vms={navVms} />
@@ -129,7 +131,9 @@ export default function App() {
       <main className="mx-auto max-w-6xl px-4 py-6">
         {/* The screen name is shown in the top-bar breadcrumb, so this heading is for screen readers only */}
         <h1 className="sr-only">{title}</h1>
-        {!host ? (
+        {path === "/settings" ? (
+          <SettingsPanel />
+        ) : !host ? (
           <p style={{ color: "var(--text-secondary)" }}>
             {t("app.waitingPre")}<code>ebpflens-agent -server …</code>{t("app.waitingPost")}
           </p>
@@ -266,39 +270,5 @@ function StatusBadge({ status }: { status: StreamStatus }) {
       {/* On narrow screens show only the symbol (keep the text for screen readers) */}
       <span className="sr-only sm:not-sr-only">{t(live ? "status.live" : status === "connecting" ? "status.connecting" : "status.reconnecting")}</span>
     </span>
-  );
-}
-
-// EN / Japanese toggle. The choice is saved by I18nProvider (localStorage, if available)
-function LangSwitch() {
-  const { lang, setLang, t } = useI18n();
-  const options: { value: Lang; labelKey: Key }[] = [
-    { value: "en", labelKey: "lang.en" },
-    { value: "ja", labelKey: "lang.ja" },
-  ];
-  return (
-    <div role="group" aria-label={t("lang.aria")} className="flex shrink-0 text-xs">
-      {options.map((o, i) => {
-        const active = lang === o.value;
-        return (
-          <button
-            key={o.value}
-            type="button"
-            lang={o.value}
-            aria-pressed={active}
-            onClick={() => setLang(o.value)}
-            className={`px-2 py-1 ${i === 0 ? "rounded-l-md" : "-ml-px rounded-r-md"}`}
-            style={{
-              border: "1px solid var(--border)",
-              background: active ? "var(--page)" : "transparent",
-              color: active ? "var(--text-primary)" : "var(--text-secondary)",
-              fontWeight: active ? 600 : 400,
-            }}
-          >
-            {t(o.labelKey)}
-          </button>
-        );
-      })}
-    </div>
   );
 }

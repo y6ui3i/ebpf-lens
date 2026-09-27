@@ -2,6 +2,7 @@
 // English is the default for non-Japanese browsers. Both dictionaries must have the same keys:
 // `ja` is typed from the keys of `en`, so a missing translation fails `tsc`.
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 export type Lang = "en" | "ja";
 
@@ -36,6 +37,47 @@ const en = {
   "level.warning": "Warning",
 
   // Pages / routes
+  "page.settings": "Settings",
+  "settings.title": "Settings",
+  "settings.desc": "Shared by everyone who opens this server: the language, how long a stopped VM stays in the menu and the list, and the thresholds the incidents are judged with. Saving overrides the -triggers file until reset",
+  "settings.sourceSaved": "Using the values saved here",
+  "settings.sourceDefault": "Using the defaults (and the -triggers file, if the server was started with one)",
+  "settings.lang": "Language",
+  "settings.langAuto": "Follow the browser",
+  "settings.langNote": "Applies to every browser that opens this server",
+  "settings.vm": "Stopped VMs",
+  "settings.vmNote": "After a VM stops: how long it stays in the menu with its level mark, then under the Stopped fold, then in the VM list only. Each must be at most the next; the last at most 24 h",
+  "settings.vmAttention": "In the menu, marked",
+  "settings.vmStopped": "Under the Stopped fold",
+  "settings.vmPast": "In the list",
+  "settings.minutes": "min",
+  "settings.hours": "h",
+  "settings.triggers": "Thresholds",
+  "settings.triggersNote": "An incident opens when the value stays at or above caution for minSeconds, escalates at warning, and closes after the value has been below caution for more than maxGapSeconds",
+  "settings.colRule": "Rule",
+  "settings.colCaution": "Caution",
+  "settings.colWarning": "Warning",
+  "settings.colMin": "min s",
+  "settings.colGap": "gap s",
+  "settings.rule.cpu": "CPU wait p99 (µs)",
+  "settings.rule.memory": "Memory reclaim stall (ms/s)",
+  "settings.rule.disk": "Disk I/O latency p99 (µs)",
+  "settings.rule.netFails": "Failed TCP connects (in 10 s)",
+  "settings.rule.netLatency": "TCP connect p99 (µs)",
+  "settings.rule.netRetrans": "TCP retransmissions (/s)",
+  "settings.rule.gpuStarved": "GPU starved: process busy share (0..1)",
+  "settings.rule.vram": "VRAM in use (0..1)",
+  "settings.gpuIdle": "GPU counts as idle below (0..1)",
+  "settings.crashLoop": "Crash loop: {n} crashes of one command within {s} s",
+  "settings.crashLoopCount": "crashes",
+  "settings.crashLoopWindow": "window s",
+  "settings.agentDown": "Agent stopped reporting after (s)",
+  "settings.save": "Save",
+  "settings.reset": "Reset to defaults",
+  "settings.saved": "Saved. Charts and incidents use the new values from now on",
+  "settings.resetDone": "Reset. Back to the defaults / the -triggers file",
+  "settings.error": "Not saved: {msg}",
+  "settings.dirty": "Unsaved changes",
   "page.dashboard": "Dashboard",
   "page.all": "All panels",
   "page.cpu": "CPU wait time",
@@ -567,6 +609,47 @@ const ja: Record<Key, string> = {
   "level.caution": "注意",
   "level.warning": "警告",
 
+  "page.settings": "設定",
+  "settings.title": "設定",
+  "settings.desc": "このサーバーを開く全員に共通の設定: 言語、止まった VM がメニューと一覧に残る時間、出来事を判定するしきい値。保存すると reset するまで -triggers ファイルより優先されます",
+  "settings.sourceSaved": "ここで保存した値を使っています",
+  "settings.sourceDefault": "既定値(と、サーバー起動時の -triggers ファイル)を使っています",
+  "settings.lang": "言語",
+  "settings.langAuto": "ブラウザに従う",
+  "settings.langNote": "このサーバーを開くすべてのブラウザに効きます",
+  "settings.vm": "止まった VM",
+  "settings.vmNote": "VM が止まってから、レベルの印付きでメニューに残る時間、次に「停止」の折り畳みに入る時間、最後に一覧にだけ出る時間。それぞれ次の値以下、最後は 24 時間以下",
+  "settings.vmAttention": "メニューに印付きで",
+  "settings.vmStopped": "「停止」の折り畳みに",
+  "settings.vmPast": "一覧に",
+  "settings.minutes": "分",
+  "settings.hours": "時間",
+  "settings.triggers": "しきい値",
+  "settings.triggersNote": "値が注意以上のまま minSeconds 続くと出来事が開き、警告以上で格上げ、注意未満が maxGapSeconds を超えて続くと閉じます",
+  "settings.colRule": "ルール",
+  "settings.colCaution": "注意",
+  "settings.colWarning": "警告",
+  "settings.colMin": "最短 秒",
+  "settings.colGap": "猶予 秒",
+  "settings.rule.cpu": "CPU 待ち p99(µs)",
+  "settings.rule.memory": "メモリ回収による停止(ms/秒)",
+  "settings.rule.disk": "ディスク I/O 待ち p99(µs)",
+  "settings.rule.netFails": "失敗した TCP 接続(10 秒間)",
+  "settings.rule.netLatency": "TCP 接続 p99(µs)",
+  "settings.rule.netRetrans": "TCP 再送(/秒)",
+  "settings.rule.gpuStarved": "GPU が遊んでいる: プロセスの忙しさ(0〜1)",
+  "settings.rule.vram": "VRAM 使用率(0〜1)",
+  "settings.gpuIdle": "GPU を「遊んでいる」とみなす稼働率(0〜1)未満",
+  "settings.crashLoop": "クラッシュの繰り返し: 同じコマンドが {s} 秒に {n} 回",
+  "settings.crashLoopCount": "回数",
+  "settings.crashLoopWindow": "窓 秒",
+  "settings.agentDown": "エージェント停止とみなす無報告時間(秒)",
+  "settings.save": "保存",
+  "settings.reset": "既定値に戻す",
+  "settings.saved": "保存しました。グラフと出来事はこれから新しい値を使います",
+  "settings.resetDone": "戻しました。既定値 / -triggers ファイルの値です",
+  "settings.error": "保存できませんでした: {msg}",
+  "settings.dirty": "未保存の変更があります",
   "page.dashboard": "ダッシュボード",
   "page.all": "すべてのパネル",
   "page.cpu": "CPU実行待ち時間",
@@ -1080,6 +1163,11 @@ export const formatHMS = (lang: Lang, t: Date | number | string) =>
   formatTime(lang, t, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 // A saved choice wins; otherwise follow the browser. localStorage can throw (e.g. private mode)
+function browserLang(): Lang {
+  const nav = typeof navigator !== "undefined" ? navigator.language : "";
+  return nav?.toLowerCase().startsWith("ja") ? "ja" : "en";
+}
+
 function initialLang(): Lang {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -1087,25 +1175,46 @@ function initialLang(): Lang {
   } catch {
     // Fall through to browser detection
   }
-  const nav = typeof navigator !== "undefined" ? navigator.language : "";
-  return nav?.toLowerCase().startsWith("ja") ? "ja" : "en";
+  return browserLang();
 }
 
 type I18n = { lang: Lang; setLang: (l: Lang) => void; t: TFn };
 
 const I18nContext = createContext<I18n | null>(null);
 
+// The language is a server setting shared by every browser (the settings screen). "" follows the browser.
+// The last value seen is cached per browser so the first paint does not flash the other language
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [lang, setLangState] = useState<Lang>(initialLang);
+  const qc = useQueryClient();
+  const [cached, setCached] = useState<Lang>(initialLang);
+  const q = useQuery({
+    queryKey: ["settings"],
+    queryFn: async () => (await fetch("/api/settings")).json() as Promise<{ ui?: { lang?: string } }>,
+    staleTime: 5 * 60 * 1000,
+  });
+  const server = q.data?.ui?.lang;
+  const lang: Lang = server === "en" || server === "ja" ? server : server === "" ? browserLang() : cached;
 
-  const setLang = useCallback((l: Lang) => {
-    setLangState(l);
+  useEffect(() => {
+    if (lang === cached) return;
+    setCached(lang);
     try {
-      localStorage.setItem(STORAGE_KEY, l);
+      localStorage.setItem(STORAGE_KEY, lang);
     } catch {
-      // Cannot persist here; remember it only for this session
+      // Cannot cache here; the next load asks the server again
     }
-  }, []);
+  }, [lang, cached]);
+
+  // Kept for the settings screen: saves the choice on the server (PUT merges into the current settings)
+  const setLang = useCallback(
+    (l: Lang) => {
+      setCached(l);
+      fetch("/api/settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ui: { lang: l } }) })
+        .then(() => qc.invalidateQueries({ queryKey: ["settings"] }))
+        .catch(() => undefined);
+    },
+    [qc],
+  );
 
   useEffect(() => {
     document.documentElement.lang = lang;

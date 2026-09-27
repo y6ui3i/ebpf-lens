@@ -305,6 +305,12 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 
 ## 8. Configuration and API quick reference
 
+### The settings screen (`/settings`)
+
+![Settings: language, stopped-VM visibility, and every threshold, with Save and Reset](img/en-settings.png)
+
+Everything below can also be changed from the menu's **Settings** screen, for every browser at once: the **language** (follow the browser, EN, or Japanese — the header switch is gone, this is the only place), how long a **stopped VM** stays in the menu with its mark, under the Stopped fold, and in the list, and every **threshold** the incidents are judged with. *Save* writes the values to the server's DB and they apply at once — charts redraw their bands, and open incidents are judged against the new numbers from the next sample. *Reset to defaults* drops the saved copy. Precedence: built-in defaults ← the `-triggers` file at startup ← what was saved from the screen. Without a `-db`, a save lasts until the server restarts.
+
 Server:
 
 | Flag | Default | Meaning |
@@ -337,7 +343,7 @@ Trigger file (values shown are the defaults):
 }
 ```
 
-API (all `GET` unless noted): `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
+API (all `GET` unless noted): `/api/settings` (`PUT` replaces, merging a partial document such as `{"ui":{"lang":"ja"}}` into the current one; `DELETE` resets), `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
 
 ## 9. Glossary
 

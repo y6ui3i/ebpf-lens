@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/yoshiharu-ishii/ebpf-lens/internal/settings"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/store"
 	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
 )
@@ -24,8 +25,9 @@ const maxSlots = 64
 //	GET  /api/events?host=            event history
 //	GET  /api/incidents?host=         incidents, newest first (ongoing ones have no "end")
 //	GET  /api/triggers                the thresholds the server judges with (the UI draws its bands from them)
+//	GET  /api/settings                thresholds and UI settings (the settings screen); PUT replaces them, DELETE resets to defaults / the file
 //	GET  /api/stream?host=            SSE of new data (event: sample / events / incident)
-func Register(mux *http.ServeMux, st *store.Store, triggers trigger.Config) {
+func Register(mux *http.ServeMux, st *store.Store, sm *settings.Manager) {
 	mux.HandleFunc("POST /api/ingest", func(w http.ResponseWriter, r *http.Request) {
 		var x model.Sample
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&x); err != nil {
@@ -68,7 +70,31 @@ func Register(mux *http.ServeMux, st *store.Store, triggers trigger.Config) {
 	})
 
 	mux.HandleFunc("GET /api/triggers", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, triggers)
+		writeJSON(w, sm.Get().Triggers)
+	})
+
+	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, settingsResponse{Settings: sm.Get(), Saved: sm.Saved()})
+	})
+	mux.HandleFunc("PUT /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		s := sm.Get() // fields the client leaves out keep their current value
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&s); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := sm.Put(s); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, settingsResponse{Settings: sm.Get(), Saved: sm.Saved()})
+	})
+	mux.HandleFunc("DELETE /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		s, err := sm.Reset()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, settingsResponse{Settings: s, Saved: false})
 	})
 
 	mux.HandleFunc("GET /api/hosts", func(w http.ResponseWriter, r *http.Request) {
@@ -124,4 +150,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("write json: %v", err)
 	}
+}
+
+// settingsResponse is the settings document plus where it came from (saved from the screen, or defaults / the file).
+type settingsResponse struct {
+	settings.Settings
+	Saved bool `json:"saved"`
 }

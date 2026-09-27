@@ -108,6 +108,21 @@ func New(cfg Config, sink Sink) *Evaluator {
 // SetHistory enables context lookups (see History).
 func (e *Evaluator) SetHistory(h History) { e.history = h }
 
+// SetConfig swaps the thresholds at run time (the settings screen). Open excursions carry on and are judged
+// against the new numbers from the next sample.
+func (e *Evaluator) SetConfig(cfg Config) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg = cfg
+}
+
+// Config returns the thresholds in use.
+func (e *Evaluator) Config() Config {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cfg
+}
+
 func (e *Evaluator) state(host string) *hostState {
 	h := e.host[host]
 	if h == nil {

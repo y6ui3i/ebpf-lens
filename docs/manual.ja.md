@@ -305,6 +305,12 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 ## 8. 設定と API の早見表
 
+### 設定画面(`/settings`)
+
+![設定: 言語、止まった VM が見える時間、すべてのしきい値。保存と既定値に戻す](img/ja-settings.png)
+
+下の内容はメニューの**設定**画面からも、すべてのブラウザに対して一度に変えられます。**言語**(ブラウザに従う / EN / 日本語。ヘッダーの切り替えは無くなり、ここだけ)、**止まった VM** がメニューに印付きで残る時間・「停止」の折り畳みに入る時間・一覧に出る時間、出来事を判定するすべての**しきい値**。*保存*でサーバーの DB に書かれ、すぐ効きます。グラフの帯は描き直され、開いている出来事も次のサンプルから新しい値で判定されます。*既定値に戻す*は保存した値を消します。優先順位: 組み込みの既定値 ← 起動時の `-triggers` ファイル ← 画面で保存した値。`-db` が無ければ、保存はサーバー再起動まで。
+
 サーバー:
 
 | フラグ | 既定 | 意味 |
@@ -337,7 +343,7 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 }
 ```
 
-API(断りがなければ `GET`): `/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
+API(断りがなければ `GET`): `/api/settings`(`PUT` で置き換え。`{"ui":{"lang":"ja"}}` のような部分的な文書は今の設定に重ねる。`DELETE` で既定に戻す)、`/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
 
 ## 9. 用語集
 

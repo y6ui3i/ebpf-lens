@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -47,6 +48,10 @@ CREATE TABLE IF NOT EXISTS incidents (
 	body     TEXT   NOT NULL
 );
 CREATE INDEX IF NOT EXISTS incidents_host_start ON incidents (host, start_ms);
+CREATE TABLE IF NOT EXISTS settings (
+	key  TEXT PRIMARY KEY,
+	body TEXT NOT NULL
+);
 `
 
 // SQLite is a Persister that writes samples and events to SQLite.
@@ -89,6 +94,29 @@ func OpenSQLite(path string, retention, eventRetention, incidentRetention time.D
 	s.wg.Add(1)
 	go s.loop()
 	return s, nil
+}
+
+// The settings document saved from the settings screen (see internal/settings). One row, written synchronously:
+// it changes once in a blue moon and the caller wants to know it is on disk.
+const settingsKey = "settings"
+
+func (s *SQLite) LoadSettings() (string, bool, error) {
+	var body string
+	err := s.db.QueryRow(`SELECT body FROM settings WHERE key = ?`, settingsKey).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return body, err == nil, err
+}
+
+func (s *SQLite) SaveSettings(body string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, body) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET body = excluded.body`, settingsKey, body)
+	return err
+}
+
+func (s *SQLite) DeleteSettings() error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, settingsKey)
+	return err
 }
 
 // SaveSample and SaveEvents drop and count items when the queue is full, so HTTP ingestion is never blocked.

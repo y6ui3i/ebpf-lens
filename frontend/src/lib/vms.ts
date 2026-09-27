@@ -14,8 +14,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 //   stopped    stopped within STOPPED_MS: folded under "Stopped (N)" in the menu, in the list's stopped section
 //   past       stopped within PAST_MS: only in the list; its page stays reachable
 //   forgotten  older than PAST_MS: not listed. The DB keeps its incidents 30 days, so /vms/<name> still answers
-// The bounds will move to the settings screen; until then they are constants
-export const LIFECYCLE = { attentionMs: 5 * 60 * 1000, stoppedMs: 60 * 60 * 1000, pastMs: DAY_MS };
+// The bounds come from the settings screen (ui.vm); these are the defaults
+export type Lifecycle = { attentionMs: number; stoppedMs: number; pastMs: number };
+export const LIFECYCLE: Lifecycle = { attentionMs: 5 * 60 * 1000, stoppedMs: 60 * 60 * 1000, pastMs: DAY_MS };
+export const lifecycleFrom = (vm: { attentionSeconds: number; stoppedSeconds: number; pastSeconds: number }): Lifecycle =>
+  ({ attentionMs: vm.attentionSeconds * 1000, stoppedMs: vm.stoppedSeconds * 1000, pastMs: vm.pastSeconds * 1000 });
 export type VmPhase = "running" | "attention" | "stopped" | "past";
 // Incident kinds that belong to a VM. The area level of the VM group (dashboard, nav, USE row) is judged over VM_AREA_KINDS
 const VM_KINDS = ["vm_down", "oom_kill", "vm_cpu_wait"] as const;
@@ -69,7 +72,7 @@ export function vmStopsWithin(incidents: Incident[], nowMs: number, ms = DAY_MS)
 
 // Known VMs = running now ∪ any VM with an incident in the last 24 h.
 // Order: VMs with an active incident first, then running, then stopped; by name within each group
-export function knownVms(vmSamples: Sample[], incidents: Incident[], nowMs: number): VmState[] {
+export function knownVms(vmSamples: Sample[], incidents: Incident[], nowMs: number, lc: Lifecycle = LIFECYCLE): VmState[] {
   const names = new Set<string>();
   const running = new Map<string, VMInfo>();
   for (const v of runningVms(vmSamples) ?? []) {
@@ -77,20 +80,20 @@ export function knownVms(vmSamples: Sample[], incidents: Incident[], nowMs: numb
     names.add(v.name);
   }
   for (const x of incidents) {
-    if (x.vm && (VM_KINDS as readonly string[]).includes(x.kind) && nowMs - Date.parse(x.start) <= LIFECYCLE.pastMs) names.add(x.vm);
+    if (x.vm && (VM_KINDS as readonly string[]).includes(x.kind) && nowMs - Date.parse(x.start) <= lc.pastMs) names.add(x.vm);
   }
-  const out: VmState[] = [...names].map((name) => vmState(name, running.get(name), incidents, nowMs));
+  const out: VmState[] = [...names].map((name) => vmState(name, running.get(name), incidents, nowMs, lc));
   const rank = (v: VmState) => (v.level !== "ok" ? 0 : v.running ? 1 : 2);
   return out.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
 }
 
-export function vmState(name: string, info: VMInfo | undefined, incidents: Incident[], nowMs: number): VmState {
+export function vmState(name: string, info: VMInfo | undefined, incidents: Incident[], nowMs: number, lc: Lifecycle = LIFECYCLE): VmState {
   const own = vmIncidents(incidents, name);
   const lastDown = own.find((x) => x.kind === "vm_down");
   const level = areaLevel(own, VM_KINDS, nowMs);
   const running = info != null;
   const sinceStop = lastDown ? nowMs - Date.parse(lastDown.start) : Infinity;
-  const phase: VmPhase = running ? "running" : level !== "ok" || sinceStop <= LIFECYCLE.attentionMs ? "attention" : sinceStop <= LIFECYCLE.stoppedMs ? "stopped" : "past";
+  const phase: VmPhase = running ? "running" : level !== "ok" || sinceStop <= lc.attentionMs ? "attention" : sinceStop <= lc.stoppedMs ? "stopped" : "past";
   return {
     name,
     running,

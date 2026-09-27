@@ -8,8 +8,9 @@ import { asLevel, durationSeconds } from "../lib/incidents";
 import { byCpu, culpritList, culpritsFor, formatMs, impact, pct, procLabel, samplesBetween, type CulpritMember } from "../lib/impact";
 import {
   latestVmCpuWait, levelFor, runningVms, vmComm, vmPseudoSamples, vmStallMsPerSec, vmStallSeries, vmState, vmWaitP99, type VmState,
-} from "../lib/vms";
+ lifecycleFrom } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
+import { useSettings } from "../lib/useSettings";
 import type { TimeWindow } from "../lib/timeWindow";
 import { formatTime, useI18n, type Lang, type TFn } from "../lib/i18n";
 import { Heatmap } from "./Heatmap";
@@ -32,7 +33,7 @@ export function VmPanel({ name, vmSamples, samples, memSamples, incidents, win, 
   const triggers = useTriggers();
   const nowMs = Date.now();
   const info = runningVms(vmSamples)?.find((v) => v.name === name);
-  const vm = vmState(name, info, incidents, nowMs);
+  const vm = vmState(name, info, incidents, nowMs, lifecycleFrom(useSettings().ui.vm));
   const pseudo = useMemo(() => vmPseudoSamples(samples, name), [samples, name]);
   const stallSeries = useMemo(() => vmStallSeries(memSamples, name), [memSamples, name]);
   const stallNow = vmStallMsPerSec(memSamples, name);

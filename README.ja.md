@@ -240,6 +240,13 @@ sh lab/create-vm.sh ssh      # VM に入る
 virsh -c qemu:///system shutdown ebpflens-lab   # 止める(ディスクは残る)
 ```
 
+`lab/fleet.sh up 10` でさらに 10 台(`ebpflens-fleet-01..10`、各 1GB / 2 vCPU。ベースイメージと鍵は共有)を起動できる。`ssh N cmd`、`ips`、`down`。
+
+8 コアの検証機で 10 台: `virt-install` から 20 秒で 10 台ともエージェントに見えた。エージェントは RSS 23MB・CPU 0.3%、サンプルは毎秒 2.9KB。うち 3 台の中で `stress-ng --cpu 2` を回す(8 コアに 6 vCPU が張り付き、ホスト 71% busy)と、**何もしていない** VM のホスト側 CPU 待ち p99 が数十 µs から 0.5〜2.3 ms に上がった。ホストから VM ごとに見た steal time である。この回で分かったこと:
+
+- **スワップがあると、cgroup のメモリ上限は VM を殺さず、遅くする。** `virsh memtune --hard-limit 256M` の VM が 700MB を触ると、上限に 4,846 回当たったのに OOM kill は起きなかった。QEMU をスワップに追い出す回収が毎回成功していたため。これは VM の回収停止として見える(`--swap-hard-limit` でスワップも抑えた後の `vm_down` には、直前 1 分の停止 2.9 秒が付いていた)。スワップのあるホストで上限により VM を落とすには、スワップも抑える。
+- 3 台の VM が CPU を約 25% ずつ分け合っていると、ホストの原因の一文は原因を名指ししない(単一プロセスのルールは 30% を要求する)。被害側は正しく名指しされる。隣人の「グループ」を原因にするのは steal の帰属の段階で扱う。
+
 VM のファイルは `LAB_DIR` を指定しなければ `/var/lib/libvirt/images/ebpflens-lab` に置かれる。VM のカーネルは 7.0.0-31、ホストは 7.0.0-34 で、ホストでビルドしたエージェントがそのまま動いた(CO-RE)。
 
 ## 検証機

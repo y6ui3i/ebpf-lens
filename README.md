@@ -240,6 +240,13 @@ sh lab/create-vm.sh ssh      # log in
 virsh -c qemu:///system shutdown ebpflens-lab   # stop (the disk is kept)
 ```
 
+`lab/fleet.sh up 10` starts ten more (`ebpflens-fleet-01..10`, 1 GB / 2 vCPUs each, sharing the base image and key); `ssh N cmd`, `ips`, `down`.
+
+Ten VMs on the 8-core test host: the agent saw all ten within 20 s of `virt-install`, at 23 MB RSS and 0.3 % CPU, with 2.9 KB per second of samples. With `stress-ng --cpu 2` inside three of them (six busy vCPUs on eight cores, host 71 % busy), the *idle* VMs' host-side CPU wait p99 rose from tens of µs to 0.5–2.3 ms — steal time, per VM, from the host. Two lessons from that run:
+
+- **With swap available, a cgroup memory limit makes a VM crawl, not die.** `virsh memtune --hard-limit 256M` on a VM that then touched 700 MB hit the limit 4,846 times without an OOM kill: reclaim kept succeeding by swapping QEMU out. That shows up as a reclaim stall on the VM (the `vm_down` that followed, once swap was capped with `--swap-hard-limit`, carried 2.9 s of stall in its last minute). To kill a VM by limit on a host with swap, cap swap too.
+- The host's cause sentence names no culprit when three VMs share the CPU at ~25 % each (the single-process rule wants 30 %); the victims are named correctly. Attributing a *group* of neighbours is part of the steal-attribution step.
+
 VM files go to `/var/lib/libvirt/images/ebpflens-lab` unless `LAB_DIR` is set. The VM ran kernel 7.0.0-31 while the host ran 7.0.0-34, and the agent built on the host ran unchanged in the VM (CO-RE).
 
 ## Test machine

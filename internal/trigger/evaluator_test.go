@@ -1,6 +1,7 @@
 package trigger
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -313,5 +314,94 @@ func TestVMDownKilledBySignalSeenBeforeCleanExit(t *testing.T) {
 	want := "[CAUTION] h: VM web-02 stopped at 10:00:00: QEMU was stopped with signal 15 by virtqemud (pid 900): a managed shutdown or a virsh destroy"
 	if txt := Text("open", got); txt != want {
 		t.Fatalf("text\n got %q\nwant %q", txt, want)
+	}
+}
+
+func TestGroupCulprits(t *testing.T) {
+	// one hog
+	g, tot := GroupCulprits(map[string]float64{"stress-ng-cpu": 0.99, "steam": 0.002})
+	if len(g) != 1 || g[0].Name != "stress-ng-cpu" || tot < 0.99 {
+		t.Fatalf("single hog: %+v %v", g, tot)
+	}
+	// three neighbours at 34/24/23 % (recorded on the test host) are one group of three
+	g, tot = GroupCulprits(map[string]float64{"vm:f1": 0.34, "vm:f2": 0.24, "vm:f3": 0.23, "dd": 0.009, "ebpflens-server": 0.003})
+	if len(g) != 3 || g[0].Name != "vm:f1" || g[2].Name != "vm:f3" || tot < 0.80 || tot > 0.82 {
+		t.Fatalf("three neighbours: %+v %v", g, tot)
+	}
+	// ten processes at 7 % each: nobody stands out
+	many := map[string]float64{}
+	for i := 0; i < 10; i++ {
+		many[fmt.Sprintf("w%d", i)] = 0.07
+	}
+	if g, _ := GroupCulprits(many); g != nil {
+		t.Fatalf("no group expected for evenly shared CPU, got %+v", g)
+	}
+	// two at 20 % do not reach 50 % together: no group
+	if g, _ := GroupCulprits(map[string]float64{"a": 0.2, "b": 0.2}); g != nil {
+		t.Fatalf("40 %% together must not be a group, got %+v", g)
+	}
+}
+
+// History for the fleet run: three VMs hog the CPU while fleet-08 waits.
+func fleetHistory(secs int) fakeHistory {
+	var xs []model.Sample
+	for s := 0; s < secs; s++ {
+		xs = append(xs, model.Sample{
+			Host: "h", Probe: "runqlat", Time: t0.Add(time.Duration(s) * time.Second), IntervalMs: 1000, CPUs: 8, BusyNs: 5.7e9,
+			Procs: []model.ProcStat{
+				{Comm: "vm:fleet-01", OnCPUNs: 2.7e9}, {Comm: "vm:fleet-02", OnCPUNs: 1.9e9}, {Comm: "vm:fleet-03", OnCPUNs: 1.85e9},
+				{Comm: "vm:fleet-08", OnCPUNs: 0.01e9},
+			},
+		})
+	}
+	return fakeHistory{samples: map[string][]model.Sample{"runqlat": xs}}
+}
+
+func TestVMCPUWaitOpensWithCulpritsExcludingItself(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.SetHistory(fleetHistory(10))
+	slots := make([]uint64, 27)
+	slots[11] = 100 // 2-4 ms: over caution for the VM
+	for s := 0; s < 3; s++ {
+		e.OnSample(model.Sample{
+			Host: "h", Probe: "runqlat", Time: t0.Add(time.Duration(s) * time.Second), IntervalMs: 1000, CPUs: 8,
+			Slots: cpuSample(s, 3).Slots, // the host as a whole is fine
+			Procs: []model.ProcStat{{Comm: "vm:fleet-08", Slots: slots}, {Comm: "vm:fleet-01", Slots: cpuSample(s, 3).Slots}},
+		})
+	}
+	if len(r.got) != 1 {
+		t.Fatalf("expected exactly one incident (the VM's), got %+v", r.got)
+	}
+	got := r.last()
+	if got.Kind != KindVMCPUWait || got.VM != "fleet-08" || got.Subject != "fleet-08" || got.Level != LevelCaution || !got.Ongoing() {
+		t.Fatalf("unexpected incident %+v", got)
+	}
+	if len(got.Culprits) != 3 || got.Culprits[0].Name != "vm:fleet-01" || got.CulpritShare < 0.79 || got.HostBusy < 0.70 {
+		t.Fatalf("culprits not attached or wrong: %+v share=%v busy=%v", got.Culprits, got.CulpritShare, got.HostBusy)
+	}
+	for _, c := range got.Culprits {
+		if c.Name == "vm:fleet-08" {
+			t.Fatal("the waiting VM must not be its own culprit")
+		}
+	}
+	want := "[CAUTION] h: VM fleet-08 is waiting for host CPU (99% of its tasks waited up to 4.1 ms, 3 s since 10:00:00); CPU taken by vm:fleet-01 (34%), vm:fleet-02 (24%), vm:fleet-03 (23%) — 81% together"
+	if txt := Text("open", got); txt != want {
+		t.Fatalf("text\n got %q\nwant %q", txt, want)
+	}
+}
+
+func TestHostCPUWaitCarriesCulprits(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	e.SetHistory(fleetHistory(10))
+	for s := 0; s < 3; s++ {
+		x := cpuSample(s, 13)
+		x.IntervalMs, x.CPUs = 1000, 8
+		e.OnSample(x)
+	}
+	got := r.last()
+	if got.Kind != KindCPUWait || len(got.Culprits) != 3 || got.Culprits[0].Name != "vm:fleet-01" {
+		t.Fatalf("host cpu_wait should name the group: %+v", got)
 	}
 }

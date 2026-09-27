@@ -142,4 +142,18 @@ export interface Incident {
   exitStatus?: number /* int */;
   contextStallMs?: number /* float64 */; // time the VM stalled in memory reclaim in the last 60 s
   contextWaitP99Us?: number /* float64 */; // run-queue wait p99 of the VM in the last 60 s
+  /**
+   * cpu_wait / vm_cpu_wait: who was using the CPU while the subject waited (the culprit group, see trigger.GroupCulprits)
+   */
+  culprits?: Culprit[];
+  culpritShare?: number /* float64 */; // combined share of the host's CPU used by the group
+  hostBusy?: number /* float64 */; // share of the host's CPU that was busy over the same window
+}
+/**
+ * Culprit is one member of the group that was using the CPU while an incident's subject waited.
+ * Name is a process name, or "vm:<name>" for a VM.
+ */
+export interface Culprit {
+  name: string;
+  share: number /* float64 */; // of the host's total CPU capacity, 0..1
 }

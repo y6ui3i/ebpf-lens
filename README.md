@@ -157,6 +157,17 @@ Two things the lab taught us, both now handled:
 
 Reproduced on the test host with the lab VM: `virsh destroy` → killed by libvirtd (SIGTERM); `virsh shutdown` → the same, as explained; `kill -SEGV` on QEMU → crash; `virsh memtune --hard-limit 256M` plus a 700 MB allocation inside the guest → `cgroup_oom`, matching the kernel's "Memory cgroup out of memory: Killed process … (qemu-system-x86)". A host-wide OOM of a VM cannot be triggered safely on the test host; the rule is covered by unit tests against the recorded event shapes.
 
+## Who took this VM's CPU?
+
+A VM whose vCPU threads wait for a host CPU is losing time to someone — steal time. eBPFLens judges each VM's own host-side run-queue wait p99 (from its `vm:<name>` per-process histogram) with the same thresholds as the host and raises a **`vm_cpu_wait`** incident that names **who was using the CPU meanwhile**, as a group:
+
+- consumers with ≥ 10 % of the host's CPU, largest first, at most five, and only if together they used ≥ 50 %; the waiting VM itself is left out. One hog at 99 % is a group of one; three VMs at 34/24/23 % are a group of three (81 %); ten processes at 7 % each are no group — the CPU is simply shared, and the incident says so together with how busy the host was.
+- The same group is attached to the host's `cpu_wait` incidents, so a host-level episode also says who caused it.
+
+Webhook line from the lab: `[CAUTION] hal: VM fleet-04 is waiting for host CPU (99% of its tasks waited up to 4.1 ms, 6 s since 11:29:34); CPU taken by vm:fleet-01 (28%), vm:fleet-03 (27%), vm:fleet-02 (24%) — 79% together`. On the VM page this becomes the headline *Waiting for host CPU*, the evidence, and a next step ("move this VM or the busiest neighbour to another host, or cap the neighbours' vCPUs; adding vCPUs to this VM will not help while the host is short of CPU").
+
+Reproduced with four lab VMs on the 8-core test host: `stress-ng --cpu 2` in three of them and a light 40 % load in the fourth. The fourth got `vm_cpu_wait` (p99 3.6–4.1 ms) naming the three hogs at 28/27/24 % with the host 84 % busy. An idle VM does not get one: it rarely wakes, so it is not actually suffering. The boot storm of the four VMs starting together produced the same kind for each of them, naming the other three.
+
 ## VM screens
 
 The menu has a **VMs** group (a list, then one entry per VM with a running/stopped mark and a level icon when it has a fresh incident) above **Host** (the host's own resources).
@@ -195,7 +206,7 @@ Policy: **eBPF is the primary source for everything except the GPU.** `/proc` an
 5. ✅ Layout: overview page (Lens Summary + USE grid) and per-resource pages, responsive menu
 6. ✅ Memory pressure: per-process time stalled in reclaim (direct and memcg), cross-checked with PSI and `/proc/meminfo`
 7. ✅ Triggers and notifications: verdicts run on the server as incidents, with a webhook; all inputs come from eBPF
-8. ✅ VM monitoring, first two steps (why a VM stopped; VM screens): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
+8. ✅ VM monitoring (why a VM stopped; VM screens; who took a VM's CPU): watch KVM guests from the host — vCPU run-queue wait (steal time with a cause), QEMU memory stalls, why a VM died (host OOM, QEMU crash, guest panic / shutdown via KVM tracepoints), correlated with an agent inside the guest. VMs get their own screens: the menu becomes **Host** (today's resources) and **VMs** (a list, then one page per VM with its own Lens Summary), because people who run VMs come to ask about *their* VM, not the server
 9. GPU basics (NVML — the one exception that is not eBPF): utilization, VRAM, temperature, power, per-process VRAM
 10. GPU × eBPF: uprobes on libcudart / libcuda to measure kernel launches, transfers and sync waits per inference process, and explain *why the GPU is idle*
 11. Disk and network: biolatency / tcpconnect / tcpretrans
@@ -249,7 +260,7 @@ virsh -c qemu:///system shutdown ebpflens-lab   # stop (the disk is kept)
 Ten VMs on the 8-core test host: the agent saw all ten within 20 s of `virt-install`, at 23 MB RSS and 0.3 % CPU, with 2.9 KB per second of samples. With `stress-ng --cpu 2` inside three of them (six busy vCPUs on eight cores, host 71 % busy), the *idle* VMs' host-side CPU wait p99 rose from tens of µs to 0.5–2.3 ms — steal time, per VM, from the host. Two lessons from that run:
 
 - **With swap available, a cgroup memory limit makes a VM crawl, not die.** `virsh memtune --hard-limit 256M` on a VM that then touched 700 MB hit the limit 4,846 times without an OOM kill: reclaim kept succeeding by swapping QEMU out. That shows up as a reclaim stall on the VM (the `vm_down` that followed, once swap was capped with `--swap-hard-limit`, carried 2.9 s of stall in its last minute). To kill a VM by limit on a host with swap, cap swap too.
-- The host's cause sentence names no culprit when three VMs share the CPU at ~25 % each (the single-process rule wants 30 %); the victims are named correctly. Attributing a *group* of neighbours is part of the steal-attribution step.
+- Three VMs sharing the CPU at ~25 % each used to produce no culprit (the old rule wanted a single process at 30 %). The group rule below fixed that.
 
 VM files go to `/var/lib/libvirt/images/ebpflens-lab` unless `LAB_DIR` is set. The VM ran kernel 7.0.0-31 while the host ran 7.0.0-34, and the agent built on the host ran unchanged in the VM (CO-RE).
 

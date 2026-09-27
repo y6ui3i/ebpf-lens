@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ const (
 	KindCrashLoop = "crash_loop"
 	KindAgentDown = "agent_down"
 	KindVMDown    = "vm_down"
+	KindVMCPUWait = "vm_cpu_wait"
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -61,6 +63,7 @@ type hostState struct {
 	down      *model.Incident
 	ooms      map[uint32]model.ProcEvent // pid -> OOM kill seen recently, matched to the exit that follows
 	signals   map[uint32]model.ProcEvent // pid -> last terminating signal sent to it, matched to the exit that follows
+	vmcpu     map[string]*excursion      // VM name -> its own run-queue wait excursion (host side)
 }
 
 // excursion tracks one value that may be above its threshold. It exists before the incident opens
@@ -85,7 +88,7 @@ func (e *Evaluator) SetHistory(h History) { e.history = h }
 func (e *Evaluator) state(host string) *hostState {
 	h := e.host[host]
 	if h == nil {
-		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}}
+		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}, vmcpu: map[string]*excursion{}}
 		e.host[host] = h
 	}
 	return h
@@ -100,13 +103,113 @@ func (e *Evaluator) OnSample(x model.Sample) {
 	switch x.Probe {
 	case "runqlat":
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
-			e.judge(&h.cpu, x.Host, KindCPUWait, e.cfg.CPU, p99, x.Time)
+			e.judge(&h.cpu, x.Host, KindCPUWait, "", e.cfg.CPU, p99, x.Time, e.culpritDecorator(x.Host, ""))
+		}
+		// Each VM's own host-side wait is judged with the same thresholds; its culprits exclude the VM itself
+		for _, p := range x.Procs {
+			name, ok := strings.CutPrefix(p.Comm, "vm:")
+			if !ok {
+				continue
+			}
+			p99, ok := Percentile(p.Slots, 0.99)
+			if !ok {
+				continue
+			}
+			ex := h.vmcpu[name]
+			if ex == nil {
+				ex = &excursion{}
+				h.vmcpu[name] = ex
+			}
+			e.judge(ex, x.Host, KindVMCPUWait, name, e.cfg.CPU, p99, x.Time, e.culpritDecorator(x.Host, p.Comm))
 		}
 	case "memstall":
 		if x.Mem != nil && x.IntervalMs > 0 {
 			msPerSec := float64(x.Mem.StallNs) / 1e6 / (float64(x.IntervalMs) / 1000)
-			e.judge(&h.mem, x.Host, KindMemStall, e.cfg.Memory, msPerSec, x.Time)
+			e.judge(&h.mem, x.Host, KindMemStall, "", e.cfg.Memory, msPerSec, x.Time, nil)
 		}
+	}
+}
+
+// --- who took the CPU ---
+
+// Culprit grouping: consumers with at least culpritMinShare of the host, largest first, at most culpritMax of them,
+// and only if together they used at least culpritTotalShare. One hog at 99 % is a group of one; three VMs at
+// 34/24/23 % are a group of three; ten processes at 7 % each are no group at all (the CPU is simply shared).
+const (
+	culpritMinShare   = 0.10
+	culpritTotalShare = 0.50
+	culpritMax        = 5
+)
+
+// GroupCulprits applies the grouping rule to per-name CPU shares (fractions of the host's capacity).
+// It returns the group (largest first) and its combined share; an empty group means no one stands out.
+func GroupCulprits(shares map[string]float64) ([]model.Culprit, float64) {
+	var xs []model.Culprit
+	for name, sh := range shares {
+		if sh >= culpritMinShare {
+			xs = append(xs, model.Culprit{Name: name, Share: sh})
+		}
+	}
+	sort.Slice(xs, func(i, j int) bool {
+		if xs[i].Share != xs[j].Share {
+			return xs[i].Share > xs[j].Share
+		}
+		return xs[i].Name < xs[j].Name
+	})
+	if len(xs) > culpritMax {
+		xs = xs[:culpritMax]
+	}
+	var total float64
+	for _, c := range xs {
+		total += c.Share
+	}
+	if total < culpritTotalShare {
+		return nil, 0
+	}
+	return xs, total
+}
+
+// culprits computes the culprit group from the runqlat samples in [from, to], leaving out `exclude`
+// (the waiting VM itself), plus how busy the host was over the same window.
+func (e *Evaluator) culprits(host string, from, to time.Time, exclude string) (group []model.Culprit, total, busy float64) {
+	if e.history == nil {
+		return nil, 0, 0
+	}
+	shares := map[string]float64{}
+	var on, busyNs, cap float64
+	for _, s := range e.history.Samples(host, "runqlat") {
+		if s.Time.Before(from) || s.Time.After(to) || s.IntervalMs <= 0 || s.CPUs <= 0 {
+			continue
+		}
+		cap += float64(s.IntervalMs) * 1e6 * float64(s.CPUs)
+		busyNs += float64(s.BusyNs)
+		for _, p := range s.Procs {
+			if p.Comm == exclude {
+				continue
+			}
+			shares[p.Comm] += float64(p.OnCPUNs)
+			on += float64(p.OnCPUNs)
+		}
+	}
+	_ = on
+	if cap == 0 {
+		return nil, 0, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / cap
+	}
+	group, total = GroupCulprits(shares)
+	return group, total, busyNs / cap
+}
+
+// culpritDecorator attaches the culprit group for the incident's own window (start .. last update).
+func (e *Evaluator) culpritDecorator(host, exclude string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare, i.HostBusy = e.culprits(host, i.Start, end.Add(time.Second), exclude)
 	}
 }
 
@@ -251,8 +354,14 @@ func (e *Evaluator) Tick(now time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for host, h := range e.host {
-		e.closeIfQuiet(&h.cpu, e.cfg.CPU, now)
-		e.closeIfQuiet(&h.mem, e.cfg.Memory, now)
+		e.closeIfQuiet(&h.cpu, e.cfg.CPU, now, e.culpritDecorator(host, ""))
+		e.closeIfQuiet(&h.mem, e.cfg.Memory, now, nil)
+		for name, ex := range h.vmcpu {
+			e.closeIfQuiet(ex, e.cfg.CPU, now, e.culpritDecorator(host, "vm:"+name))
+			if !ex.active {
+				delete(h.vmcpu, name) // a VM that is quiet (or gone) needs no state
+			}
+		}
 		e.crashLoopTick(h, now)
 		e.agentDownTick(h, host, now)
 	}
@@ -274,18 +383,20 @@ func (e *Evaluator) Run(ctx context.Context) {
 
 // --- excursions (cpu_wait, mem_stall) ---
 
-func (e *Evaluator) judge(x *excursion, host, kind string, r ExcursionRule, v float64, t time.Time) {
+// judge advances one excursion with a new value. subject names what is waiting ("" for the host); decorate, if
+// set, fills incident fields that need a look at history (who took the CPU) whenever the incident is published.
+func (e *Evaluator) judge(x *excursion, host, kind, subject string, r ExcursionRule, v float64, t time.Time, decorate func(*model.Incident)) {
 	gap := time.Duration(r.MaxGapSeconds) * time.Second
 	if v < r.Caution {
 		// Below the threshold. Close the excursion only once the grace period has passed
 		if x.active && t.Sub(x.last) > gap {
-			e.closeExcursion(x)
+			e.closeExcursion(x, decorate)
 		}
 		return
 	}
 	if x.active && t.Sub(x.last) > gap {
 		// The previous excursion ended while no sample below the threshold arrived (e.g. a pause in reporting)
-		e.closeExcursion(x)
+		e.closeExcursion(x, decorate)
 	}
 	if !x.active {
 		*x = excursion{active: true, first: t}
@@ -303,10 +414,16 @@ func (e *Evaluator) judge(x *excursion, host, kind string, r ExcursionRule, v fl
 	switch {
 	case x.open == nil && x.seconds >= r.MinSeconds:
 		x.open = &model.Incident{
-			ID: incidentID(host, kind, "", x.first), Host: host, Kind: kind, Level: level,
-			Start: x.first, Updated: t, Seconds: x.seconds, Peak: x.peak,
+			ID: incidentID(host, kind, subject, x.first), Host: host, Kind: kind, Level: level,
+			Subject: subject, Start: x.first, Updated: t, Seconds: x.seconds, Peak: x.peak,
+		}
+		if kind == KindVMCPUWait {
+			x.open.VM = subject
 		}
 		x.lastUpsert = t
+		if decorate != nil {
+			decorate(x.open)
+		}
 		e.sink.AddIncident(*x.open)
 	case x.open != nil:
 		escalate := level == LevelWarning && x.open.Level != LevelWarning
@@ -317,22 +434,28 @@ func (e *Evaluator) judge(x *excursion, host, kind string, r ExcursionRule, v fl
 		// Publish progress every few seconds rather than every second; changes of level go out at once
 		if escalate || t.Sub(x.lastUpsert) >= 5*time.Second {
 			x.lastUpsert = t
+			if decorate != nil {
+				decorate(x.open)
+			}
 			e.sink.AddIncident(*x.open)
 		}
 	}
 }
 
-func (e *Evaluator) closeIfQuiet(x *excursion, r ExcursionRule, now time.Time) {
+func (e *Evaluator) closeIfQuiet(x *excursion, r ExcursionRule, now time.Time, decorate func(*model.Incident)) {
 	// A bit more slack than the sample-driven path, since samples normally arrive once a second
 	if x.active && now.Sub(x.last) > time.Duration(r.MaxGapSeconds+2)*time.Second {
-		e.closeExcursion(x)
+		e.closeExcursion(x, decorate)
 	}
 }
 
-func (e *Evaluator) closeExcursion(x *excursion) {
+func (e *Evaluator) closeExcursion(x *excursion, decorate func(*model.Incident)) {
 	if x.open != nil {
 		end := x.last
 		x.open.End, x.open.Seconds, x.open.Peak, x.open.Updated = &end, x.seconds, x.peak, end
+		if decorate != nil {
+			decorate(x.open)
+		}
 		e.sink.AddIncident(*x.open)
 	}
 	*x = excursion{}

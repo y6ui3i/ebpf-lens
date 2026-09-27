@@ -193,7 +193,9 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 
 Then the VM's own CPU-wait heatmap and trend (host side — this is steal time with a distribution), its reclaim stalls, and its incidents.
 
-*Reading it.* A running VM whose wait p99 sits above 1 ms while its own CPU share is near zero is a **victim of noisy neighbours**: look at the host CPU screen for who is busy. A VM that stalled in reclaim before dying was thrashing against a limit — with swap on the host, a limit makes a VM crawl rather than die.
+![VM page while the VM is waiting for host CPU: the headline, the three neighbours that took the CPU (81 % together), and the next step](img/en-vm-steal.png)
+
+*Reading it.* A running VM whose wait p99 sits above 1 ms while its own CPU share is small is a **victim of noisy neighbours**; its `vm_cpu_wait` incident and the *Who took this VM's CPU* table name them. A VM that stalled in reclaim before dying was thrashing against a limit — with swap on the host, a limit makes a VM crawl rather than die.
 
 ### All panels (`/all`)
 
@@ -211,7 +213,12 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **Crash** (`crash`) | exit by a crash signal or with a core dump | caution | instant | A software fault. Check the process's own logs / core dump. |
 | **Crash loop** (`crash_loop`) | the same command crashes 3 times in 5 min | warning | 5 min after the last crash | Something restarts it into the same failure. Stop the restart loop, then fix the crash. |
 | **Agent stopped reporting** (`agent_down`) | no sample for 30 s | warning | the host reports again | The host, the network, or the agent is down — nothing else on this host is fresh. Check the host first. |
+| **VM waiting for CPU** (`vm_cpu_wait`) | a VM's host-side wait p99 ≥ 1 ms for 3 s | caution; warning once ≥ 10 ms for 3 s | below 1 ms for more than 2 s | The VM is losing time to neighbours. The incident names who took the CPU (a group, see below); the VM page says what to do. |
 | **VM stopped** (`vm_down`) | a VM's QEMU process exited | warning for OOM / crash; caution for killed / clean exit | instant | Open the VM page: cause, evidence and next step are there. |
+
+![Dashboard (Japanese) during the same minute: the headline says a VM is waiting for host CPU, the CPU line names the three-VM group and its 76 %, and every incident row says who took the CPU](img/ja-dashboard-steal.png)
+
+**Who took the CPU.** `cpu_wait` and `vm_cpu_wait` incidents carry the *culprit group*: the processes or VMs using ≥ 10 % of the host each, largest first, at most five, and only if together they used ≥ 50 % (a waiting VM is never its own culprit). One hog is a group of one; three neighbours at ~25 % are a group of three; a CPU shared evenly by many is "no single process or small group" — the incident then says how busy the host was instead of guessing.
 
 `vm_down` causes:
 
@@ -241,7 +248,7 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 
 - **No authentication.** Anyone who can reach the server can read everything and post fake samples. Run it on a trusted network only.
 - **A guest shutdown and a `virsh destroy` look the same from the host.** libvirt runs QEMU with `-no-shutdown` and sends SIGTERM itself in both cases, and QEMU exits 0 on SIGTERM. Telling them apart needs libvirt's own stop reason, which is not read yet.
-- **Culprit needs a single process ≥ 30 %.** Three neighbours at 25 % each are reported as victims only.
+- **A culprit group needs members at ≥ 10 % each adding up to ≥ 50 %.** A CPU shared evenly by many small processes yields no culprit; the incident then reports the host's busy share instead.
 - **Per-process tables are top-N.** The agent sends the top 8 by wait and by CPU each second (VMs always). Totals over long ranges are therefore approximate; the screens say so.
 - **A host-wide OOM of a VM** has been reproduced only in unit tests on recorded event shapes, not live.
 - **Thresholds are provisional**, chosen from one 8-core machine. Tune them (§8) to your hosts.

@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Incident, Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
 import { isOngoing, latestOf } from "../lib/incidents";
-import { byCpu, byWait, explain, formatMs, impact, procLabel, samplesBetween } from "../lib/impact";
+import { byCpu, byWait, culpritList, culpritsFor, formatMs, impact, pct, procLabel, samplesBetween } from "../lib/impact";
 import { formatTime, useI18n } from "../lib/i18n";
 
 const RECENT_SECONDS = 10;
@@ -26,7 +26,10 @@ export function ImpactPanel({ samples, incidents }: { samples: Sample[]; inciden
       ? samplesBetween(samples, new Date(ep.start), ep.end ? new Date(ep.end) : new Date())
       : samples.slice(-RECENT_SECONDS);
   const xs = impact(range);
-  const { culprit } = explain(xs);
+  // Over the episode, the server's group is preferred (it saw the whole window); over the last seconds the same rule
+  // runs on the samples
+  const { members, total } = culpritsFor(scope === "episode" ? ep : undefined, xs, range);
+  const memberNames = new Set(members.map((m) => m.name));
   const cpu = byCpu(xs).slice(0, ROWS);
   const wait = byWait(xs).slice(0, ROWS);
   const maxShare = Math.max(...cpu.map((x) => x.cpuShare), 0.01);
@@ -71,6 +74,14 @@ export function ImpactPanel({ samples, incidents }: { samples: Sample[]; inciden
           </div>
         )}
       </div>
+
+      {members.length > 0 && (
+        <p className="mb-4 text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+          {members.length === 1
+            ? t("impact.groupOne", { list: culpritList(members, t) })
+            : t("impact.group", { list: culpritList(members, t), pct: pct(total) })}
+        </p>
+      )}
 
       {xs.length === 0 ? (
         <p className="text-sm" style={{ color: "var(--text-muted)" }}>
@@ -131,7 +142,7 @@ export function ImpactPanel({ samples, incidents }: { samples: Sample[]; inciden
                   <tr key={x.comm} style={{ borderTop: "1px solid var(--grid)" }}>
                     <td className="py-1.5 pr-2">
                       {procLabel(x)}
-                      {x.comm === culprit?.comm && (
+                      {memberNames.has(x.comm) && (
                         <span className="ml-1 text-xs" style={{ color: "var(--text-muted)" }}>{t("impact.culpritTag")}</span>
                       )}
                     </td>

@@ -2,10 +2,10 @@ import type { Incident, Sample } from "../types/model";
 import { formatUs } from "../lib/hist";
 import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, baseline, current, type Level } from "../lib/lens";
 import { areaLevel, asLevel, isOngoing, latestOf } from "../lib/incidents";
-import { explain, formatMs, impact, samplesBetween } from "../lib/impact";
+import { byWait, culpritList, culpritsFor, formatMs, impact, pct, samplesBetween } from "../lib/impact";
 import { lifecycleSentence, type Lifecycle } from "../lib/lifecycle";
 import { memorySentence } from "../lib/memory";
-import { runningVms, vmStopsWithin } from "../lib/vms";
+import { VM_AREA_KINDS, runningVms, vmStopsWithin, vmsWaitingForCpu } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params } from "../lib/i18n";
 import { IncidentTable, incidentDetail } from "./IncidentTable";
@@ -57,12 +57,17 @@ export function LensSummary({ samples, memSamples, vmSamples, life, incidents }:
   const cpuLevel = areaLevel(incidents, ["cpu_wait"], nowMs);
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
-  const vmLevel = areaLevel(incidents, ["vm_down"], nowMs);
+  const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
+  // The VM headline names whichever VM problem carries the area's level: a VM waiting for host CPU, or a stop
+  const vmCpuWaitLevel = areaLevel(incidents, ["vm_cpu_wait"], nowMs);
+  const vmHeadline: Key = vmCpuWaitLevel !== "ok" && RANK[vmCpuWaitLevel] >= RANK[areaLevel(incidents, ["vm_down"], nowMs)]
+    ? "summary.vmCpuWait"
+    : "summary.vmDown";
   const agentDown = incidents.find((x) => x.kind === "agent_down" && isOngoing(x));
   // The overall status follows the worst area, and the headline uses that area's wording (ties: VM -> CPU -> memory -> processes).
   // A host that stopped reporting outranks everything, because no other data is fresh
   const areas: { level: Level; headline: Key }[] = [
-    { level: vmLevel, headline: "summary.vmDown" },
+    { level: vmLevel, headline: vmHeadline },
     { level: cpuLevel, headline: CPU_HEADLINE[cpuLevel] },
     { level: memLevel, headline: MEM_HEADLINE[memLevel] },
     { level: procLevel, headline: lifecycleHeadline(incidents, nowMs) },
@@ -130,9 +135,22 @@ export function LensSummary({ samples, memSamples, vmSamples, life, incidents }:
   );
 }
 
-// One sentence on the VMs: a stop in the last 5 minutes wins; otherwise how many run and when the last stop was.
+// The VM finding: VMs waiting for host CPU right now come first (that is happening now), then the stop sentence:
+// a stop in the last 5 minutes wins; otherwise how many run and when the last stop was.
 // With no "vms" sample at all we cannot tell whether there are VMs, so say so instead of "none"
 function vmSentence(vmSamples: Sample[], incidents: Incident[], lang: Lang, nowMs: number): string {
+  const tr = (k: Key, p?: Params) => translate(lang, k, p);
+  const waiting = vmsWaitingForCpu(incidents);
+  if (waiting.length === 0) return vmStopSentence(vmSamples, incidents, lang, nowMs);
+  const first = tr("summary.vm.cpuWait", {
+    n: waiting.length,
+    names: waiting.map((x) => x.vm ?? x.subject ?? "").join(tr("list.sep")),
+    v: formatUs(waiting[0].peak ?? null),
+  });
+  return `${first} ${vmStopSentence(vmSamples, incidents, lang, nowMs)}`;
+}
+
+function vmStopSentence(vmSamples: Sample[], incidents: Incident[], lang: Lang, nowMs: number): string {
   const tr = (k: Key, p?: Params) => translate(lang, k, p);
   const running = runningVms(vmSamples);
   const stops = vmStopsWithin(incidents, nowMs);
@@ -163,26 +181,34 @@ function Finding({ area, level, children }: { area: string; level: Level; childr
   );
 }
 
-// One sentence on "who used the CPU and who else was kept waiting" during the incident
+// One sentence on "who used the CPU and who else was kept waiting" during the incident.
+// The group comes from the incident when the server recorded one (see culpritsFor); the victims always come from the samples
 function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Incident }) {
   const { t } = useI18n();
   const ongoing = isOngoing(episode);
   const end = ongoing ? new Date() : new Date(episode.end!);
-  const { culprit, victims } = explain(impact(samplesBetween(samples, new Date(episode.start), end)));
-  if (!culprit && victims.length === 0) return null;
+  const range = samplesBetween(samples, new Date(episode.start), end);
+  const xs = impact(range);
+  const { members, total, busy, fromServer } = culpritsFor(episode, xs, range);
+  const names = new Set(members.map((m) => m.name));
+  const victims = byWait(xs).filter((x) => !names.has(x.comm)).slice(0, 2);
+  // Nothing to say when neither the server nor the samples in view tell us anything about this window
+  if (!fromServer && xs.length === 0) return null;
   const parts: string[] = [];
-  if (culprit) {
-    const who = culprit.procs > 1 ? t("cause.who", { comm: culprit.comm, n: culprit.procs }) : culprit.comm;
-    const pct = Math.round(culprit.cpuShare * 100);
-    parts.push(t(ongoing ? "cause.culpritOngoing" : "cause.culpritPast", { who, pct }));
+  if (members.length === 1) {
+    const m = members[0];
+    const who = (m.procs ?? 1) > 1 ? t("cause.who", { comm: m.name, n: m.procs! }) : m.name;
+    parts.push(t(ongoing ? "cause.culpritOngoing" : "cause.culpritPast", { who, pct: pct(m.share) }));
+  } else if (members.length > 1) {
+    parts.push(t(ongoing ? "cause.groupOngoing" : "cause.groupPast", { list: culpritList(members, t, { and: true }), pct: pct(total) }));
   } else {
-    parts.push(t("cause.noCulprit"));
+    parts.push(busy == null ? t("cause.noCulpritNoBusy") : t("cause.noCulprit", { busy: pct(busy) }));
   }
   if (victims.length > 0) {
     const list = victims
       .map((x) => t("cause.victim", { comm: x.comm, total: formatMs(x.waitNs), p99: formatUs(x.p99) }))
       .join(t("list.sep"));
-    parts.push(t(culprit ? "cause.victimsOthers" : "cause.victims", { list }));
+    parts.push(t(members.length > 0 ? "cause.victimsOthers" : "cause.victims", { list }));
   }
   return <p>{parts.join(" ")}</p>;
 }

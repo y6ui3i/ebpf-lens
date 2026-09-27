@@ -8,7 +8,7 @@ import type { TimeWindow } from "../lib/timeWindow";
 import { Link } from "../lib/router";
 import { Sparkline } from "./Sparkline";
 import { currentMem, formatBytes, formatMsPerSec, memUsed, stallMsPerSec } from "../lib/memory";
-import { levelFor, runningCounts, runningVms, vmStopsWithin, vmWaitP99 } from "../lib/vms";
+import { VM_AREA_KINDS, levelFor, runningCounts, runningVms, vmStopsWithin, vmWaitP99 } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
@@ -44,7 +44,7 @@ export function UseMatrix({ samples, memSamples, vmSamples, events, life, incide
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const oomLevel = areaLevel(incidents, ["oom_kill"], nowMs);
   const crashLevel = areaLevel(incidents, ["crash", "crash_loop"], nowMs);
-  const vmLevel = areaLevel(incidents, ["vm_down"], nowMs);
+  const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
   // VMs: how many run, the worst VM's CPU wait, and the stops of the last 24 h. Without any "vms" sample the row stays blank
   const vmsNow = runningVms(vmSamples);
   const vmWorstWait = vmsNow?.reduce<number | null>((acc, v) => {

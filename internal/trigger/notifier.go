@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,7 +126,9 @@ func Text(event string, i model.Incident) string {
 	var what string
 	switch i.Kind {
 	case KindCPUWait:
-		what = fmt.Sprintf("processes are competing for CPU (99%% of tasks waited up to %s, %d s since %s)", formatUs(i.Peak), i.Seconds, when)
+		what = fmt.Sprintf("processes are competing for CPU (99%% of tasks waited up to %s, %d s since %s)%s", formatUs(i.Peak), i.Seconds, when, culpritText(i))
+	case KindVMCPUWait:
+		what = fmt.Sprintf("VM %s is waiting for host CPU (99%% of its tasks waited up to %s, %d s since %s)%s", i.VM, formatUs(i.Peak), i.Seconds, when, culpritText(i))
 	case KindMemStall:
 		what = fmt.Sprintf("processes are stalling on low memory (%.0f ms/s stalled in reclaim, %d s since %s)", i.Peak, i.Seconds, when)
 	case KindOOMKill:
@@ -178,6 +181,24 @@ func Text(event string, i model.Incident) string {
 		what = i.Kind
 	}
 	return fmt.Sprintf("[%s] %s: %s", level, i.Host, what)
+}
+
+// culpritText renders "; CPU taken by a (34%), b (24%) — 81% together", or the honest alternative when no one stands out.
+func culpritText(i model.Incident) string {
+	if len(i.Culprits) == 0 {
+		if i.HostBusy > 0 {
+			return fmt.Sprintf("; no single process or small group is hogging it (host %.0f%% busy)", i.HostBusy*100)
+		}
+		return ""
+	}
+	parts := make([]string, len(i.Culprits))
+	for k, c := range i.Culprits {
+		parts[k] = fmt.Sprintf("%s (%.0f%%)", c.Name, c.Share*100)
+	}
+	if len(parts) == 1 {
+		return "; CPU taken by " + parts[0]
+	}
+	return fmt.Sprintf("; CPU taken by %s — %.0f%% together", strings.Join(parts, ", "), i.CulpritShare*100)
 }
 
 // isLibvirt matches the libvirt daemons (monolithic libvirtd or the modular virtqemud).

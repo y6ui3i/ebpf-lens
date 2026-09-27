@@ -8,7 +8,7 @@ import { areaLevel } from "./lib/incidents";
 import { useColorSchemeKey } from "./lib/theme";
 import { timeWindow } from "./lib/timeWindow";
 import { Link, matchRoute, usePath } from "./lib/router";
-import { knownVms } from "./lib/vms";
+import { VM_AREA_KINDS, knownVms } from "./lib/vms";
 import { useI18n, type Key, type Lang } from "./lib/i18n";
 import { MenuButton, Nav, type NavVm } from "./components/Nav";
 import { LensSummary } from "./components/LensSummary";
@@ -62,8 +62,8 @@ export default function App() {
   const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
   const agentLevel = areaLevel(incidents, ["agent_down"], nowMs);
-  // A VM stop counts toward the headline like any other area (it kept the dashboard green before this was added)
-  const vmLevel = areaLevel(incidents, ["vm_down"], nowMs);
+  // A VM stop, or a VM waiting for host CPU, counts toward the headline like any other area
+  const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
   const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel);
   const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel };
   // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level

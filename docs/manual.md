@@ -250,6 +250,18 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* Start from the verdict. *GPU-bound* is the good case — the GPU is the bottleneck and the process waits for it. *Transfer-bound* means the process spends its time inside copy calls: it is copying from pageable host memory (each call blocks) or in small batches — pinned memory or larger batches help. *GPU and CPU* means the GPU is busy only part of the time and the process computes on the CPU the rest: preprocessing, tokenizing or Python overhead is the next limit. *CPU-bound* is the same with the GPU nearly idle. *Waiting elsewhere* means the process is neither on the CPU nor in a CUDA call — it waits for I/O, a lock, or its input. *Idle* is a loaded model with no requests, holding VRAM. A temperature tile that says the clocks are held back explains a GPU that is "busy" yet slow.
 
+### History (`/history`)
+
+![History: the last hour, one row per area — incidents as bands, each area's key value as a line; the disk tests at 18:05, the five-minute IPv6 checks on the network row, the DNS tests at 18:32 and 18:35](img/ja-history.png)
+
+*What it is.* The last 1, 6 or 24 hours from the server's DB, one row per area: the incidents of that area as bands in their level's color, and the area's key value as a line (CPU wait p99, reclaim stall, VMs running, disk p99, retransmits/s, DNS p99, GPU busy). Samples are folded into a few hundred points on the server, so histograms still give true percentiles per point.
+
+*What you do with it.* Find **when** and **where** — "at 03:05 the disk band and the DNS band light up together" — then **click that moment on that row**: the area's own screen opens for the 5 minutes around it (`/disk?at=…`), from the DB, at full one-second detail, with a banner saying so and links back to live and to the history. The incident list below is limited to the range.
+
+![A per-area screen showing the past: the banner, and the DNS screen for 18:34–18:39](img/ja-history-past.png)
+
+*Limits.* The DB keeps one-second samples for 24 hours (`-retention`), so that is as far back as the history reaches for now; the 24-hour view takes a few seconds to read. The tiles on a past screen ("last 5 s", "last 5 min") refer to the end of the shown window. The dashboard, the settings and the history itself are always live.
+
 ### All panels (`/all`)
 
 Every panel from the screens above on one long page, with jump links. For when you want to scroll rather than click.
@@ -364,7 +376,7 @@ Trigger file (values shown are the defaults):
 }
 ```
 
-API (all `GET` unless noted): `/api/settings` (`PUT` replaces, merging a partial document such as `{"ui":{"lang":"ja"}}` into the current one; `DELETE` resets), `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn|dnslat`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
+API (all `GET` unless noted): `/api/history?host=&probe=&from=&to=&bucket=` (from/to in Unix ms, bucket in seconds; 1 = raw samples, at most 30 minutes), `/api/history/events?host=&from=&to=`, `/api/settings` (`PUT` replaces, merging a partial document such as `{"ui":{"lang":"ja"}}` into the current one; `DELETE` resets), `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn|dnslat`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
 
 ## 9. Glossary
 

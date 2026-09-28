@@ -2,12 +2,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/y6ui3i/ebpf-lens/internal/history"
 	"github.com/y6ui3i/ebpf-lens/internal/model"
 	"github.com/y6ui3i/ebpf-lens/internal/settings"
 	"github.com/y6ui3i/ebpf-lens/internal/store"
@@ -27,7 +30,17 @@ const maxSlots = 64
 //	GET  /api/triggers                the thresholds the server judges with (the UI draws its bands from them)
 //	GET  /api/settings                thresholds and UI settings (the settings screen); PUT replaces them, DELETE resets to defaults / the file
 //	GET  /api/stream?host=            SSE of new data (event: sample / events / incident)
-func Register(mux *http.ServeMux, st *store.Store, sm *settings.Manager) {
+//
+// HistorySource reads past samples and events (the SQLite persister). nil: only what the in-memory store holds.
+type HistorySource interface {
+	SamplesBetween(ctx context.Context, host, probe string, from, to time.Time) ([]model.Sample, error)
+	EventsBetween(ctx context.Context, host string, from, to time.Time) ([]model.ProcEvent, error)
+}
+
+// maxHistorySpan is how far back the history screen reaches: the samples the DB keeps (-retention defaults to 24 h)
+const maxHistorySpan = 24 * time.Hour
+
+func Register(mux *http.ServeMux, st *store.Store, sm *settings.Manager, hs HistorySource) {
 	mux.HandleFunc("POST /api/ingest", func(w http.ResponseWriter, r *http.Request) {
 		var x model.Sample
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&x); err != nil {
@@ -71,6 +84,70 @@ func Register(mux *http.ServeMux, st *store.Store, sm *settings.Manager) {
 
 	mux.HandleFunc("GET /api/triggers", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, sm.Get().Triggers)
+	})
+
+	// GET /api/history?host=&probe=&from=&to=&bucket=  (from/to: Unix ms; bucket: seconds, 1 = raw)
+	// Buckets are folded server side (internal/history) so a day of one-second samples arrives as a few hundred points
+	mux.HandleFunc("GET /api/history", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		host, probe := q.Get("host"), q.Get("probe")
+		from, to, err := historyRange(q.Get("from"), q.Get("to"))
+		if err != nil || host == "" || probe == "" {
+			http.Error(w, "host, probe, from and to are required (to - from at most 24 h)", http.StatusBadRequest)
+			return
+		}
+		bucket := time.Second
+		if b, err := strconv.Atoi(q.Get("bucket")); err == nil && b > 1 {
+			bucket = time.Duration(b) * time.Second
+		}
+		if bucket == time.Second && to.Sub(from) > 30*time.Minute {
+			http.Error(w, "raw samples are served for at most 30 minutes; pass bucket", http.StatusBadRequest)
+			return
+		}
+		var xs []model.Sample
+		if hs != nil {
+			if xs, err = hs.SamplesBetween(r.Context(), host, probe, from, to); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			for _, x := range st.Samples(host, probe) {
+				if !x.Time.Before(from) && !x.Time.After(to) {
+					xs = append(xs, x)
+				}
+			}
+		}
+		out := history.Aggregate(xs, bucket)
+		if out == nil {
+			out = []model.Sample{}
+		}
+		writeJSON(w, out)
+	})
+	mux.HandleFunc("GET /api/history/events", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		host := q.Get("host")
+		from, to, err := historyRange(q.Get("from"), q.Get("to"))
+		if err != nil || host == "" || to.Sub(from) > 30*time.Minute {
+			http.Error(w, "host, from and to are required (to - from at most 30 minutes)", http.StatusBadRequest)
+			return
+		}
+		var es []model.ProcEvent
+		if hs != nil {
+			if es, err = hs.EventsBetween(r.Context(), host, from, to); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			for _, e := range st.Events(host) {
+				if !e.Time.Before(from) && !e.Time.After(to) {
+					es = append(es, e)
+				}
+			}
+		}
+		if es == nil {
+			es = []model.ProcEvent{}
+		}
+		writeJSON(w, es)
 	})
 
 	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
@@ -156,4 +233,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 type settingsResponse struct {
 	settings.Settings
 	Saved bool `json:"saved"`
+}
+
+// historyRange parses from/to (Unix ms) and bounds the span to what the DB keeps.
+func historyRange(from, to string) (time.Time, time.Time, error) {
+	f, err := strconv.ParseInt(from, 10, 64)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	t, err := strconv.ParseInt(to, 10, 64)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	a, b := time.UnixMilli(f), time.UnixMilli(t)
+	if !b.After(a) || b.Sub(a) > maxHistorySpan {
+		return a, b, fmt.Errorf("bad range")
+	}
+	return a, b, nil
 }

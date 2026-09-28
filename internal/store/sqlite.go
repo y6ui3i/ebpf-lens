@@ -96,6 +96,55 @@ func OpenSQLite(path string, retention, eventRetention, incidentRetention time.D
 	return s, nil
 }
 
+// SamplesBetween returns one host's samples of one probe in [from, to], oldest first (the history screen).
+// The primary key (host, probe, ts_ms) makes this a range scan.
+func (s *SQLite) SamplesBetween(ctx context.Context, host, probe string, from, to time.Time) ([]model.Sample, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT body FROM samples WHERE host = ? AND probe = ? AND ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms`,
+		host, probe, from.UnixMilli(), to.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Sample
+	for rows.Next() {
+		var body string
+		var x model.Sample
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(body), &x); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// EventsBetween returns one host's process events in [from, to], oldest first.
+func (s *SQLite) EventsBetween(ctx context.Context, host string, from, to time.Time) ([]model.ProcEvent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT body FROM events WHERE host = ? AND ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms`,
+		host, from.UnixMilli(), to.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.ProcEvent
+	for rows.Next() {
+		var body string
+		var e model.ProcEvent
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(body), &e); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // The settings document saved from the settings screen (see internal/settings). One row, written synchronously:
 // it changes once in a blue moon and the caller wants to know it is on disk.
 const settingsKey = "settings"

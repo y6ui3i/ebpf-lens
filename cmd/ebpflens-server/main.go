@@ -107,7 +107,11 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	server.Register(mux, st, sm)
+	var hs server.HistorySource
+	if db != nil {
+		hs = db
+	}
+	server.Register(mux, st, sm, hs)
 	mux.Handle("/", webui.Handler())
 
 	log.Printf("ebpflens-server listening on %s", *addr)

@@ -250,6 +250,18 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 *読み方。* 判定から読みます。*GPU が上限*は良い状態。GPU がボトルネックで、プロセスはそれを待っています。*転送が上限*は、プロセスの時間が転送呼び出しの中で消えている状態。ページング可能なホストメモリからコピーしている(呼び出しごとに止まる)か、バッチが小さい。pinned メモリかバッチの拡大が効きます。*GPU と CPU*は、GPU が働くのは時間の一部で、残りはプロセスが CPU で計算している状態。前処理・トークナイズ・Python のオーバーヘッドが次の上限です。*CPU が上限*はその GPU がほぼ遊んでいる版。*別の待ち*は CPU でも CUDA 呼び出しの中でもない状態で、I/O、ロック、入力を待っています。*何もしていない*は、モデルを載せたまま要求がなく VRAM を持っているだけ。温度のタイルが「クロックが抑えられている」と言っていれば、「稼働しているのに遅い」GPU の説明になります。
 
+### 履歴(`/history`)
+
+![履歴: 直近 1 時間、領域ごとに 1 行。出来事は帯、代表値は線。18:05 のディスクの試験、ネットワーク行の 5 分ごとの IPv6 チェック、18:32 と 18:35 の DNS の試験](img/ja-history.png)
+
+*何か。* サーバーの DB から見た直近 1 / 6 / 24 時間。領域ごとに 1 行で、その領域の出来事をレベルの色の帯に、代表値を線にします(CPU 待ち p99、回収停止、稼働中の VM、ディスク p99、再送/秒、DNS p99、GPU 稼働率)。サンプルはサーバー側で数百点に畳むので、ヒストグラムは点ごとに正しいパーセンタイルのままです。
+
+*使い方。* **いつ**・**どこで**を見つけます(「3:05 にディスクと DNS の帯が同時に出ている」)。次に**その行のその時刻をクリック**すると、その領域の画面が前後 5 分(`/disk?at=…`)で開きます。DB から 1 秒単位の細かさで、上にその旨の帯と、ライブ・履歴に戻るリンクが出ます。下の出来事の一覧はこの期間に絞られます。
+
+![過去を表示している領域の画面: 帯と、18:34〜18:39 の DNS の画面](img/ja-history-past.png)
+
+*限界。* DB が 1 秒ごとのサンプルを持つのは 24 時間(`-retention`)なので、いまはそこまでです。24 時間の表示は読み込みに数秒かかります。過去の画面のタイル(「直近 5 秒」「直近 5 分」)は表示している窓の終わりを指します。ダッシュボード、設定、履歴そのものは常にライブです。
+
 ### すべてのパネル(`/all`)
 
 上の画面のパネルを 1 ページに縦に並べ、ジャンプリンク付き。クリックよりスクロールしたいときに。
@@ -364,7 +376,7 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 }
 ```
 
-API(断りがなければ `GET`): `/api/settings`(`PUT` で置き換え。`{"ui":{"lang":"ja"}}` のような部分的な文書は今の設定に重ねる。`DELETE` で既定に戻す)、`/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn|dnslat`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
+API(断りがなければ `GET`): `/api/history?host=&probe=&from=&to=&bucket=`(from/to は Unix ms、bucket は秒。1 = 生のサンプル、最長 30 分)、`/api/history/events?host=&from=&to=`、`/api/settings`(`PUT` で置き換え。`{"ui":{"lang":"ja"}}` のような部分的な文書は今の設定に重ねる。`DELETE` で既定に戻す)、`/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn|dnslat`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
 
 ## 9. 用語集
 

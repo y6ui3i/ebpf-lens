@@ -11,6 +11,10 @@ import { Link, matchRoute, usePath } from "./lib/router";
 import { VM_AREA_KINDS, knownVms, lifecycleFrom } from "./lib/vms";
 import { useSettings } from "./lib/useSettings";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { HistoryPanel } from "./components/HistoryPanel";
+import { useAt, useHistoryWindow } from "./lib/history";
+import { formatTime } from "./lib/i18n";
+import { Link as RouteLink } from "./lib/router";
 import { useI18n, type Key } from "./lib/i18n";
 import { MenuButton, Nav, type NavVm } from "./components/Nav";
 import { LensSummary } from "./components/LensSummary";
@@ -54,7 +58,14 @@ export default function App() {
   const [picked, setPicked] = useState<string>();
   const host = picked ?? hosts.data?.[0]?.name;
   // Keep receiving outside the screens, so the live view does not break when switching screens
-  const { samples: byProbe, events, incidents, dropped, status } = useLiveHost(host, PROBES, WINDOW);
+  const { samples: liveByProbe, events: liveEvents, incidents, dropped, status } = useLiveHost(host, PROBES, WINDOW);
+  // "?at=<ms>" on a per-area screen shows the 5 minutes around that moment from the DB instead of live data
+  // (the history screen links there). The dashboard, the history and the settings stay live
+  const at = useAt();
+  const pastEligible = at != null && path !== "/" && path !== "/history" && path !== "/settings";
+  const past = useHistoryWindow(host, pastEligible ? at : null, PROBES);
+  const byProbe = past.active ? past.byProbe : liveByProbe;
+  const events = past.active ? past.events : liveEvents;
   const samples = byProbe.runqlat ?? EMPTY;
   const memSamples = byProbe.memstall ?? EMPTY;
   const vmSamples = byProbe.vms ?? EMPTY;
@@ -63,8 +74,9 @@ export default function App() {
   const netSamples = byProbe.tcpconn ?? EMPTY;
   const dnsSamples = byProbe.dnslat ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
-  // The visible range follows the CPU samples; the memory screen uses the same 5 minutes
-  const win = useMemo(() => timeWindow(samples, WINDOW), [samples]);
+  // The visible range follows the CPU samples (live) or is the fixed window around the moment (past)
+  const liveWin = useMemo(() => timeWindow(samples, WINDOW), [samples]);
+  const win = past.active ? past.win : liveWin;
   // Levels come from the server's incidents (a periodic tick keeps the time-based ones fresh while nothing arrives)
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -135,8 +147,11 @@ export default function App() {
       <main className="mx-auto max-w-6xl px-4 py-6">
         {/* The screen name is shown in the top-bar breadcrumb, so this heading is for screen readers only */}
         <h1 className="sr-only">{title}</h1>
+        {past.active && at != null && <PastBanner at={at} path={path} loading={past.loading} />}
         {path === "/settings" ? (
           <SettingsPanel />
+        ) : path === "/history" && host ? (
+          <HistoryPanel host={host} incidents={incidents} />
         ) : !host ? (
           <p style={{ color: "var(--text-secondary)" }}>
             {t("app.waitingPre")}<code>ebpflens-agent -server …</code>{t("app.waitingPost")}
@@ -202,6 +217,21 @@ export default function App() {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+// Shown above a per-area screen that displays the past: which moment, and the way back to live
+function PastBanner({ at, path, loading }: { at: number; path: string; loading: boolean }) {
+  const { lang, t } = useI18n();
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg px-4 py-2 text-sm" style={{ background: "var(--surface-1)", border: "1px solid var(--status-warning)" }}>
+      <span aria-hidden style={{ color: "var(--status-warning)" }}>⏱</span>
+      <span>{t(loading ? "history.pastLoading" : "history.past", {
+        from: formatTime(lang, new Date(at - 150_000).toISOString()), to: formatTime(lang, new Date(at + 150_000).toISOString()),
+      })}</span>
+      <RouteLink to={path} className="underline">{t("history.backToLive")}</RouteLink>
+      <RouteLink to="/history" className="underline" style={{ color: "var(--text-secondary)" }}>{t("history.backToHistory")}</RouteLink>
     </div>
   );
 }

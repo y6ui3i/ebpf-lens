@@ -219,6 +219,10 @@ Measured on the test host (RTX 2070, driver 595):
 
 The GPU screen (`/gpu`) shows the tiles, GPU busy and VRAM over time with the idle and VRAM lines, a heatmap of how long each copy or sync call waited, and the per-process table with the verdicts; the dashboard has a **GPU** row in the USE grid (busy, VRAM, clock throttling) and a **GPU** line in the Lens Summary. A host without an NVIDIA driver sends no GPU samples and shows no GPU row. Only the first GPU is watched; per-process GPU utilization is not available on GeForce (NVML returns Not Found), which is why the verdict reasons from what the process was doing instead.
 
+## History
+
+`/history` shows the last 1, 6 or 24 hours from the DB: one row per area, incidents as bands in their level's color and the area's key value as a line, so "at 03:05 the disk and DNS both lit up" is one glance. Clicking a moment on a row opens that area's own screen for the 5 minutes around it (`?at=`), at full one-second detail, with a banner and a way back to live. The server folds samples into a few hundred buckets (`internal/history`: histograms are summed, so percentiles stay true); reaching past 24 hours needs rollups, which is the next step.
+
 ## The report to send
 
 The Lens Summary (and every VM page) has **Report to send**: one plain-text message with the situation, the next step and its reason, whose problem it probably is, the evidence and the recent incidents — the message ADR 0001 says people without the background struggle most to write. It is assembled by the same fixed rules as the screen; when a rule cannot decide, it says *unknown*.

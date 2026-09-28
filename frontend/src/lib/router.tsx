@@ -9,6 +9,7 @@ export type Route = { path: string; labelKey: Key };
 export const ROUTES: Route[] = [
   { path: "/", labelKey: "page.dashboard" },
   { path: "/all", labelKey: "page.all" },
+  { path: "/history", labelKey: "page.history" },
   { path: "/settings", labelKey: "page.settings" },
   { path: "/vms", labelKey: "page.vms" },
   { path: "/cpu", labelKey: "page.cpu" },
@@ -61,7 +62,7 @@ export function usePath(): string {
 }
 
 export function navigate(to: string) {
-  if (to === window.location.pathname) return;
+  if (to === window.location.pathname + window.location.search) return;
   window.history.pushState(null, "", to);
   window.dispatchEvent(new PopStateEvent("popstate"));
   window.scrollTo(0, 0);

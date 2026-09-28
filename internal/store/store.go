@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 type key struct{ host, probe string }

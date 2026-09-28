@@ -15,8 +15,8 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/probe"
 )
 
 const (

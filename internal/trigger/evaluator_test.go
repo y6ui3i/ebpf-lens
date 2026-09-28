@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // recorder keeps every upsert so a test can check the whole story of an incident, not just its final state.

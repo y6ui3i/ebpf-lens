@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // Notifier posts incident transitions (open, escalate, close) to a webhook. Progress updates are not sent.

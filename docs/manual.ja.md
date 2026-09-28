@@ -30,7 +30,7 @@ eBPFLens は Linux ホストをカーネルの中から eBPF で見て、見え�
 ### ビルド
 
 ```bash
-git clone https://github.com/yoshiharu-ishii/ebpf-lens && cd ebpf-lens
+git clone https://github.com/y6ui3i/ebpf-lens && cd ebpf-lens
 make web      # Node のある機械で。TS の型を生成し、画面を internal/webui/dist にビルド
 make build    # Linux で。このカーネルの BTF から vmlinux.h → BPF オブジェクト → bin/ebpflens-agent と bin/ebpflens-server
 ```

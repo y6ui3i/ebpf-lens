@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
+	"github.com/y6ui3i/ebpf-lens/internal/trigger"
 )
 
 // UI is what the browser needs from the server: the language everyone sees and the VM lifecycle bounds.

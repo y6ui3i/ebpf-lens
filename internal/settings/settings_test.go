@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
+	"github.com/y6ui3i/ebpf-lens/internal/trigger"
 )
 
 type memStore struct{ body *string }

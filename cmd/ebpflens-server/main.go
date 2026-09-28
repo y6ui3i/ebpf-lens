@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/server"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/settings"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/store"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/webui"
+	"github.com/y6ui3i/ebpf-lens/internal/server"
+	"github.com/y6ui3i/ebpf-lens/internal/settings"
+	"github.com/y6ui3i/ebpf-lens/internal/store"
+	"github.com/y6ui3i/ebpf-lens/internal/trigger"
+	"github.com/y6ui3i/ebpf-lens/internal/webui"
 )
 
 func main() {

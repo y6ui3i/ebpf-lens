@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // Prefix marks a per-process stat that belongs to a VM ("vm:<name>" in ProcStat.Comm).

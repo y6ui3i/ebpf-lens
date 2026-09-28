@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // After saving, closing, and reopening, the history for the UI window is restored into the Store.

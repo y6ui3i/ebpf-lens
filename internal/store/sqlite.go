@@ -13,7 +13,7 @@ import (
 
 	_ "modernc.org/sqlite" // pure Go driver with no cgo, so the project can still ship as a single binary
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // SQL is limited to syntax that works on both SQLite and PostgreSQL (so we can move to PostgreSQL once it grows).

@@ -11,8 +11,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/probe"
 )
 
 // MaxSlots must match MAX_SLOTS on the BPF side (the same log2 µs slots as runqlat).

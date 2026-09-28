@@ -5,7 +5,7 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // NVML reads the first GPU's own counters through the driver's management library. go-nvml opens

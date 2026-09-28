@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/settings"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/store"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/trigger"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/settings"
+	"github.com/y6ui3i/ebpf-lens/internal/store"
+	"github.com/y6ui3i/ebpf-lens/internal/trigger"
 )
 
 const maxSlots = 64

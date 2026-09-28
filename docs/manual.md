@@ -30,7 +30,7 @@ Language: **EN / 日本語** in the top bar. Host: the selector in the top bar (
 ### Build
 
 ```bash
-git clone https://github.com/yoshiharu-ishii/ebpf-lens && cd ebpf-lens
+git clone https://github.com/y6ui3i/ebpf-lens && cd ebpf-lens
 make web      # on a machine with Node: generates TS types, builds the UI into internal/webui/dist
 make build    # on Linux: vmlinux.h from this kernel's BTF, BPF objects, then bin/ebpflens-agent and bin/ebpflens-server
 ```

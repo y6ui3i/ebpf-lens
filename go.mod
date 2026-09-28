@@ -1,4 +1,4 @@
-module github.com/yoshiharu-ishii/ebpf-lens
+module github.com/y6ui3i/ebpf-lens
 
 go 1.25.0
 

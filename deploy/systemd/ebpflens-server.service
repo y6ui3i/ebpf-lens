@@ -1,6 +1,6 @@
 [Unit]
 Description=eBPFLens server (API, SSE, UI, SQLite)
-Documentation=https://github.com/yoshiharu-ishii/ebpf-lens
+Documentation=https://github.com/y6ui3i/ebpf-lens
 After=network-online.target
 Wants=network-online.target
 

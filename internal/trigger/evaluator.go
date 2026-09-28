@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
 )
 
 // Incident kinds and levels. Kept as plain strings because they travel as JSON to the UI and to webhooks.

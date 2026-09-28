@@ -1,6 +1,6 @@
 [Unit]
 Description=eBPFLens agent (eBPF probes)
-Documentation=https://github.com/yoshiharu-ishii/ebpf-lens
+Documentation=https://github.com/y6ui3i/ebpf-lens
 After=network-online.target ebpflens-server.service
 Wants=network-online.target
 

@@ -18,15 +18,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/model"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/biolat"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/gpu"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/memstall"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/proclife"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/runqlat"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/probe/tcpconn"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/procfs"
-	"github.com/yoshiharu-ishii/ebpf-lens/internal/vm"
+	"github.com/y6ui3i/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/biolat"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/memstall"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/proclife"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/runqlat"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/tcpconn"
+	"github.com/y6ui3i/ebpf-lens/internal/procfs"
+	"github.com/y6ui3i/ebpf-lens/internal/vm"
 )
 
 func main() {

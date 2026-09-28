@@ -24,8 +24,9 @@ type Config struct {
 // DNSRule: Fails is the number of failed lookups in the last 10 s (a burst of NXDOMAINs lasts one second);
 // Latency is the getaddrinfo p99 in µs. A p99 at seconds is a resolver that does not answer and gets retried.
 type DNSRule struct {
-	Fails   ExcursionRule `json:"fails"`
-	Latency ExcursionRule `json:"latency"`
+	Fails             ExcursionRule `json:"fails"`
+	FailSpreadSeconds int           `json:"failSpreadSeconds"` // as for NetworkRule
+	Latency           ExcursionRule `json:"latency"`
 }
 
 // NetworkRule: ConnectFails is the number of failed connects in the last 10 s (a burst of refused connects lasts
@@ -33,9 +34,10 @@ type DNSRule struct {
 // A connect p99 at 1 s means the SYN itself was retransmitted (the initial RTO), i.e. packets to that destination
 // are being lost, so the warning sits there.
 type NetworkRule struct {
-	ConnectFails   ExcursionRule `json:"connectFails"`
-	ConnectLatency ExcursionRule `json:"connectLatency"`
-	Retrans        ExcursionRule `json:"retrans"`
+	ConnectFails      ExcursionRule `json:"connectFails"`
+	FailSpreadSeconds int           `json:"failSpreadSeconds"` // failures must fall in at least this many of the 10 s (a one-second burst is not an outage)
+	ConnectLatency    ExcursionRule `json:"connectLatency"`
+	Retrans           ExcursionRule `json:"retrans"`
 }
 
 // GPURule: the GPU is "starved" when its utilization is below IdleUtil while a CUDA process is busy on the CPU
@@ -89,15 +91,20 @@ func Default() Config {
 		// SSD and normal on a busy HDD (tune per host). 100 ms is slow for anything
 		Disk: ExcursionRule{Caution: 10_000, Warning: 100_000, MinSeconds: 3, MaxGapSeconds: 2},
 		Network: NetworkRule{
-			ConnectFails:   ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
-			ConnectLatency: ExcursionRule{Caution: 200_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
-			Retrans:        ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 5},
+			ConnectFails: ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
+			// Measured on the test host: NetworkManager's connectivity check fails 12 IPv6 connects within one second
+			// every 5 minutes (no IPv6 route) — 103 of 118 incidents in a day before this rule. A down dependency fails
+			// second after second, so 3 of 10 seconds separates the two
+			FailSpreadSeconds: 3,
+			ConnectLatency:    ExcursionRule{Caution: 200_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
+			Retrans:           ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 5},
 		},
 		// An answer from the local stub (systemd-resolved) takes ~1 ms and one from upstream ~10-50 ms; 100 ms is slow,
 		// and 1 s is a server that did not answer and was retried
 		DNS: DNSRule{
-			Fails:   ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
-			Latency: ExcursionRule{Caution: 100_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
+			Fails:             ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
+			FailSpreadSeconds: 3,
+			Latency:           ExcursionRule{Caution: 100_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
 		},
 	}
 }
@@ -117,6 +124,11 @@ func Load(path string) (Config, error) {
 
 // Validate rejects values that would make the rules meaningless (e.g. warning below caution).
 func (c Config) Validate() error {
+	for name, n := range map[string]int{"network.failSpreadSeconds": c.Network.FailSpreadSeconds, "dns.failSpreadSeconds": c.DNS.FailSpreadSeconds} {
+		if n < 1 || n > 10 {
+			return fmt.Errorf("%s must be between 1 and 10 (the window is 10 s)", name)
+		}
+	}
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}

@@ -78,8 +78,7 @@ type hostState struct {
 	gpuLast                      gpuStarve // what the latest gpu sample said, copied onto the incident whenever it is published
 	disk                         excursion
 	netFail, netSlow, netRetrans excursion
-	failRing                     [failWindow]uint64 // failed connects per second, last failWindow seconds (a burst of refused connects is an incident even if it lasts one second)
-	failRingSec                  int64
+	netRing                      failRing // failed connects per second over the last failWindow seconds
 	dnsFail, dnsSlow             excursion
 	dnsRing                      failRing
 }
@@ -106,6 +105,29 @@ func (r *failRing) add(t time.Time, n uint64) uint64 {
 		sum += v
 	}
 	return sum
+}
+
+// spread is how many of the window's seconds had at least one failure. A burst (a connectivity check trying a
+// dozen unreachable IPv6 addresses at once, then falling back to IPv4) fills one second; a dependency that is down
+// fails again and again, second after second.
+func (r *failRing) spread() int {
+	n := 0
+	for _, v := range r.ring {
+		if v > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// windowed turns a failure count into the value a windowed rule judges: the count, or 0 while the failures
+// are confined to fewer than minSeconds distinct seconds.
+func windowed(r *failRing, t time.Time, fails uint64, minSeconds int) float64 {
+	n := r.add(t, fails)
+	if r.spread() < minSeconds {
+		return 0
+	}
+	return float64(n)
 }
 
 // failWindow is how many seconds of failed connects net_connect_fail sums over.
@@ -218,7 +240,7 @@ func (e *Evaluator) OnSample(x model.Sample) {
 			fails += d.Fails
 			retrans += d.Retrans
 		}
-		e.judge(&h.netFail, x.Host, KindNetConnectFail, "", e.cfg.Network.ConnectFails, float64(h.failsInWindow(x.Time, fails)), x.Time, e.destDecorator(x.Host, "fails"))
+		e.judge(&h.netFail, x.Host, KindNetConnectFail, "", e.cfg.Network.ConnectFails, windowed(&h.netRing, x.Time, fails, e.cfg.Network.FailSpreadSeconds), x.Time, e.destDecorator(x.Host, "fails"))
 		e.judge(&h.netRetrans, x.Host, KindNetRetrans, "", e.cfg.Network.Retrans, float64(retrans)/sec, x.Time, e.destDecorator(x.Host, "retrans"))
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
 			e.judge(&h.netSlow, x.Host, KindNetConnectSlow, "", e.cfg.Network.ConnectLatency, p99, x.Time, e.destDecorator(x.Host, "slow"))
@@ -231,7 +253,7 @@ func (e *Evaluator) OnSample(x model.Sample) {
 		for _, n := range x.DNS.Names {
 			fails += n.Fails
 		}
-		e.judge(&h.dnsFail, x.Host, KindDNSFail, "", e.cfg.DNS.Fails, float64(h.dnsRing.add(x.Time, fails)), x.Time, e.nameDecorator(x.Host, "fails"))
+		e.judge(&h.dnsFail, x.Host, KindDNSFail, "", e.cfg.DNS.Fails, windowed(&h.dnsRing, x.Time, fails, e.cfg.DNS.FailSpreadSeconds), x.Time, e.nameDecorator(x.Host, "fails"))
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
 			e.judge(&h.dnsSlow, x.Host, KindDNSSlow, "", e.cfg.DNS.Latency, p99, x.Time, e.nameDecorator(x.Host, "slow"))
 		}
@@ -278,25 +300,6 @@ func (h *hostState) gpuDecorator() func(*model.Incident) {
 		}
 		i.Subject, i.GPUUtil, i.CPUShare, i.CopyShare = s.comm, s.util, s.cpuShare, s.copyShare
 	}
-}
-
-// failsInWindow adds this second's failed connects to the ring and returns the total over the last failWindow seconds.
-func (h *hostState) failsInWindow(t time.Time, fails uint64) uint64 {
-	sec := t.Unix()
-	if h.failRingSec == 0 || sec-h.failRingSec >= failWindow {
-		h.failRing = [failWindow]uint64{}
-	} else {
-		for s := h.failRingSec + 1; s <= sec; s++ {
-			h.failRing[s%failWindow] = 0 // seconds that passed without a sample
-		}
-	}
-	h.failRingSec = sec
-	h.failRing[sec%failWindow] += fails
-	var sum uint64
-	for _, v := range h.failRing {
-		sum += v
-	}
-	return sum
 }
 
 // --- which names ---

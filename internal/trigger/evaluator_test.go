@@ -566,15 +566,15 @@ func TestNetConnectFailNamesTheDestination(t *testing.T) {
 		h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
 		e.OnSample(x)
 	}
-	// 4 failures per second: the 10 s window holds 4, then 8 (opens: caution is 5 in 10 s). The third second
-	// (12) is progress, which is published every 5 s, so the last upsert still says 8
-	if len(r.got) != 1 || r.last().Kind != KindNetConnectFail || r.last().Level != LevelCaution || r.last().Peak != 8 || !r.got[0].Start.Equal(t0.Add(time.Second)) {
-		t.Fatalf("expected a net_connect_fail caution opening at second 1 with peak 8, got %+v", r.got)
+	// 4 failures per second: the window holds 4, 8, 12 — but the failures must fall in 3 distinct seconds, so it
+	// opens at the third second, with 12
+	if len(r.got) != 1 || r.last().Kind != KindNetConnectFail || r.last().Level != LevelCaution || r.last().Peak != 12 || !r.got[0].Start.Equal(t0.Add(2*time.Second)) {
+		t.Fatalf("expected a net_connect_fail caution opening at second 2 with peak 12, got %+v", r.got)
 	}
 	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "10.0.0.5:5432" || c[0].Share != 1 {
 		t.Fatalf("culprits: %+v", c)
 	}
-	if text := Text("open", r.last()); !contains(text, "connects are failing (8 in 10 s") || !contains(text, "mostly to 10.0.0.5:5432 (100%)") {
+	if text := Text("open", r.last()); !contains(text, "connects are failing (12 in 10 s") || !contains(text, "mostly to 10.0.0.5:5432 (100%)") {
 		t.Fatalf("text: %s", text)
 	}
 }
@@ -619,11 +619,14 @@ func TestNetConnectFailGroupsByPrefixWhenNoDestinationStandsOut(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		dests = append(dests, model.NetDest{Addr: fmt.Sprintf("2620:2d:4002:1::%d", 0x1000+i), Port: 80, Fails: 1})
 	}
-	x := netSample(0, -1, dests)
-	h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
-	e.OnSample(x)
+	// The same twelve failures, repeated over three seconds (a check that keeps failing, not a single burst)
+	for sec := 0; sec < 3; sec++ {
+		x := netSample(sec, -1, dests)
+		h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
+		e.OnSample(x)
+	}
 	if len(r.got) != 1 {
-		t.Fatalf("expected one incident (12 failures in 10 s), got %+v", r.got)
+		t.Fatalf("expected one incident, got %+v", r.got)
 	}
 	c := r.last().Culprits
 	if len(c) != 2 || c[0].Name != "2620:2d:4000:1::/64" || c[0].Share < 0.66 || c[0].Share > 0.67 || c[1].Name != "2620:2d:4002:1::/64" {
@@ -649,9 +652,11 @@ func TestDNSFailNamesTheNameAndError(t *testing.T) {
 	e := New(Default(), r)
 	h := &fakeHistory{samples: map[string][]model.Sample{}}
 	e.SetHistory(h)
-	x := dnsSample(0, 10, []model.DNSName{{Name: "db.internal", Lookups: 6, Fails: 6, LastError: "NONAME"}, {Name: "github.com", Lookups: 2}})
-	h.samples["dnslat"] = append(h.samples["dnslat"], x)
-	e.OnSample(x)
+	for sec := 0; sec < 3; sec++ {
+		x := dnsSample(sec, 10, []model.DNSName{{Name: "db.internal", Lookups: 2, Fails: 2, LastError: "NONAME"}, {Name: "github.com", Lookups: 2}})
+		h.samples["dnslat"] = append(h.samples["dnslat"], x)
+		e.OnSample(x)
+	}
 	if len(r.got) != 1 || r.last().Kind != KindDNSFail || r.last().Peak != 6 {
 		t.Fatalf("expected a dns_fail at 6 in 10 s, got %+v", r.got)
 	}
@@ -689,14 +694,34 @@ func TestDNSFailGroupsByParentDomainWhenNoNameStandsOut(t *testing.T) {
 	for i := 1; i <= 6; i++ {
 		names = append(names, model.DNSName{Name: fmt.Sprintf("slow-%d.example.com", i), Lookups: 1, Fails: 1, LastError: "AGAIN"})
 	}
-	x := dnsSample(0, 10, names)
-	h.samples["dnslat"] = append(h.samples["dnslat"], x)
-	e.OnSample(x)
+	for sec := 0; sec < 3; sec++ {
+		x := dnsSample(sec, 10, names)
+		h.samples["dnslat"] = append(h.samples["dnslat"], x)
+		e.OnSample(x)
+	}
 	c := r.last().Culprits
 	if len(c) != 2 || c[0].Name != "*.internal.invalid (NONAME)" || c[1].Name != "*.example.com (AGAIN)" {
 		t.Fatalf("culprits: %+v", c)
 	}
 	if parentDomain("example.com") != "example.com" || parentDomain("a.b.example.com.") != "b.example.com" {
 		t.Fatalf("parentDomain: %q %q", parentDomain("example.com"), parentDomain("a.b.example.com."))
+	}
+}
+
+// NetworkManager's connectivity check on a host without an IPv6 route: twelve IPv6 connects fail within one second
+// every five minutes and the IPv4 fallback succeeds. A burst confined to one second is not an outage.
+func TestOneSecondBurstOfFailedConnectsIsNotAnIncident(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	var dests []model.NetDest
+	for i := 0; i < 12; i++ {
+		dests = append(dests, model.NetDest{Addr: fmt.Sprintf("2620:2d:4000:1::%d", 0x30+i), Port: 443, Fails: 1})
+	}
+	e.OnSample(netSample(0, -1, dests))
+	for sec := 1; sec < 12; sec++ {
+		e.OnSample(netSample(sec, -1, nil))
+	}
+	if len(r.got) != 0 {
+		t.Fatalf("a one-second burst must not open an incident, got %+v", r.got)
 	}
 }

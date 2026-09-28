@@ -120,6 +120,12 @@ export function SettingsPanel() {
         <Field label={t("settings.gpuIdle")}>
           <Num value={draft.triggers.gpu.idleUtil} step={0.05} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, gpu: { ...d.triggers.gpu, idleUtil: v } } }))} />
         </Field>
+        <Field label={t("settings.netSpread")}>
+          <Num value={draft.triggers.network.failSpreadSeconds} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, network: { ...d.triggers.network, failSpreadSeconds: v } } }))} />
+        </Field>
+        <Field label={t("settings.dnsSpread")}>
+          <Num value={draft.triggers.dns.failSpreadSeconds} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, dns: { ...d.triggers.dns, failSpreadSeconds: v } } }))} />
+        </Field>
         <Field label={t("settings.agentDown")}>
           <Num value={draft.triggers.agentDown.afterSeconds} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, agentDown: { afterSeconds: v } } }))} />
         </Field>

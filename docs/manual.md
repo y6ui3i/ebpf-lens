@@ -283,10 +283,10 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **GPU idle while its process works elsewhere** (`gpu_starved`) | the GPU below 20 % busy while a CUDA process is ≥ 50 % busy on the CPU or inside copy calls, for 10 s | caution; warning at ≥ 90 % | the GPU gets busy, or the process quiets down, for more than 5 s | The GPU is waiting for the process, not the other way round. The incident says which: on the CPU (preprocessing, tokenizing, Python) or copying (pageable memory, small batches). Fix that side; a bigger GPU will not help. |
 | **Slow disk I/O** (`disk_slow`) | block I/O latency p99 ≥ 10 ms for 3 s | caution; warning once ≥ 100 ms for 3 s | below 10 ms for more than 2 s | The disk is slower than it should be, or a queue is building. The incident names who issued most of the bytes (group rule as for CPU). If nobody stands out and traffic is low, suspect the device. |
 | **Disk I/O error** (`disk_error`) | a block device completed I/O with an error | warning | instant | Check `dmesg` and SMART for that device now; an error is the first sign of a failing disk or a bad cable. |
-| **TCP connects failing** (`net_connect_fail`) | ≥ 5 failed connects in the last 10 s | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the destinations that took most of the failures. Refused means nothing listens (the service is down or the port is wrong); unreachable or timed out means the path or a firewall. |
+| **TCP connects failing** (`net_connect_fail`) | ≥ 5 failed connects in the last 10 s, falling in at least 3 of those seconds (a one-second burst — a check trying a dozen unreachable IPv6 addresses before falling back to IPv4 — is not an outage) | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the destinations that took most of the failures. Refused means nothing listens (the service is down or the port is wrong); unreachable or timed out means the path or a firewall. |
 | **TCP connects slow** (`net_connect_slow`) | connect p99 ≥ 200 ms for 3 s | caution; warning at ≥ 1 s | below 200 ms for more than 5 s | At 1 s the SYN itself was retransmitted: packets to that destination are being lost. Below that, a slow path or an overloaded peer. |
 | **TCP retransmissions** (`net_retrans`) | ≥ 10 retransmitted segments/s for 3 s | caution; warning at ≥ 100/s | below 10/s for more than 5 s | Packet loss or congestion toward the named destinations; "clients at addr" means the loss is on connections into this host. Check the link, the switch port, and the peer. |
-| **Name lookups failing** (`dns_fail`) | ≥ 5 failed `getaddrinfo` calls in the last 10 s | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the names and the error; when no single name stands out, the parent domain (`*.internal.example (NONAME)`). *No such name*: fix the name or the record. *No answer in time*: the DNS server. |
+| **Name lookups failing** (`dns_fail`) | ≥ 5 failed `getaddrinfo` calls in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the names and the error; when no single name stands out, the parent domain (`*.internal.example (NONAME)`). *No such name*: fix the name or the record. *No answer in time*: the DNS server. |
 | **Name lookups slow** (`dns_slow`) | lookup p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Check `resolvectl status` and the upstream server; seconds mean a server that did not answer and was retried. |
 | **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
@@ -368,10 +368,10 @@ Trigger file (values shown are the defaults):
                 "starved": {"caution": 0.5,  "warning": 0.9,  "minSeconds": 10, "maxGapSeconds": 5},
                 "vram":    {"caution": 0.9,  "warning": 0.97, "minSeconds": 3,  "maxGapSeconds": 2}},
   "disk":      {"caution": 10000, "warning": 100000, "minSeconds": 3, "maxGapSeconds": 2},
-  "network":   {"connectFails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
+  "network":   {"connectFails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
                 "connectLatency": {"caution": 200000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5},
                 "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}},
-  "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
+  "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
                 "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
 }
 ```

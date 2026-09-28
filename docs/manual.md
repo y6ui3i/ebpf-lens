@@ -230,6 +230,16 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* **Failed** connects are the other side or the path: refused (nothing listens there), unreachable, or timed out. **Retransmissions** to one destination are packet loss or congestion on that path; retransmissions to "clients at addr" are on connections *into* this host. A **connect p99 at 1 s or 3 s** is the tell-tale of loss: the initial SYN was dropped and retransmitted after the 1 s timeout (then 3 s), so a destination that is "slow" at exactly those values is lossy, not far. Retransmits are counted per destination only; the kernel does them without a process context.
 
+### DNS (`/dns`)
+
+![DNS: lookup time over time, failing names with their error, and who looked them up](img/ja-dns.png)
+
+*What it is.* Name resolution as applications experience it: a uprobe on glibc's `getaddrinfo` records each lookup's name, how long the call took, and its result. `/etc/hosts`, the local cache and upstream retries are all inside the time.
+
+*What you see.* Tiles (lookups/s, lookup p99, failed lookups, distinct names), a heatmap of lookup time, the p50/p99 trend with the caution and warning lines, the names (with the error of the last failure), and who looked them up.
+
+*Reading it.* **No such name** (`EAI_NONAME`) is a wrong or retired name, or a missing record — fix the configuration or the zone. **No answer in time** (`EAI_AGAIN`) is a DNS server that is down or unreachable. A local cache answers in about 1 ms and an upstream server in tens of ms; a p99 of **seconds** is a server that did not answer and was retried. Programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen.
+
 ### GPU (`/gpu`)
 
 ![GPU: busy and VRAM over time, the wait per CUDA call, and the per-process verdicts (an OCR job in a container keeping the GPU 66 % busy while using 131 % of a CPU; the clocks held back by the power cap)](img/en-gpu.png)
@@ -264,6 +274,8 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **TCP connects failing** (`net_connect_fail`) | ≥ 5 failed connects in the last 10 s | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the destinations that took most of the failures. Refused means nothing listens (the service is down or the port is wrong); unreachable or timed out means the path or a firewall. |
 | **TCP connects slow** (`net_connect_slow`) | connect p99 ≥ 200 ms for 3 s | caution; warning at ≥ 1 s | below 200 ms for more than 5 s | At 1 s the SYN itself was retransmitted: packets to that destination are being lost. Below that, a slow path or an overloaded peer. |
 | **TCP retransmissions** (`net_retrans`) | ≥ 10 retransmitted segments/s for 3 s | caution; warning at ≥ 100/s | below 10/s for more than 5 s | Packet loss or congestion toward the named destinations; "clients at addr" means the loss is on connections into this host. Check the link, the switch port, and the peer. |
+| **Name lookups failing** (`dns_fail`) | ≥ 5 failed `getaddrinfo` calls in the last 10 s | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the names and the error; when no single name stands out, the parent domain (`*.internal.example (NONAME)`). *No such name*: fix the name or the record. *No answer in time*: the DNS server. |
+| **Name lookups slow** (`dns_slow`) | lookup p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Check `resolvectl status` and the upstream server; seconds mean a server that did not answer and was retried. |
 | **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
 ![Dashboard (Japanese) during the same minute: the headline says a VM is waiting for host CPU, the CPU line names the three-VM group and its 76 %, and every incident row says who took the CPU](img/ja-dashboard-steal.png)
@@ -304,6 +316,7 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **Thresholds are provisional**, chosen from one 8-core machine. Tune them (§8) to your hosts.
 - **Buffered writes are attributed to the kernel's writeback threads** (`kworker`, `jbd2`), not to the process that wrote; reads and direct writes are attributed to the process. Disk latency includes queueing time, so a saturated disk reads as slow even when healthy.
 - **Retransmissions are per destination only** (no process: the kernel retransmits without one), and inbound connections are folded into one row per client address. Only TCP is watched; UDP and ICMP are not.
+- **DNS is measured at glibc's `getaddrinfo`**: programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen, and names are kept to their first 63 bytes.
 - **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
 - **Windows is not planned** unless there is demand.
@@ -345,11 +358,13 @@ Trigger file (values shown are the defaults):
   "disk":      {"caution": 10000, "warning": 100000, "minSeconds": 3, "maxGapSeconds": 2},
   "network":   {"connectFails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
                 "connectLatency": {"caution": 200000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5},
-                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}}
+                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}},
+  "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
+                "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
 }
 ```
 
-API (all `GET` unless noted): `/api/settings` (`PUT` replaces, merging a partial document such as `{"ui":{"lang":"ja"}}` into the current one; `DELETE` resets), `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
+API (all `GET` unless noted): `/api/settings` (`PUT` replaces, merging a partial document such as `{"ui":{"lang":"ja"}}` into the current one; `DELETE` resets), `/api/hosts`, `/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn|dnslat`, `/api/events?host=`, `/api/incidents?host=` (newest first; ongoing ones have no `end`), `/api/triggers`, `/api/stream?host=` (SSE: `sample`, `events`, `incident`); agents `POST /api/ingest` and `/api/events`.
 
 ## 9. Glossary
 

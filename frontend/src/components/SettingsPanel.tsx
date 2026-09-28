@@ -51,6 +51,8 @@ export function SettingsPanel() {
     { key: "settings.rule.netFails", get: (tr) => tr.network.connectFails, set: (tr, r) => ({ ...tr, network: { ...tr.network, connectFails: r } }) },
     { key: "settings.rule.netLatency", get: (tr) => tr.network.connectLatency, set: (tr, r) => ({ ...tr, network: { ...tr.network, connectLatency: r } }) },
     { key: "settings.rule.netRetrans", get: (tr) => tr.network.retrans, set: (tr, r) => ({ ...tr, network: { ...tr.network, retrans: r } }) },
+    { key: "settings.rule.dnsFails", get: (tr) => tr.dns.fails, set: (tr, r) => ({ ...tr, dns: { ...tr.dns, fails: r } }) },
+    { key: "settings.rule.dnsLatency", get: (tr) => tr.dns.latency, set: (tr, r) => ({ ...tr, dns: { ...tr.dns, latency: r } }) },
     { key: "settings.rule.gpuStarved", get: (tr) => tr.gpu.starved, set: (tr, r) => ({ ...tr, gpu: { ...tr.gpu, starved: r } }), step: 0.05 },
     { key: "settings.rule.vram", get: (tr) => tr.gpu.vram, set: (tr, r) => ({ ...tr, gpu: { ...tr.gpu, vram: r } }), step: 0.01 },
   ];

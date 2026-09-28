@@ -21,6 +21,22 @@ type Sample struct {
 	GPU        *GPUStat   `json:"gpu,omitempty"`  // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
 	Disk       *DiskStat  `json:"disk,omitempty"` // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
 	Net        *NetStat   `json:"net,omitempty"`  // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
+	DNS        *DNSStat   `json:"dns,omitempty"`  // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
+}
+
+// DNSStat is one interval of name resolution (glibc getaddrinfo) per name. Procs on the same sample say who resolved.
+type DNSStat struct {
+	Names []DNSName `json:"names"`
+}
+
+// DNSName is one looked-up name during the interval (the first 63 bytes of it).
+type DNSName struct {
+	Name      string `json:"name"`
+	Lookups   uint64 `json:"lookups"`
+	Fails     uint64 `json:"fails"`
+	LatNs     uint64 `json:"latNs"`
+	LatMaxNs  uint64 `json:"latMaxNs"`
+	LastError string `json:"lastError,omitempty"` // EAI_* name of the last failure: "NONAME" (no such name), "AGAIN" (no answer in time), "FAIL", ...
 }
 
 // NetStat is one interval of outbound TCP activity per destination. Procs on the same sample say who connected.
@@ -159,6 +175,8 @@ type ProcStat struct {
 	WriteBytes uint64 `json:"writeBytes,omitempty"`
 	// tcpconn only. In tcpconn, Wait* means "connect latency of the connections this process opened"
 	ConnectFails uint64 `json:"connectFails,omitempty"`
+	// dnslat only. In dnslat, Wait* means "time spent in getaddrinfo"
+	LookupFails uint64 `json:"lookupFails,omitempty"`
 }
 
 // HostInfo is used for the list of hosts known to the server.
@@ -173,7 +191,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "dns_fail" | "dns_slow"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -209,6 +227,7 @@ type Incident struct {
 	Device string `json:"device,omitempty"`
 	// net_connect_fail / net_retrans: Peak is the rate per second; Culprits are the destinations ("addr:port") that took most of it.
 	// net_connect_slow: Peak is the connect latency p99 in µs; Culprits are the destinations with the slowest connects
+	// dns_fail: Peak is failed lookups in the last 10 s; Culprits are the names. dns_slow: Peak is the lookup p99 in µs
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

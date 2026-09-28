@@ -191,6 +191,14 @@ Three incidents, each naming the destinations that took most of the trouble (the
 
 Reproduced on the test host: six connects to a closed port → `net_connect_fail` naming `127.0.0.1:9 (100%)`; `tc qdisc add dev lo root netem loss 40%` while 40 curls hit the local server → connect p99 of 1–2 s (SYN retransmitted once or twice) and 40+ retransmits/s, both naming `127.0.0.1:8080`. Retransmits are counted per destination only: they happen in the kernel's context, where the owning process is not known.
 
+## Is it DNS?
+
+"It was DNS" is the oldest punchline in operations because name resolution sits in front of every connection and nobody measures it. eBPFLens puts a uprobe on glibc's **`getaddrinfo`** — the call applications actually make — and records, per second, the name, the time the call took and its result (`EAI_NONAME` = the name does not exist, `EAI_AGAIN` = no answer in time, …), per name and per process. Everything the resolver does underneath is inside that time: `/etc/hosts`, nsswitch, the local cache (systemd-resolved), and retries to an upstream server that does not answer.
+
+Two incidents: `dns_fail` (≥ 5 failed lookups in 10 s; warning at 50) names the names and the error — and when no single name stands out it regroups by parent domain, so eight services failing once each under one zone read as `*.internal.example (NONAME)`; `dns_slow` (lookup p99 ≥ 100 ms; warning at 1 s, a server that did not answer and was retried).
+
+Reproduced on the test host: eight lookups of `db-N.internal.invalid` → `dns_fail` naming `*.internal.invalid (NONAME)`; six lookups through a per-process `resolv.conf` pointing at a black hole (`unshare -m` + a bind mount, `timeout:1`) → `dns_slow` warning at 1.04 s. Programs that resolve without glibc — Go's built-in resolver, musl in containers — are not seen; that limit is stated on the screen.
+
 ## Why is the GPU idle?
 
 `nvidia-smi` says the GPU is 30 % busy. It cannot say why. eBPFLens answers from two sides ([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):

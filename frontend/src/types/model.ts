@@ -26,6 +26,24 @@ export interface Sample {
   gpu?: GPUStat; // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
   disk?: DiskStat; // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
   net?: NetStat; // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
+  dns?: DNSStat; // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
+}
+/**
+ * DNSStat is one interval of name resolution (glibc getaddrinfo) per name. Procs on the same sample say who resolved.
+ */
+export interface DNSStat {
+  names: DNSName[];
+}
+/**
+ * DNSName is one looked-up name during the interval (the first 63 bytes of it).
+ */
+export interface DNSName {
+  name: string;
+  lookups: number /* uint64 */;
+  fails: number /* uint64 */;
+  latNs: number /* uint64 */;
+  latMaxNs: number /* uint64 */;
+  lastError?: string; // EAI_* name of the last failure: "NONAME" (no such name), "AGAIN" (no answer in time), "FAIL", ...
 }
 /**
  * NetStat is one interval of outbound TCP activity per destination. Procs on the same sample say who connected.
@@ -187,6 +205,10 @@ export interface ProcStat {
    * tcpconn only. In tcpconn, Wait* means "connect latency of the connections this process opened"
    */
   connectFails?: number /* uint64 */;
+  /**
+   * dnslat only. In dnslat, Wait* means "time spent in getaddrinfo"
+   */
+  lookupFails?: number /* uint64 */;
 }
 /**
  * HostInfo is used for the list of hosts known to the server.
@@ -203,7 +225,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "dns_fail" | "dns_slow"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;

@@ -152,6 +152,10 @@ func Text(event string, i model.Incident) string {
 		what = fmt.Sprintf("outbound TCP connects are slow (99%% established within %s, %d s since %s; %s)%s", formatUs(i.Peak), i.Seconds, when, how, destText(i, "connect time"))
 	case KindNetRetrans:
 		what = fmt.Sprintf("TCP segments are being retransmitted (%.0f/s, %d s since %s: packet loss or a congested path)%s", i.Peak, i.Seconds, when, destText(i, "retransmissions"))
+	case KindDNSFail:
+		what = fmt.Sprintf("name lookups are failing (%.0f in 10 s, %d s since %s)%s", i.Peak, i.Seconds, when, nameText(i, "failures"))
+	case KindDNSSlow:
+		what = fmt.Sprintf("name lookups are slow (99%% resolved within %s, %d s since %s)%s", formatUs(i.Peak), i.Seconds, when, nameText(i, "lookup time"))
 	case KindVRAMFull:
 		what = fmt.Sprintf("VRAM is %.0f%% full (%d s since %s); the next large allocation may fail", i.Peak*100, i.Seconds, when)
 	case KindOOMKill:
@@ -204,6 +208,21 @@ func Text(event string, i model.Incident) string {
 		what = i.Kind
 	}
 	return fmt.Sprintf("[%s] %s: %s", level, i.Host, what)
+}
+
+// nameText renders "; mostly nope.invalid (NONAME) (80%)", or "" when no name stands out.
+func nameText(i model.Incident, of string) string {
+	if len(i.Culprits) == 0 {
+		return ""
+	}
+	parts := make([]string, len(i.Culprits))
+	for k, c := range i.Culprits {
+		parts[k] = fmt.Sprintf("%s (%.0f%%)", c.Name, c.Share*100)
+	}
+	if len(parts) == 1 {
+		return "; mostly " + parts[0]
+	}
+	return fmt.Sprintf("; mostly %s — %.0f%% of the %s", strings.Join(parts, ", "), i.CulpritShare*100, of)
 }
 
 // destText renders "; mostly to 10.0.0.5:5432 (80%) — 80% of the failures", or "" when no destination stands out.

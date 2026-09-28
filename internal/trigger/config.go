@@ -18,6 +18,14 @@ type Config struct {
 	GPU       GPURule       `json:"gpu"`       // a GPU sitting idle while its process works elsewhere, and VRAM running out
 	Disk      ExcursionRule `json:"disk"`      // block I/O latency p99, in µs
 	Network   NetworkRule   `json:"network"`   // outbound TCP: failed connects, slow connects, retransmissions
+	DNS       DNSRule       `json:"dns"`       // name resolution (glibc getaddrinfo): failed and slow lookups
+}
+
+// DNSRule: Fails is the number of failed lookups in the last 10 s (a burst of NXDOMAINs lasts one second);
+// Latency is the getaddrinfo p99 in µs. A p99 at seconds is a resolver that does not answer and gets retried.
+type DNSRule struct {
+	Fails   ExcursionRule `json:"fails"`
+	Latency ExcursionRule `json:"latency"`
 }
 
 // NetworkRule: ConnectFails is the number of failed connects in the last 10 s (a burst of refused connects lasts
@@ -85,6 +93,12 @@ func Default() Config {
 			ConnectLatency: ExcursionRule{Caution: 200_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
 			Retrans:        ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 5},
 		},
+		// An answer from the local stub (systemd-resolved) takes ~1 ms and one from upstream ~10-50 ms; 100 ms is slow,
+		// and 1 s is a server that did not answer and was retried
+		DNS: DNSRule{
+			Fails:   ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
+			Latency: ExcursionRule{Caution: 100_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
+		},
 	}
 }
 
@@ -106,7 +120,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

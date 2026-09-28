@@ -13,6 +13,7 @@ import { useTriggers } from "../lib/useTriggers";
 import { currentGpu, gpuUtil, pct as gpuPct, throttleKey, vramUsed } from "../lib/gpu";
 import { currentDisk, diskBytesPerSec, formatRate } from "../lib/disk";
 import { connectsPerSec, currentNet } from "../lib/net";
+import { currentDns, lookupsPerSec } from "../lib/dns";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -31,8 +32,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -68,6 +69,7 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
   const net = currentNet(netSamples);
   const netSlowLevel = areaLevel(incidents, ["net_connect_slow"], nowMs);
   const netErrLevel = areaLevel(incidents, ["net_connect_fail", "net_retrans"], nowMs);
+  const dns = currentDns(dnsSamples);
 
   const rows: Row[] = [
     {
@@ -143,6 +145,19 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
             level: netSlowLevel, spark: netSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/network",
           },
           { kind: "value", value: t("use.netErrValue", { fails: net.fails, retrans: net.retrans }), note: t("use.netErr"), level: netErrLevel, to: "/network" },
+        ],
+    },
+    {
+      resource: "resource.dns",
+      cells: !dns.has
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: dns.lookupsPerSec == null ? "–" : `${dns.lookupsPerSec.toFixed(1)}/s`, note: t("use.dnsUtil"), spark: dnsSamples.map(lookupsPerSec), to: "/dns" },
+          {
+            kind: "value", value: formatUs(dns.p99), note: t("use.dnsSat"),
+            level: areaLevel(incidents, ["dns_slow"], nowMs), spark: dnsSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/dns",
+          },
+          { kind: "value", value: `${dns.fails}`, note: t("use.dnsErr"), level: areaLevel(incidents, ["dns_fail"], nowMs), to: "/dns" },
         ],
     },
     {

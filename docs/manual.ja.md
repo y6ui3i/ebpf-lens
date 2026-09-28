@@ -230,6 +230,16 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 
 *読み方。* **失敗**した接続は相手か経路です。拒否(そこで何も待ち受けていない)、到達不能、タイムアウト。ある宛先への**再送**はその経路のパケットロスか輻輳。「addr のクライアント」への再送は、このホストに*入ってくる*接続でのもの。**接続 p99 がちょうど 1 秒や 3 秒**ならロスの証拠です。最初の SYN が落ちて 1 秒(次は 3 秒)のタイムアウト後に再送されたので、その値で「遅い」宛先は遠いのではなく落ちる経路にあります。再送は宛先ごとにだけ数えます。カーネルがプロセスの文脈なしに行うので。
 
+### DNS(`/dns`)
+
+![DNS: 名前解決の時間の推移、エラー付きの失敗した名前、引いたプロセス](img/ja-dns.png)
+
+*何か。* アプリケーションから見た名前解決。glibc の `getaddrinfo` への uprobe で、名前・呼び出しにかかった時間・結果を 1 件ずつ記録します。`/etc/hosts`、ローカルのキャッシュ、上流への再試行はすべて時間に含まれます。
+
+*見えるもの。* タイル(名前解決/秒、名前解決 p99、失敗した名前解決、名前の種類)、名前解決の時間のヒートマップ、注意・警告の線付きの p50/p99 の推移、名前の表(最後の失敗のエラー付き)、引いたプロセスの表。
+
+*読み方。* **その名前は存在しない**(`EAI_NONAME`)は名前の誤りか廃止、レコードの欠落。設定かゾーンを直します。**時間内に応答なし**(`EAI_AGAIN`)は DNS サーバーが落ちているか届かない。ローカルのキャッシュなら約 1 ms、上流なら数十 ms。p99 が**秒単位**なら、応答しないサーバーへの再試行です。glibc を通さずに名前解決するプログラム(Go の組み込みリゾルバ、コンテナ内の musl)は見えません。
+
 ### GPU(`/gpu`)
 
 ![GPU: 稼働率と VRAM の推移、CUDA 呼び出し 1 回あたりの待ち、プロセスごとの判定(コンテナ内の OCR が GPU を 64% 働かせながら CPU も 1 コアの 112% 使っている。クロックは電力上限で抑制)](img/ja-gpu.png)
@@ -264,6 +274,8 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 | **TCP 接続の失敗**(`net_connect_fail`) | 直近 10 秒に失敗した接続が 5 回以上 | 注意。50 回以上で警告 | 10 秒間に 5 回未満が 10 秒を超えて続く | 失敗の大半を占めた宛先を名指しします。拒否なら何も待ち受けていない(サービスが落ちているかポートが違う)、到達不能やタイムアウトなら経路かファイアウォール。 |
 | **TCP 接続が遅い**(`net_connect_slow`) | 接続 p99 ≥ 200 ms が 3 秒 | 注意。1 秒以上で警告 | 200 ms 未満が 5 秒を超えて続く | 1 秒なら SYN 自体が再送されています。その宛先へのパケットが落ちている。それ未満なら遅い経路か過負荷の相手。 |
 | **TCP の再送**(`net_retrans`) | 再送 10 セグメント/秒以上が 3 秒 | 注意。100/秒以上で警告 | 10/秒未満が 5 秒を超えて続く | 名指しされた宛先へのパケットロスか輻輳。「addr のクライアント」なら、このホストに入ってくる接続でのロス。リンク、スイッチのポート、相手を確認。 |
+| **名前解決の失敗**(`dns_fail`) | 直近 10 秒に失敗した `getaddrinfo` が 5 回以上 | 注意。50 回以上で警告 | 10 秒間に 5 回未満が 10 秒を超えて続く | 名前とエラーを名指しします。特定の名前が目立たなければ親ドメイン(`*.internal.example (NONAME)`)。*その名前は存在しない*: 名前かレコードを直す。*時間内に応答なし*: DNS サーバー。 |
+| **名前解決が遅い**(`dns_slow`) | 名前解決 p99 ≥ 100 ms が 3 秒 | 注意。1 秒以上で警告 | 100 ms 未満が 5 秒を超えて続く | `resolvectl status` と上流サーバーを確認。秒単位は応答しないサーバーへの再試行。 |
 | **VRAM がほぼ満杯**(`vram_full`) | VRAM の 90% 以上を使っている状態が 3 秒 | 注意。97% 以上で警告 | 90% 未満が 2 秒を超えて続く | 次の大きな確保が失敗してジョブが死にます。GPU の画面がどのプロセスが VRAM を持っているかを言います。 |
 
 ![同じ時間帯のダッシュボード: 見出しは「VM がホストの CPU を待たされています」、CPU の行が 3 台のグループと合計 76% を名指しし、出来事の各行に「CPU を取っていたのは」が付く](img/ja-dashboard-steal.png)
@@ -304,6 +316,7 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
 - **しきい値は仮です。** 8 コア 1 台の実測から決めました。自分のホストに合わせて調整してください(8 章)。
 - **バッファされた書き込みはカーネルの writeback スレッド**(`kworker`、`jbd2`)に帰属し、書いたプロセスには帰属しません。読み込みと direct 書き込みはプロセスに帰属します。ディスクの待ち時間にはキュー待ちが含まれるので、飽和したディスクは健全でも遅く見えます。
 - **再送は宛先ごとにだけ数えます**(プロセスは分からない。カーネルがプロセスの文脈なしに再送する)。入ってくる接続はクライアントのアドレスごとに 1 行にまとめます。見るのは TCP だけで、UDP と ICMP は対象外。
+- **DNS は glibc の `getaddrinfo` で計ります**。glibc を通さずに名前解決するプログラム(Go の組み込みリゾルバ、コンテナ内の musl)は見えず、名前は先頭 63 バイトまで。
 - **見る GPU は 1 枚目だけ**で、GeForce では NVML のプロセス別稼働率が取れません(Not Found)。判定はプロセスが何をしていたか(CPU、転送、同期)とデバイスの稼働率から組み立てます。uprobe にはカーネル 6.6 以上(multi-uprobe の BPF リンク)が要り、古いカーネルでは GPU の画面はデバイス側だけになります。
 - **Linux 専用です。** macOS には eBPF がなく、できる範囲の macOS エージェントは計画のみ。
 - **Windows は需要がなければ作りません。**
@@ -345,11 +358,13 @@ Brendan Gregg の USE メソッドに倣い、資源ごとに 3 つの問いを�
   "disk":      {"caution": 10000, "warning": 100000, "minSeconds": 3, "maxGapSeconds": 2},
   "network":   {"connectFails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
                 "connectLatency": {"caution": 200000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5},
-                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}}
+                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}},
+  "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10},
+                "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
 }
 ```
 
-API(断りがなければ `GET`): `/api/settings`(`PUT` で置き換え。`{"ui":{"lang":"ja"}}` のような部分的な文書は今の設定に重ねる。`DELETE` で既定に戻す)、`/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
+API(断りがなければ `GET`): `/api/settings`(`PUT` で置き換え。`{"ui":{"lang":"ja"}}` のような部分的な文書は今の設定に重ねる。`DELETE` で既定に戻す)、`/api/hosts`、`/api/samples?host=&probe=runqlat|memstall|vms|gpu|biolat|tcpconn|dnslat`、`/api/events?host=`、`/api/incidents?host=`(新しい順。継続中は `end` なし)、`/api/triggers`、`/api/stream?host=`(SSE: `sample`、`events`、`incident`)。エージェントは `POST /api/ingest` と `/api/events`。
 
 ## 9. 用語集
 

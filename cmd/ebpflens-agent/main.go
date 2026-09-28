@@ -20,6 +20,7 @@ import (
 
 	"github.com/y6ui3i/ebpf-lens/internal/model"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/biolat"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/dnslat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/memstall"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/proclife"
@@ -92,6 +93,12 @@ func main() {
 	}
 	defer tc.Close()
 
+	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
+	dns := openDNS()
+	if dns != nil {
+		defer dns.Close()
+	}
+
 	// GPU: optional. A host without an NVIDIA driver, or without libcuda, simply sends no "gpu" samples
 	gw := openGPU()
 	defer gw.Close()
@@ -144,6 +151,15 @@ func main() {
 				log.Fatalf("tcpconn: %v", err)
 			}
 			nx.Host, nx.Time, nx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			var sx *model.Sample
+			if dns != nil {
+				x, err := dnsSample(dns, vms, *topN)
+				if err != nil {
+					log.Fatalf("dnslat: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+				sx = &x
+			}
 			gx, err := gw.sample(all, vms.Label)
 			if err != nil {
 				log.Fatalf("gpu: %v", err)
@@ -165,6 +181,9 @@ func main() {
 				printMem(mx)
 				printDisk(dx)
 				printNet(nx)
+				if sx != nil {
+					printDNS(*sx)
+				}
 				if gx != nil {
 					printGPU(*gx)
 				}
@@ -192,6 +211,11 @@ func main() {
 				}
 				if err := send(client, *serverURL, "/api/ingest", nx); err != nil {
 					log.Printf("send tcpconn: %v", err)
+				}
+				if sx != nil {
+					if err := send(client, *serverURL, "/api/ingest", *sx); err != nil {
+						log.Printf("send dnslat: %v", err)
+					}
 				}
 				if gx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *gx); err != nil {
@@ -221,6 +245,11 @@ func main() {
 			}
 			if err := enc.Encode(nx); err != nil {
 				log.Fatal(err)
+			}
+			if sx != nil {
+				if err := enc.Encode(*sx); err != nil {
+					log.Fatal(err)
+				}
 			}
 			if gx != nil {
 				if err := enc.Encode(*gx); err != nil {
@@ -347,6 +376,57 @@ func netSample(tc *tcpconn.Probe, vms *vm.Map, topN int) (model.Sample, error) {
 	return model.Sample{
 		Probe: "tcpconn", Unit: "usecs", Slots: slots[:], Procs: procs, Net: &model.NetStat{Dests: dests},
 	}, nil
+}
+
+func openDNS() *dnslat.Probe {
+	path, err := dnslat.FindLibc()
+	if err != nil {
+		log.Printf("dnslat: %v (no DNS samples)", err)
+		return nil
+	}
+	p, err := dnslat.Open(path)
+	if err != nil {
+		log.Printf("dnslat: %v (no DNS samples)", err)
+		return nil
+	}
+	log.Printf("dnslat: uprobes on getaddrinfo in %s", path)
+	return p
+}
+
+// dnsSample builds one interval of name resolution: the latency histogram, the names (failures first), and the
+// processes that resolved the most (top by lookups and by failures).
+func dnsSample(p *dnslat.Probe, vms *vm.Map, topN int) (model.Sample, error) {
+	slots, err := p.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, err := p.Procs(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	names, err := p.Names()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	if names == nil {
+		names = []model.DNSName{}
+	}
+	slices.SortFunc(names, func(a, b model.DNSName) int { return cmpDesc(a.Lookups+a.Fails*4, b.Lookups+b.Fails*4) })
+	if len(names) > maxDests {
+		names = names[:maxDests]
+	}
+	procs := topBy(all, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitCount, b.WaitCount) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.LookupFails, b.LookupFails) },
+	)
+	return model.Sample{Probe: "dnslat", Unit: "usecs", Slots: slots[:], Procs: procs, DNS: &model.DNSStat{Names: names}}, nil
+}
+
+func printDNS(x model.Sample) {
+	for _, n := range x.DNS.Names {
+		fmt.Printf("dns  %-40s n=%d fail=%d err=%s avg=%.2fms max=%.2fms\n", n.Name, n.Lookups, n.Fails, n.LastError,
+			float64(n.LatNs)/1e6/float64(max(1, n.Lookups)), float64(n.LatMaxNs)/1e6)
+	}
 }
 
 // A busy host talks to many destinations; the sample must stay under the server's 64 KiB body limit

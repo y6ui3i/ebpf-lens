@@ -91,6 +91,10 @@ export function ownerOf(x: Incident, t: TFn): string {
       return (x.peak ?? 0) >= 1_000_000 ? t("owner.network") : x.culprits?.length ? t("owner.dest", { list: names(x, t) }) : t("owner.destUnknown");
     case "net_retrans":
       return t("owner.network");
+    case "dns_fail":
+      return x.culprits?.length ? t("owner.dnsNames", { list: names(x, t) }) : t("owner.dnsResolver");
+    case "dns_slow":
+      return t("owner.dnsResolver");
     case "gpu_starved":
       return t("owner.app", { comm: x.subject ?? "?" });
     case "vram_full":

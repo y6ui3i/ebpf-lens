@@ -84,7 +84,8 @@ export function netSentence(samples: Sample[], lang: Lang, level: Level): string
   const now = currentNet(samples);
   if (!now.has) return tr("net.summary.none");
   const top = destRows(samples.slice(-CURRENT_WINDOW))[0];
-  const state = tr("net.summary.state", { rate: (now.connectsPerSec ?? 0).toFixed(1), p99: formatUs(now.p99) });
+  // No connect in the last 5 s: say so, rather than "0.0 connects/s, 99% within –"
+  const state = now.p99 == null ? tr("net.summary.noConnects") : tr("net.summary.state", { rate: (now.connectsPerSec ?? 0).toFixed(1), p99: formatUs(now.p99) });
   const parts: string[] = [];
   if (now.fails > 0) parts.push(tr("net.summary.fails", { n: now.fails, dest: top && top.fails > 0 ? tr("net.summary.mostly", { dest: top.dest }) : "" }));
   if (now.retrans > 0) parts.push(tr("net.summary.retrans", { n: now.retrans, dest: top && top.retrans > 0 ? tr("net.summary.mostly", { dest: top.dest }) : "" }));

@@ -17,6 +17,8 @@ import { Heatmap } from "./Heatmap";
 import { PercentileChart } from "./PercentileChart";
 import { Sparkline } from "./Sparkline";
 import { IncidentTable } from "./IncidentTable";
+import { ReportButton } from "./ReportButton";
+import { formatReport, incidentLine, ownerOf, stamp, stampFull, vmNextStep } from "../lib/report";
 
 const WINDOW = 300; // the whole visible range (5 min)
 const LINGER_MS = 5 * 60 * 1000; // a stop this recent is still the headline, even if the VM is running again
@@ -26,8 +28,8 @@ type Cause = "host_oom" | "cgroup_oom" | "crash" | "killed" | "shutdown";
 const CAUSES = new Set<string>(["host_oom", "cgroup_oom", "crash", "killed", "shutdown"]);
 
 // One page per VM: what the host saw of its QEMU process, and why it stopped (ADR 0001: verdict, evidence, next step)
-export function VmPanel({ name, vmSamples, samples, memSamples, incidents, win, schemeKey }: {
-  name: string; vmSamples: Sample[]; samples: Sample[]; memSamples: Sample[]; incidents: Incident[]; win: TimeWindow; schemeKey: string;
+export function VmPanel({ host, name, vmSamples, samples, memSamples, incidents, win, schemeKey }: {
+  host: string; name: string; vmSamples: Sample[]; samples: Sample[]; memSamples: Sample[]; incidents: Incident[]; win: TimeWindow; schemeKey: string;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -51,7 +53,7 @@ export function VmPanel({ name, vmSamples, samples, memSamples, incidents, win, 
 
         <div className="mt-4">
           <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>VM Lens Summary</div>
-          <VmSummary vm={vm} samples={samples} memSamples={memSamples} nowMs={nowMs} />
+          <VmSummary host={host} vm={vm} samples={samples} memSamples={memSamples} nowMs={nowMs} />
         </div>
       </section>
 
@@ -118,7 +120,7 @@ function Header({ vm }: { vm: VmState }) {
 // A stop in the last 5 minutes is the headline even if the VM is running again; a running VM that is waiting for host CPU
 // right now gets that as its headline with the evidence and next step; otherwise a running VM gets its 5-minute numbers,
 // and the latest stop of the last 24 h is kept below as a post-mortem
-function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: Sample[]; memSamples: Sample[]; nowMs: number }) {
+function VmSummary({ host, vm, samples, memSamples, nowMs }: { host: string; vm: VmState; samples: Sample[]; memSamples: Sample[]; nowMs: number }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
   const down = vm.lastDown;
@@ -147,13 +149,41 @@ function VmSummary({ vm, samples, memSamples, nowMs }: { vm: VmState; samples: S
     headline = t("vm.state.stopped");
   }
 
+  // The report ready to send: the same verdict, evidence and next step as below, plus whose problem it probably is
+  const report = () => {
+    const levelLabel = stale ? t("vm.state.stopped") : t(LEVEL_KEY[level]);
+    const situation: string[] = [headline];
+    if (vm.running && vm.info) situation.push(runningSentence(vm.name, samples, memSamples, triggers.cpu.caution, triggers.memory.caution, lang, t));
+    if (down) situation.push(t("vm.lastStop", { time: stamp(down.start, lang) }));
+    const subject = down && (recentStop || !vm.running) ? down : cpuWait;
+    const evidence = subject === down && down ? stopEvidence(down, cause, lang, t)
+      : cpuWait ? cpuWaitEvidence(cpuWait, vm.name, samples, nowMs, lang, t) : [];
+    const next = subject === down && down
+      ? vmNextStep(cause, down.triggerComm ? t("vm.who", { comm: down.triggerComm, pid: down.triggerPid ?? "?" }) : undefined, t)
+      : cpuWait ? t("vm.next.cpuWait") : "";
+    return formatReport(
+      `${host} / VM ${vm.name} — ${levelLabel}: ${headline}`,
+      t("report.meta", { time: stampFull(Date.now(), lang), url: window.location.href }),
+      [
+        { title: t("report.situation"), lines: situation },
+        { title: t("report.next"), lines: next ? [next] : [t("report.nextNone")] },
+        { title: t("report.owner"), lines: [subject ? ownerOf(subject, t) : t("report.ownerNone")] },
+        { title: t("report.evidence"), lines: evidence },
+        { title: t("report.recent"), lines: vm.incidents.slice(0, 10).map((x) => incidentLine(x, lang, t)) },
+      ],
+    );
+  };
+
   return (
     <div>
-      <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
-        <span aria-hidden style={{ color: stale ? "var(--text-muted)" : LEVEL_COLOR[level] }}>{stale ? "○" : LEVEL_ICON[level]}</span>
-        <span>{stale ? t("vm.state.stopped") : t(LEVEL_KEY[level])}</span>
-        <span style={{ color: "var(--text-secondary)" }}>·</span>
-        <span>{headline}</span>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
+          <span aria-hidden style={{ color: stale ? "var(--text-muted)" : LEVEL_COLOR[level] }}>{stale ? "○" : LEVEL_ICON[level]}</span>
+          <span>{stale ? t("vm.state.stopped") : t(LEVEL_KEY[level])}</span>
+          <span style={{ color: "var(--text-secondary)" }}>·</span>
+          <span>{headline}</span>
+        </div>
+        <ReportButton build={report} />
       </div>
       <div className="mt-2 space-y-3 text-sm" style={{ color: "var(--text-secondary)" }}>
         {vm.running && vm.info && (
@@ -188,10 +218,8 @@ function runningSentence(name: string, samples: Sample[], memSamples: Sample[], 
 }
 
 // Evidence and next step for one vm_down, built only from the fields the server actually recorded
-function PostMortem({ x, cause, showTime }: { x: Incident; cause?: Cause; showTime: boolean }) {
-  const { lang, t } = useI18n();
+function stopEvidence(x: Incident, cause: Cause | undefined, lang: Lang, t: TFn): string[] {
   const evidence: string[] = [];
-  const who = x.triggerComm ? t("vm.who", { comm: x.triggerComm, pid: x.triggerPid ?? "?" }) : undefined;
   const sig = x.signal ? signalName(x.signal, lang) : undefined;
 
   if (cause === "cgroup_oom" || cause === "host_oom") {
@@ -205,8 +233,14 @@ function PostMortem({ x, cause, showTime }: { x: Incident; cause?: Cause; showTi
   if (cause === "shutdown" && x.exitStatus != null) evidence.push(t("vm.ev.exitStatus", { n: x.exitStatus }));
   if (x.contextStallMs != null) evidence.push(t("vm.ev.stall", { ms: x.contextStallMs.toFixed(x.contextStallMs < 10 ? 1 : 0) }));
   if (x.contextWaitP99Us != null) evidence.push(t("vm.ev.wait", { v: formatUs(x.contextWaitP99Us) }));
+  return evidence;
+}
 
-  const next = nextStep(cause, who, t);
+function PostMortem({ x, cause, showTime }: { x: Incident; cause?: Cause; showTime: boolean }) {
+  const { lang, t } = useI18n();
+  const who = x.triggerComm ? t("vm.who", { comm: x.triggerComm, pid: x.triggerPid ?? "?" }) : undefined;
+  const evidence = stopEvidence(x, cause, lang, t);
+  const next = vmNextStep(cause, who, t);
 
   return (
     <div className="space-y-1.5">
@@ -229,15 +263,19 @@ function PostMortem({ x, cause, showTime }: { x: Incident; cause?: Cause; showTi
 
 // Evidence and next step while the VM is waiting for host CPU: its own wait, and who took the CPU (the incident's group,
 // which the server computed without the VM itself; older data falls back to the samples, again without the VM)
-function CpuWaitBrief({ x, name, samples, nowMs }: { x: Incident; name: string; samples: Sample[]; nowMs: number }) {
-  const { lang, t } = useI18n();
+function cpuWaitEvidence(x: Incident, name: string, samples: Sample[], nowMs: number, lang: Lang, t: TFn): string[] {
   const range = samplesBetween(samples, new Date(x.start), x.end ? new Date(x.end) : new Date(nowMs));
   const xs = impact(range).filter((p) => p.comm !== vmComm(name));
   const { members, total, busy } = culpritsFor(x, xs, range);
-  const evidence: string[] = [
+  return [
     t("vm.ev.cpuWait", { v: formatUs(x.peak ?? null), seconds: durationSeconds(x, nowMs) ?? x.seconds, time: formatTime(lang, x.start) }),
     takenBy(members, total, busy, t),
   ];
+}
+
+function CpuWaitBrief({ x, name, samples, nowMs }: { x: Incident; name: string; samples: Sample[]; nowMs: number }) {
+  const { lang, t } = useI18n();
+  const evidence = cpuWaitEvidence(x, name, samples, nowMs, lang, t);
   return (
     <div className="space-y-1.5">
       <div>
@@ -328,11 +366,6 @@ function StealPanel({ name, samples, incidents, nowMs }: { name: string; samples
 }
 
 // Every next step carries its reason (ADR 0001, principle 3); an unknown cause says so instead of guessing
-function nextStep(cause: Cause | undefined, who: string | undefined, t: TFn): string {
-  if (!cause) return t("vm.next.unknown");
-  if (cause === "killed") return who ? t("vm.next.killed", { who }) : t("vm.next.killedUnknown");
-  return t(`vm.next.${cause}`);
-}
 
 const RANK: Record<Level, number> = { ok: 0, caution: 1, warning: 2 };
 const worst = (a: Level, b: Level): Level => (RANK[a] >= RANK[b] ? a : b);

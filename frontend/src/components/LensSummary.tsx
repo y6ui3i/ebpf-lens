@@ -10,7 +10,9 @@ import { DISK_KINDS, diskSentence } from "../lib/disk";
 import { NET_KINDS, netSentence } from "../lib/net";
 import { VM_AREA_KINDS, runningVms, vmStopsWithin, vmsWaitingForCpu } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
-import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params } from "../lib/i18n";
+import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params, type TFn } from "../lib/i18n";
+import { hostReport } from "../lib/report";
+import { ReportButton } from "./ReportButton";
 import { IncidentTable, incidentDetail } from "./IncidentTable";
 
 const CPU_HEADLINE: Record<Level, Key> = {
@@ -49,8 +51,8 @@ function cpuUtil(samples: Sample[]): number | null {
 
 // "What is happening right now" summary shown at the top of the screen.
 // Levels come from the server's incidents; the numbers in the sentences still come from the samples
-export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, life, incidents }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; life: Lifecycle; incidents: Incident[];
+export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, life, incidents }: {
+  host: string; samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; life: Lifecycle; incidents: Incident[];
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -109,51 +111,47 @@ export function LensSummary({ samples, memSamples, vmSamples, gpuSamples, diskSa
     if (util != null) detail += t("summary.util", { pct: Math.round(util * 100) });
   }
 
+  // The findings, as text: rendered below and reused as the evidence of the report ready to send
+  const findings: { area: string; level: Level; lines: string[] }[] = [
+    { area: t("resource.cpu"), level: cpuLevel, lines: [detail, last ? episodeSentence(last, lang) : "", last ? causeText(samples, last, t) ?? "" : ""] },
+    { area: t("resource.memory"), level: memLevel, lines: [memorySentence(memSamples, lang, memLevel)] },
+    { area: t("resource.processes"), level: procLevel, lines: [lifecycleSentence(life, lang)] },
+    { area: t("resource.vm"), level: vmLevel, lines: [vmSentence(vmSamples, incidents, lang, nowMs)] },
+    // Hosts without these probes send no samples; their rows stay away rather than saying "no data" forever
+    ...(diskSamples.length > 0 ? [{ area: t("resource.disk"), level: diskLevel, lines: [diskSentence(diskSamples, lang, diskLevel)] }] : []),
+    ...(netSamples.length > 0 ? [{ area: t("resource.network"), level: netLevel, lines: [netSentence(netSamples, lang, netLevel)] }] : []),
+    ...(gpuSamples.length > 0 ? [{ area: t("resource.gpu"), level: gpuLevel, lines: [gpuSentence(gpuSamples, lang, gpuLevel, triggers.gpu.idleUtil)] }] : []),
+  ];
+  const report = () => hostReport({
+    host, levelLabel: t(LEVEL_KEY[overall]), headline, findings, incidents, nowMs: Date.now(), lang, t,
+    url: `${window.location.origin}/`,
+  });
+
   return (
     <section
       className="mb-6 rounded-xl p-5"
       style={{ background: "var(--surface-1)", border: "1px solid var(--border)" }}
       aria-live="polite"
     >
-      <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Lens Summary</div>
-      <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
-        <span aria-hidden style={{ color: LEVEL_COLOR[overall] }}>{LEVEL_ICON[overall]}</span>
-        <span>{t(LEVEL_KEY[overall])}</span>
-        <span style={{ color: "var(--text-secondary)" }}>·</span>
-        <span>{headline}</span>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Lens Summary</div>
+          <div className="flex flex-wrap items-center gap-x-2 text-lg font-semibold">
+            <span aria-hidden style={{ color: LEVEL_COLOR[overall] }}>{LEVEL_ICON[overall]}</span>
+            <span>{t(LEVEL_KEY[overall])}</span>
+            <span style={{ color: "var(--text-secondary)" }}>·</span>
+            <span>{headline}</span>
+          </div>
+        </div>
+        <ReportButton build={report} />
       </div>
 
       <dl className="mt-3 space-y-2 text-sm">
-        <Finding area={t("resource.cpu")} level={cpuLevel}>
-          <p>{detail}</p>
-          {last && <p>{episodeSentence(last, lang)}</p>}
-          {last && <CauseSentence samples={samples} episode={last} />}
-        </Finding>
-        <Finding area={t("resource.memory")} level={memLevel}>
-          <p>{memorySentence(memSamples, lang, memLevel)}</p>
-        </Finding>
-        <Finding area={t("resource.processes")} level={procLevel}>
-          <p>{lifecycleSentence(life, lang)}</p>
-        </Finding>
-        <Finding area={t("resource.vm")} level={vmLevel}>
-          <p>{vmSentence(vmSamples, incidents, lang, nowMs)}</p>
-        </Finding>
-        {diskSamples.length > 0 && (
-          <Finding area={t("resource.disk")} level={diskLevel}>
-            <p>{diskSentence(diskSamples, lang, diskLevel)}</p>
+        {findings.map((f) => (
+          <Finding key={f.area} area={f.area} level={f.level}>
+            {f.lines.filter(Boolean).map((l, i) => <p key={i}>{l}</p>)}
           </Finding>
-        )}
-        {netSamples.length > 0 && (
-          <Finding area={t("resource.network")} level={netLevel}>
-            <p>{netSentence(netSamples, lang, netLevel)}</p>
-          </Finding>
-        )}
-        {/* Only hosts with a GPU send gpu samples; the row stays away elsewhere rather than saying "no GPU" forever */}
-        {gpuSamples.length > 0 && (
-          <Finding area={t("resource.gpu")} level={gpuLevel}>
-            <p>{gpuSentence(gpuSamples, lang, gpuLevel, triggers.gpu.idleUtil)}</p>
-          </Finding>
-        )}
+        ))}
       </dl>
 
       {recent.length > 0 && (
@@ -214,8 +212,7 @@ function Finding({ area, level, children }: { area: string; level: Level; childr
 
 // One sentence on "who used the CPU and who else was kept waiting" during the incident.
 // The group comes from the incident when the server recorded one (see culpritsFor); the victims always come from the samples
-function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Incident }) {
-  const { t } = useI18n();
+function causeText(samples: Sample[], episode: Incident, t: TFn): string | null {
   const ongoing = isOngoing(episode);
   const end = ongoing ? new Date() : new Date(episode.end!);
   const range = samplesBetween(samples, new Date(episode.start), end);
@@ -241,7 +238,7 @@ function CauseSentence({ samples, episode }: { samples: Sample[]; episode: Incid
       .join(t("list.sep"));
     parts.push(t(members.length > 0 ? "cause.victimsOthers" : "cause.victims", { list }));
   }
-  return <p>{parts.join(" ")}</p>;
+  return parts.join(" ");
 }
 
 function episodeSentence(e: Incident, lang: Lang): string {

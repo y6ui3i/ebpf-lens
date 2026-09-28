@@ -211,6 +211,10 @@ Measured on the test host (RTX 2070, driver 595):
 
 The GPU screen (`/gpu`) shows the tiles, GPU busy and VRAM over time with the idle and VRAM lines, a heatmap of how long each copy or sync call waited, and the per-process table with the verdicts; the dashboard has a **GPU** row in the USE grid (busy, VRAM, clock throttling) and a **GPU** line in the Lens Summary. A host without an NVIDIA driver sends no GPU samples and shows no GPU row. Only the first GPU is watched; per-process GPU utilization is not available on GeForce (NVML returns Not Found), which is why the verdict reasons from what the process was doing instead.
 
+## The report to send
+
+The Lens Summary (and every VM page) has **Report to send**: one plain-text message with the situation, the next step and its reason, whose problem it probably is, the evidence and the recent incidents — the message ADR 0001 says people without the background struggle most to write. It is assembled by the same fixed rules as the screen; when a rule cannot decide, it says *unknown*.
+
 ## Settings screen
 
 `/settings` changes, for every browser at once, the language, how long a stopped VM stays visible, and every threshold the incidents are judged with. Saved values live in the DB and apply immediately (charts redraw their bands; open incidents are judged against the new numbers from the next sample). Precedence: defaults ← the `-triggers` file ← the settings screen; *Reset* drops the saved copy. The header's EN / 日本語 switch moved here, because the language is a property of the server everyone shares, not of one browser.

@@ -183,12 +183,12 @@ export default function App() {
           <VmListPanel vmSamples={vmSamples} samples={samples} memSamples={memSamples} incidents={incidents} />
         ) : vmName != null ? (
           <VmPanel
-            name={vmName} vmSamples={vmSamples} samples={samples} memSamples={memSamples}
+            host={host} name={vmName} vmSamples={vmSamples} samples={samples} memSamples={memSamples}
             incidents={incidents} win={win} schemeKey={schemeKey}
           />
         ) : (
           <>
-            <LensSummary samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} life={life} incidents={incidents} />
+            <LensSummary host={host} samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} life={life} incidents={incidents} />
             <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} events={events} life={life} incidents={incidents} win={win} />
           </>
         )}

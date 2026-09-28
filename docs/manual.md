@@ -121,6 +121,12 @@ The overall level is the **worst area**. For the headline, ties go in this order
 - **Network** — connects per second and how long 99 % of them take to establish; failed connects and retransmissions in the last 5 minutes, with the destination that took most of them.
 - **GPU** (only on hosts with an NVIDIA GPU) — how busy the GPU is and how much VRAM is in use, then what the busiest CUDA process is doing with its time: keeping the GPU busy, copying, computing on the CPU, waiting for something else, or holding a loaded model idle. If the clocks are being held back (power cap, temperature), it says so.
 
+### The report to send
+
+![The report to send, opened from the Lens Summary: situation, next step, whose problem it probably is, evidence, recent incidents](img/ja-report.png)
+
+**Report to send** (top right of the Lens Summary, and of each VM page) builds, for this moment, a plain-text message you can paste into chat, a ticket or an email: the **situation** (the headline and what is happening now), the **next step** with its reason, **whose problem it probably is** (application, infrastructure, hardware, network, a human action — or *unknown* when the rules cannot tell), the **evidence** (the finding lines), and the recent incidents with dates. It is built by the same fixed rules as the screen, never by guesswork (ADR 0001). *Copy* works on plain HTTP too: the browser's clipboard API needs HTTPS, so on a LAN the text is selected and copied the old way.
+
 ### Recent incidents
 
 One row per incident: level, kind, process/VM, time span (or *ongoing*), duration, and a detail that depends on the kind (peak wait, ms/s stalled, signal, OOM scope and trigger, crash count, who sent the signal). Ongoing incidents have no end time. Section 5 lists every kind.

@@ -191,6 +191,14 @@ lab での webhook の文面: `[CAUTION] hal: VM fleet-04 is waiting for host CP
 
 検証機で再現: 閉じたポートへ 6 回接続 → `net_connect_fail` が `127.0.0.1:9 (100%)` を名指し。`tc qdisc add dev lo root netem loss 40%` の間にローカルのサーバーへ curl 40 本 → 接続 p99 が 1〜2 秒(SYN の再送 1〜2 回)、再送 40/秒超、どちらも `127.0.0.1:8080` を名指し。再送はカーネルの文脈で起きて持ち主のプロセスが分からないので、宛先ごとにだけ数える。
 
+## DNS なのか
+
+「結局 DNS だった」が運用の一番古い落ちなのは、名前解決がすべての接続の手前にあるのに誰も計っていないからだ。eBPFLens はアプリケーションが実際に呼ぶ glibc の **`getaddrinfo`** に uprobe を付け、毎秒、名前・呼び出しにかかった時間・結果(`EAI_NONAME` = その名前は存在しない、`EAI_AGAIN` = 時間内に応答なし、…)を、名前ごと・プロセスごとに記録する。リゾルバが下でやること(`/etc/hosts`、nsswitch、ローカルのキャッシュ systemd-resolved、応答しない上流への再試行)はすべてその時間に入る。
+
+出来事は 2 つ。`dns_fail`(10 秒間に失敗 5 回以上。50 回で警告)は名前とエラーを名指しし、特定の名前が目立たないときは親ドメインでまとめ直す。1 つのゾーンの下で 8 つのサービスが 1 回ずつ失敗すれば `*.internal.example (NONAME)` と読める。`dns_slow`(名前解決 p99 ≥ 100 ms。警告は 1 秒。応答しないサーバーへの再試行)。
+
+検証機で再現: `db-N.internal.invalid` を 8 回引く → `dns_fail` が `*.internal.invalid (NONAME)` を名指し。ブラックホールを向いたプロセス専用の `resolv.conf`(`unshare -m` + bind mount、`timeout:1`)で 6 回引く → `dns_slow` の警告、1.04 秒。glibc を通さずに名前解決するプログラム(Go の組み込みリゾルバ、コンテナ内の musl)は見えない。その限界は画面にも書いてある。
+
 ## なぜ GPU が遊んでいるのか
 
 `nvidia-smi` は「GPU は 30% 稼働」とは言うが、なぜかは言えない。eBPFLens は両側から答える([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):

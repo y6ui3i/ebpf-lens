@@ -91,6 +91,10 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
       return t("incident.perSec", { n: (x.peak ?? 0).toFixed(0) }) + destSummary(x, t);
     case "net_connect_slow":
       return (x.peak == null ? "" : formatUs(x.peak)) + destSummary(x, t);
+    case "dns_fail":
+      return t("incident.inTenSec", { n: (x.peak ?? 0).toFixed(0) }) + (x.culprits?.length ? t("incident.names", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) }) : "");
+    case "dns_slow":
+      return (x.peak == null ? "" : formatUs(x.peak)) + (x.culprits?.length ? t("incident.names", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) }) : "");
     case "vram_full":
       return t("incident.vramFull", { pct: Math.round((x.peak ?? 0) * 100) });
     case "vm_down": {

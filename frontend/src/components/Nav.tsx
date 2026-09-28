@@ -31,6 +31,7 @@ const STATIC_GROUPS: Group[] = [
       { path: "/memory", label: "page.memory" },
       { path: "/disk", label: "page.disk" },
       { path: "/network", label: "page.network" },
+      { path: "/dns", label: "page.dns" },
       { path: "/gpu", label: "page.gpu" },
     ],
   },

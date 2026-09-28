@@ -633,3 +633,70 @@ func TestNetConnectFailGroupsByPrefixWhenNoDestinationStandsOut(t *testing.T) {
 		t.Fatalf("destBlock v4: %q %q", destBlock("10.0.0.5:5432"), destBlock("clients at 192.168.10.4"))
 	}
 }
+
+func dnsSample(sec, slot int, names []model.DNSName) model.Sample {
+	slots := make([]uint64, 27)
+	if slot >= 0 {
+		slots[slot] = 100
+	}
+	return model.Sample{Host: "h", Probe: "dnslat", Time: t0.Add(time.Duration(sec) * time.Second), IntervalMs: 1000, Slots: slots,
+		DNS: &model.DNSStat{Names: names}}
+}
+
+// Recorded on the test host: three lookups of names under .invalid fail with EAI_NONAME in about 1 ms each.
+func TestDNSFailNamesTheNameAndError(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	x := dnsSample(0, 10, []model.DNSName{{Name: "db.internal", Lookups: 6, Fails: 6, LastError: "NONAME"}, {Name: "github.com", Lookups: 2}})
+	h.samples["dnslat"] = append(h.samples["dnslat"], x)
+	e.OnSample(x)
+	if len(r.got) != 1 || r.last().Kind != KindDNSFail || r.last().Peak != 6 {
+		t.Fatalf("expected a dns_fail at 6 in 10 s, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "db.internal (NONAME)" {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "name lookups are failing (6 in 10 s") || !contains(text, "mostly db.internal (NONAME) (100%)") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+// A p99 in slot 20 (1-2 s): a resolver that did not answer and was retried — warning.
+func TestDNSSlowAtOneSecondIsAWarning(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 3; s++ {
+		e.OnSample(dnsSample(s, 20, nil))
+	}
+	if len(r.got) != 1 || r.last().Kind != KindDNSSlow || r.last().Level != LevelWarning {
+		t.Fatalf("expected a dns_slow warning, got %+v", r.got)
+	}
+}
+
+// Eight names under one zone failing once each, plus six under another timing out: no single name reaches 10 %, so
+// the group is formed per parent domain and error.
+func TestDNSFailGroupsByParentDomainWhenNoNameStandsOut(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	var names []model.DNSName
+	for i := 1; i <= 8; i++ {
+		names = append(names, model.DNSName{Name: fmt.Sprintf("db-%d.internal.invalid", i), Lookups: 1, Fails: 1, LastError: "NONAME"})
+	}
+	for i := 1; i <= 6; i++ {
+		names = append(names, model.DNSName{Name: fmt.Sprintf("slow-%d.example.com", i), Lookups: 1, Fails: 1, LastError: "AGAIN"})
+	}
+	x := dnsSample(0, 10, names)
+	h.samples["dnslat"] = append(h.samples["dnslat"], x)
+	e.OnSample(x)
+	c := r.last().Culprits
+	if len(c) != 2 || c[0].Name != "*.internal.invalid (NONAME)" || c[1].Name != "*.example.com (AGAIN)" {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if parentDomain("example.com") != "example.com" || parentDomain("a.b.example.com.") != "b.example.com" {
+		t.Fatalf("parentDomain: %q %q", parentDomain("example.com"), parentDomain("a.b.example.com."))
+	}
+}

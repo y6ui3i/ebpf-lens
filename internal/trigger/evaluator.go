@@ -29,6 +29,8 @@ const (
 	KindNetConnectFail = "net_connect_fail" // outbound TCP connects failing (refused / unreachable / timed out)
 	KindNetConnectSlow = "net_connect_slow" // connect latency p99 high: at 1 s the SYN itself is being retransmitted
 	KindNetRetrans     = "net_retrans"      // TCP segments retransmitted (packet loss or a congested path)
+	KindDNSFail        = "dns_fail"         // name lookups failing (getaddrinfo returned an error)
+	KindDNSSlow        = "dns_slow"         // name lookups slow (getaddrinfo p99)
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -78,6 +80,32 @@ type hostState struct {
 	netFail, netSlow, netRetrans excursion
 	failRing                     [failWindow]uint64 // failed connects per second, last failWindow seconds (a burst of refused connects is an incident even if it lasts one second)
 	failRingSec                  int64
+	dnsFail, dnsSlow             excursion
+	dnsRing                      failRing
+}
+
+// failRing counts failures per second over the last failWindow seconds (for the windowed rules).
+type failRing struct {
+	ring [failWindow]uint64
+	sec  int64
+}
+
+func (r *failRing) add(t time.Time, n uint64) uint64 {
+	sec := t.Unix()
+	if r.sec == 0 || sec-r.sec >= failWindow {
+		r.ring = [failWindow]uint64{}
+	} else {
+		for s := r.sec + 1; s <= sec; s++ {
+			r.ring[s%failWindow] = 0
+		}
+	}
+	r.sec = sec
+	r.ring[sec%failWindow] += n
+	var sum uint64
+	for _, v := range r.ring {
+		sum += v
+	}
+	return sum
 }
 
 // failWindow is how many seconds of failed connects net_connect_fail sums over.
@@ -195,6 +223,18 @@ func (e *Evaluator) OnSample(x model.Sample) {
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
 			e.judge(&h.netSlow, x.Host, KindNetConnectSlow, "", e.cfg.Network.ConnectLatency, p99, x.Time, e.destDecorator(x.Host, "slow"))
 		}
+	case "dnslat":
+		if x.DNS == nil {
+			return
+		}
+		var fails uint64
+		for _, n := range x.DNS.Names {
+			fails += n.Fails
+		}
+		e.judge(&h.dnsFail, x.Host, KindDNSFail, "", e.cfg.DNS.Fails, float64(h.dnsRing.add(x.Time, fails)), x.Time, e.nameDecorator(x.Host, "fails"))
+		if p99, ok := Percentile(x.Slots, 0.99); ok {
+			e.judge(&h.dnsSlow, x.Host, KindDNSSlow, "", e.cfg.DNS.Latency, p99, x.Time, e.nameDecorator(x.Host, "slow"))
+		}
 	case "gpu":
 		if x.GPU == nil || x.IntervalMs <= 0 {
 			return
@@ -257,6 +297,75 @@ func (h *hostState) failsInWindow(t time.Time, fails uint64) uint64 {
 		sum += v
 	}
 	return sum
+}
+
+// --- which names ---
+
+// nameCulprits applies the culprit grouping rule to looked-up names over the dnslat samples of [from, to]: by their
+// share of failed lookups ("fails") or of time spent resolving them ("slow").
+func (e *Evaluator) nameCulprits(host string, from, to time.Time, by string) ([]model.Culprit, float64) {
+	if e.history == nil {
+		return nil, 0
+	}
+	shares, blocks := map[string]float64{}, map[string]float64{}
+	var all float64
+	for _, s := range e.history.Samples(host, "dnslat") {
+		if s.Time.Before(from) || s.Time.After(to) || s.DNS == nil {
+			continue
+		}
+		for _, n := range s.DNS.Names {
+			v := float64(n.LatNs)
+			if by == "fails" {
+				v = float64(n.Fails)
+			}
+			if v == 0 {
+				continue
+			}
+			name, block := n.Name, "*."+parentDomain(n.Name)
+			if by == "fails" && n.LastError != "" {
+				name = fmt.Sprintf("%s (%s)", n.Name, n.LastError)
+				block = fmt.Sprintf("%s (%s)", block, n.LastError)
+			}
+			shares[name] += v
+			blocks[block] += v
+			all += v
+		}
+	}
+	if all == 0 {
+		return nil, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	if group, total := GroupCulprits(shares); len(group) > 0 {
+		return group, total
+	}
+	// No single name stands out (a service looking up db-1..db-8 under one zone, one failure each): try again per
+	// parent domain, "*.internal.example (NONAME)"
+	for k, v := range blocks {
+		blocks[k] = v / all
+	}
+	return GroupCulprits(blocks)
+}
+
+// parentDomain drops the first label: "db-1.internal.example" → "internal.example". A name with fewer than
+// three labels is its own parent ("example.com" stays "example.com").
+func parentDomain(name string) string {
+	name = strings.TrimSuffix(name, ".")
+	if strings.Count(name, ".") < 2 {
+		return name
+	}
+	return name[strings.Index(name, ".")+1:]
+}
+
+func (e *Evaluator) nameDecorator(host, by string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare = e.nameCulprits(host, i.Start, end, by)
+	}
 }
 
 // --- which destinations ---
@@ -609,6 +718,8 @@ func (e *Evaluator) Tick(now time.Time) {
 		e.closeIfQuiet(&h.netFail, e.cfg.Network.ConnectFails, now, e.destDecorator(host, "fails"))
 		e.closeIfQuiet(&h.netRetrans, e.cfg.Network.Retrans, now, e.destDecorator(host, "retrans"))
 		e.closeIfQuiet(&h.netSlow, e.cfg.Network.ConnectLatency, now, e.destDecorator(host, "slow"))
+		e.closeIfQuiet(&h.dnsFail, e.cfg.DNS.Fails, now, e.nameDecorator(host, "fails"))
+		e.closeIfQuiet(&h.dnsSlow, e.cfg.DNS.Latency, now, e.nameDecorator(host, "slow"))
 		for name, ex := range h.vmcpu {
 			e.closeIfQuiet(ex, e.cfg.CPU, now, e.culpritDecorator(host, "vm:"+name))
 			if !ex.active {

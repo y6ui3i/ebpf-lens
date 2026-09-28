@@ -12,6 +12,7 @@ export type Triggers = {
   gpu: { idleUtil: number; starved: ExcursionRule; vram: ExcursionRule }; // shares 0..1
   disk: ExcursionRule; // block I/O latency p99, in µs
   network: { connectFails: ExcursionRule; connectLatency: ExcursionRule; retrans: ExcursionRule }; // per second, µs, per second
+  dns: { fails: ExcursionRule; latency: ExcursionRule }; // failed lookups in 10 s; getaddrinfo p99 in µs
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -29,6 +30,10 @@ export const DEFAULT_TRIGGERS: Triggers = {
     connectFails: { caution: 5, warning: 50, minSeconds: 1, maxGapSeconds: 10 }, // failed connects in the last 10 s
     connectLatency: { caution: 200_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
     retrans: { caution: 10, warning: 100, minSeconds: 3, maxGapSeconds: 5 },
+  },
+  dns: {
+    fails: { caution: 5, warning: 50, minSeconds: 1, maxGapSeconds: 10 },
+    latency: { caution: 100_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
   },
 };
 
@@ -55,6 +60,10 @@ export function useTriggers(): Triggers {
       connectFails: { ...DEFAULT_TRIGGERS.network.connectFails, ...d.network?.connectFails },
       connectLatency: { ...DEFAULT_TRIGGERS.network.connectLatency, ...d.network?.connectLatency },
       retrans: { ...DEFAULT_TRIGGERS.network.retrans, ...d.network?.retrans },
+    },
+    dns: {
+      fails: { ...DEFAULT_TRIGGERS.dns.fails, ...d.dns?.fails },
+      latency: { ...DEFAULT_TRIGGERS.dns.latency, ...d.dns?.latency },
     },
   };
 }

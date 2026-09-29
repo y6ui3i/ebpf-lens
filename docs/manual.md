@@ -22,8 +22,8 @@ Language: **EN / 日本語** in the top bar. Host: the selector in the top bar (
 
 ### What you need
 
-- **Monitored hosts**: Linux with kernel BTF (`/sys/kernel/btf/vmlinux` exists — Ubuntu, Fedora, RHEL 9, Debian 12 and later ship it). Tested on Ubuntu 26.04 / kernel 7.0. The agent is one static binary; nothing else is installed on the host.
-- **A build machine** (same architecture, any modern Linux): Go 1.25+, clang, llvm, libbpf-dev, bpftool. The UI is built once with Node 22 and embedded into the server binary, so browsers need nothing.
+- **Monitored hosts**: Linux with kernel BTF (`/sys/kernel/btf/vmlinux` exists — Ubuntu, Fedora, RHEL 9, Debian 12 and later ship it). Tested on Ubuntu 26.04 / kernel 7.0. The agent is one binary linked against glibc 2.34 or later (Ubuntu 22.04, Debian 12, RHEL 9 and newer); nothing else is installed on the host. Kernel **6.6 or later** is needed for two optional probes that use multi-uprobe links — the GPU's per-process detail and DNS; on an older kernel the agent runs without them. The GPU screen also needs an NVIDIA driver; without one there is simply no GPU row.
+- **A build machine** (same architecture; the same or an older distribution than the hosts, because the binaries link against the build machine's glibc): Go 1.25+, clang, llvm, libbpf-dev, bpftool, and **gcc** (cgo, for the official NVML binding the GPU probe uses; the Makefile silences the deprecation warnings from NVIDIA's header). The UI is built once with Node 22 and embedded into the server binary, so browsers need nothing.
 - **A server**: any Linux box the hosts can reach on one TCP port (default 8080). It can be one of the monitored hosts. SQLite is built in; no database service.
 - **Network**: agents → server `:8080` (HTTP), browsers → server `:8080`. There is no authentication (§7): keep this port inside a trusted network or behind a reverse proxy that adds it.
 

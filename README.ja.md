@@ -17,7 +17,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
  eBPF プローブ(+ /proc)        保存・API                      サーバーに埋め込んで配信
 ```
 
-- **エージェント**: Go + [cilium/ebpf](https://github.com/cilium/ebpf)(CO-RE)。監視対象にはカーネル BTF だけあればよく、単一バイナリで配れる
+- **エージェント**: Go + [cilium/ebpf](https://github.com/cilium/ebpf)(CO-RE)。監視対象にはカーネル BTF(GPU のプロセス別の内訳と DNS には 6.6 以上)があればよく、glibc 2.34 以降にリンクした単一バイナリで配れる
   - `runqlat`: CPU 実行待ち時間のヒストグラムと、プロセス別の CPU 使用・待ち
   - `proclife`: exec / exit / OOM kill のイベント(ring buffer)。コマンドライン引数はパスワードを含みうるので**取らない**
   - `memstall`: メモリ回収(`mm_vmscan_direct_reclaim_*` / `mm_vmscan_memcg_reclaim_*`)で止まった時間をプロセス別に。答え合わせに /proc/meminfo と /proc/pressure/memory も読む
@@ -45,7 +45,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 
 Go のビルドは監視対象と同じ種類の Linux 上で行う(`vmlinux.h` を実行中カーネルの BTF から生成するため)。画面は Node のあるマシンでビルドし、`internal/webui/dist` に出したものをサーバーに埋め込む。
 
-必要なもの: Go 1.25+、clang、llvm、libbpf-dev、bpftool(画面のビルドには Node)
+必要なもの: Go 1.25+、clang、llvm、libbpf-dev、bpftool、gcc(NVML バインディングの cgo 用)、画面のビルドには Node。バイナリはビルド機の glibc(いまは 2.34 以降)にリンクされるので、監視対象と同じかそれより古いディストリでビルドする
 
 ```bash
 make web      # 型生成 + 画面のビルド(Node のあるマシン)

@@ -17,7 +17,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
  eBPF probes (+ /proc)          storage, API                   embedded in the server
 ```
 
-- **Agent**: Go + [cilium/ebpf](https://github.com/cilium/ebpf) (CO-RE). A monitored host only needs kernel BTF; the agent ships as a single binary.
+- **Agent**: Go + [cilium/ebpf](https://github.com/cilium/ebpf) (CO-RE). A monitored host needs kernel BTF (and 6.6+ for the GPU per-process detail and DNS probes); the agent ships as a single binary linked against glibc 2.34+.
   - `runqlat`: CPU run-queue latency histogram, plus per-process CPU time and run-queue wait
   - `proclife`: exec / exit / OOM-kill events via a ring buffer. Command-line arguments are deliberately **not** captured because they can contain passwords.
   - `memstall`: per-process time stalled in memory reclaim (`mm_vmscan_direct_reclaim_*` / `mm_vmscan_memcg_reclaim_*`). `/proc/meminfo` and `/proc/pressure/memory` are read only to cross-check.
@@ -45,7 +45,7 @@ ebpflens-agent (Go)  ──JSON──▶ ebpflens-server (Go)  ──SSE/API─�
 
 Build the Go binaries on the same kind of Linux you monitor (`vmlinux.h` is generated from the running kernel's BTF). Build the UI on any machine with Node; the output in `internal/webui/dist` is embedded into the server.
 
-Requirements: Go 1.25+, clang, llvm, libbpf-dev, bpftool (and Node for the UI).
+Requirements: Go 1.25+, clang, llvm, libbpf-dev, bpftool, gcc (cgo for the NVML binding), and Node for the UI. Build on the same or an older distribution than the hosts you monitor: the binaries link against the build machine's glibc (2.34+ today).
 
 ```bash
 make web      # generate TS types + build the UI (on a machine with Node)

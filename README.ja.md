@@ -277,6 +277,7 @@ Lens Summary(と各 VM のページ)に **送る報告文** がある。状況�
 11. ✅ ディスク(biolatency: I/O ごとの待ち時間、ディスクごと、誰が出したか。`disk_slow` / `disk_error`)とネットワーク(tcpconnect / tcpconnlat / tcpretrans を 1 つのプローブに。`net_connect_fail` / `net_connect_slow` / `net_retrans`)
 12. macOS エージェント: サーバー・画面・出来事の仕組みは同じまま、macOS が特別な権限なしに公開している範囲(CPU とロード、メモリ圧迫の段階、kqueue によるプロセスの起動・終了、libproc によるプロセス別 CPU)を流す。macOS には eBPF がないので、実行待ち時間の分布やプロセス別の回収停止は取れない。Mac は「できる範囲」であって本線ではない。収集部は OS ごとに分ける([ADR 0002](docs/adr/0002-collectors-per-os.md))。Windows は需要があれば(ETW になる)
 13. ✅ パケット破棄をカーネル自身の理由付きで(`kfree_skb` + `enum skb_drop_reason`。名前は動いているカーネルの BTF から読む。ポートで待ち受けるプロセスは `inet_csk_listen_start` から。カーネルが報告しない accept 待ち行列満杯の SYN は `tcp_conn_request` の `fexit` から。`net_drop`)
+14. eBPF でしか見えないものをさらに、この順で(2026-09-30 に決めた。「報告文はもういい、eBPF 側を広げる」): **ファイル操作の失敗と fsync 待ち**(`openat` の ENOENT / EACCES をパスとプロセス付きで。設定ミスの半分はこれ。`ext4_sync_file_enter/exit` で「DB の fsync が 300 ms 止まった」をディスク画面につなぐ)、**ロック・futex 待ち**(`contention_begin/end`、`futex`: CPU も I/O も待っていないのに自分の鎖で止まっている。GPU 判定の「別の待ち」に欠けていた答え)、**ページフォールト・スワップ**(`page_fault_user`、swap in/out: スワップ往復しているホストの被害者。メモリ画面を回収停止の先へ広げる)、**softirq / IRQ 遅延**(`softirq_entry/exit`、`irq_handler_*`: ネットワーク割り込みが 1 つの CPU を占有。高負荷 NIC と VM ホスト向け)
 
 ## 判定のしきい値(仮)
 

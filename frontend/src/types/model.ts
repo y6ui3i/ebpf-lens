@@ -46,10 +46,35 @@ export interface DNSName {
   lastError?: string; // EAI_* name of the last failure: "NONAME" (no such name), "AGAIN" (no answer in time), "FAIL", ...
 }
 /**
- * NetStat is one interval of outbound TCP activity per destination. Procs on the same sample say who connected.
+ * NetStat is one interval of outbound TCP activity per destination, plus the packets the kernel dropped meanwhile
+ * (kfree_skb with its reason). Procs on the same sample say who connected.
  */
 export interface NetStat {
   dests: NetDest[];
+  drops?: NetDrop[]; // every drop of the interval, by reason
+  dropFlows?: NetDropFlow[]; // the trouble and notable ones, by reason and addresses
+}
+/**
+ * NetDrop is how many packets the kernel dropped for one reason during the interval.
+ */
+export interface NetDrop {
+  reason: string; // the kernel's name without the SKB_DROP_REASON_ prefix: "TCP_LISTEN_OVERFLOW", "NETFILTER_DROP", "NO_SOCKET", ...
+  count: number /* uint64 */;
+  tier: string; // "trouble" (opens an incident) | "notable" (shown with addresses) | "noise" (housekeeping every connection produces)
+}
+/**
+ * NetDropFlow is the drops of one reason from one source address to one destination address and port. The
+ * source port is not recorded (it is the client's ephemeral port, different for every attempt). Src/Dst are
+ * empty when the packet had no parsable IP header (a Unix socket, a frame dropped before the network layer).
+ */
+export interface NetDropFlow {
+  reason: string;
+  proto?: string; // "tcp" | "udp" | "icmp" | "" (other or unknown)
+  src?: string;
+  dst?: string;
+  dport?: number /* uint16 */;
+  count: number /* uint64 */;
+  listener?: string; // the process listening on Dport on this host, when the kernel told us (TCP sockets that entered LISTEN while the agent ran)
 }
 /**
  * NetDest is one destination (address and port) during the interval.
@@ -225,7 +250,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "dns_fail" | "dns_slow"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;

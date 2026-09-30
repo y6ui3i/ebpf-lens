@@ -8,6 +8,11 @@
 //     retransmitted (the initial RTO), i.e. packets are being lost on the way to that destination
 //   - SYN_SENT -> CLOSE is a failed connect (refused, unreachable, timed out)
 //   - tcp_retransmit_skb counts retransmitted segments per destination (packet loss or a congested path)
+//   - kfree_skb: every packet the kernel drops, with the kernel's own reason (enum skb_drop_reason: a full
+//     accept queue, a firewall rule, no route, a duplicate segment...). Counted per reason; for the reasons that
+//     are not everyday housekeeping, also per (reason, addresses, ports) so the row says who sent what to where.
+//     A drop runs in softirq context most of the time, so the current task says nothing about the owner; the
+//     listening process is learned separately (inet_csk_listen_start) and joined by port in user space
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -20,8 +25,57 @@
 #define AF_INET 2
 #define AF_INET6 10
 #define IPPROTO_TCP 6
+#define IPPROTO_UDP 17
+#define MAX_REASONS 256
+#define HDR_UNSET 0xffff // an skb header offset that was never set
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
+
+// Reasons that are housekeeping (set by the agent from the kernel's own enum names before loading): counted per
+// reason, but no per-flow row. Everything else gets a row with addresses
+const volatile u8 noisy[MAX_REASONS];
+
+// The value of TCP_LISTEN_OVERFLOW on this kernel (set by the agent from the enum; 0 disables handle_conn_request)
+const volatile u32 listen_overflow_reason;
+
+// One drop flow: reason and the packet's addresses (v4 in [3], v6 in all four; empty when the packet had no IP
+// header). The source port is left out on purpose: it is the client's ephemeral port, different for every
+// attempt, and would turn one refused service into hundreds of rows
+struct drop_key {
+	u32 saddr[4];
+	u32 daddr[4];
+	u32 reason;
+	u16 dport;
+	u8 family;
+	u8 proto;
+};
+
+// The process that put a TCP socket into LISTEN, by local port
+struct tcp_listener {
+	u32 tgid;
+	char comm[TASK_COMM_LEN];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, MAX_REASONS);
+	__type(key, u32);
+	__type(value, u64);
+} drop_reasons SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct drop_key);
+	__type(value, u64);
+} drop_flows SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, u32); // local port
+	__type(value, struct tcp_listener);
+} listeners SEC(".maps");
 
 struct proc_key {
 	u32 tgid;
@@ -181,6 +235,11 @@ int BPF_PROG(handle_set_state, const struct sock *sk, int oldstate, int newstate
 	}
 	if (newstate == BPF_TCP_CLOSE)
 		bpf_map_delete_elem(&outbound, &key);
+	if (oldstate == BPF_TCP_LISTEN && newstate == BPF_TCP_CLOSE) {
+		u32 port = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+		bpf_map_delete_elem(&listeners, &port);
+	}
 	if (oldstate != BPF_TCP_SYN_SENT)
 		return 0;
 	s = bpf_map_lookup_elem(&start, &key);
@@ -249,5 +308,125 @@ int BPF_PROG(handle_retransmit, const struct sock *sk, const struct sk_buff *skb
 	}
 	if (dv)
 		__sync_fetch_and_add(&dv->retrans, 1);
+	return 0;
+}
+
+// listen() runs in the caller's context. Entering LISTEN does not fire inet_sock_set_state (the kernel stores
+// that state directly), so the function that does it is traced instead; leaving LISTEN does fire it (see above)
+SEC("fentry/inet_csk_listen_start")
+int BPF_PROG(handle_listen, struct sock *sk)
+{
+	struct task_struct *t = (struct task_struct *)bpf_get_current_task_btf();
+	struct tcp_listener l = {};
+	u32 port = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+	l.tgid = t->tgid;
+	bpf_probe_read_kernel_str(l.comm, sizeof(l.comm), t->group_leader->comm);
+	bpf_map_update_elem(&listeners, &port, &l, BPF_ANY);
+	return 0;
+}
+
+// parse_skb fills the addresses, ports and protocol from the packet's own headers. The network header offset is
+// trusted only if the first nibble there is an IP version; the transport header offset is used when it was set,
+// otherwise it is computed from the IP header (a packet dropped before the transport layer saw it)
+static __always_inline void parse_skb(const struct sk_buff *skb, struct drop_key *k)
+{
+	unsigned char *head = BPF_CORE_READ(skb, head);
+	u16 nh = BPF_CORE_READ(skb, network_header);
+	u16 th = BPF_CORE_READ(skb, transport_header);
+	u32 thoff;
+	u8 first;
+	u16 ports[2];
+
+	if (!head || nh == HDR_UNSET)
+		return;
+	if (bpf_probe_read_kernel(&first, sizeof(first), head + nh))
+		return;
+	if ((first >> 4) == 4) {
+		struct iphdr ip;
+
+		if (bpf_probe_read_kernel(&ip, sizeof(ip), head + nh))
+			return;
+		k->family = AF_INET;
+		k->saddr[3] = ip.saddr;
+		k->daddr[3] = ip.daddr;
+		k->proto = ip.protocol;
+		thoff = nh + (u32)(ip.ihl & 0xf) * 4;
+	} else if ((first >> 4) == 6) {
+		struct ipv6hdr ip6;
+
+		if (bpf_probe_read_kernel(&ip6, sizeof(ip6), head + nh))
+			return;
+		k->family = AF_INET6;
+		__builtin_memcpy(k->saddr, ip6.saddr.in6_u.u6_addr32, sizeof(k->saddr));
+		__builtin_memcpy(k->daddr, ip6.daddr.in6_u.u6_addr32, sizeof(k->daddr));
+		k->proto = ip6.nexthdr;
+		thoff = nh + sizeof(ip6);
+	} else {
+		return;
+	}
+	if (th != HDR_UNSET && th > nh)
+		thoff = th;
+	if (k->proto != IPPROTO_TCP && k->proto != IPPROTO_UDP)
+		return;
+	if (bpf_probe_read_kernel(ports, sizeof(ports), head + thoff))
+		return;
+	k->dport = bpf_ntohs(ports[1]);
+}
+
+static const u64 zero64;
+
+// record_drop counts one drop under its reason and, unless the reason is housekeeping, under its flow
+static __always_inline void record_drop(u32 idx, const struct sk_buff *skb)
+{
+	struct drop_key k = {};
+	u64 *cnt;
+
+	if (idx >> 16 || idx >= MAX_REASONS)
+		idx = MAX_REASONS - 1; // a subsystem's own reason space (mac80211 etc.): one bucket for all of them
+	cnt = bpf_map_lookup_elem(&drop_reasons, &idx);
+	if (cnt)
+		*cnt += 1;
+	// The verifier forgets the bound once idx has been passed to a map helper: re-establish it before indexing
+	barrier_var(idx);
+	if (idx >= MAX_REASONS || noisy[idx])
+		return;
+	k.reason = idx;
+	parse_skb(skb, &k);
+	cnt = bpf_map_lookup_elem(&drop_flows, &k);
+	if (!cnt) {
+		bpf_map_update_elem(&drop_flows, &k, &zero64, BPF_NOEXIST);
+		cnt = bpf_map_lookup_elem(&drop_flows, &k);
+	}
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
+// Every dropped packet, with the kernel's reason. Kernels since 6.11 pass a fourth argument (the receiving
+// socket); only the first three are used, so this loads on 6.6 as well
+SEC("tp_btf/kfree_skb")
+int BPF_PROG(handle_drop, struct sk_buff *skb, void *location, enum skb_drop_reason reason)
+{
+	record_drop(reason, skb);
+	return 0;
+}
+
+// A SYN that arrives while the listener's accept queue is full is dropped inside tcp_conn_request, but its
+// caller frees it with consume_skb, so kfree_skb never sees it (the kernel only names TCP_LISTEN_OVERFLOW for
+// the handshake's final ACK). The queue being full when tcp_conn_request returns is that drop: record it under
+// the same reason, so "the server is not accepting fast enough" shows up whichever packet the kernel refused
+SEC("fexit/tcp_conn_request")
+int BPF_PROG(handle_conn_request, struct request_sock_ops *rsk_ops, const struct tcp_request_sock_ops *af_ops,
+	     struct sock *sk, struct sk_buff *skb, int ret)
+{
+	u32 backlog, limit;
+
+	if (!listen_overflow_reason)
+		return 0;
+	backlog = BPF_CORE_READ(sk, sk_ack_backlog);
+	limit = BPF_CORE_READ(sk, sk_max_ack_backlog);
+	if (backlog <= limit)
+		return 0;
+	record_drop(listen_overflow_reason, skb);
 	return 0;
 }

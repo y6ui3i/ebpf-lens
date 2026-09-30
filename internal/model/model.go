@@ -39,9 +39,32 @@ type DNSName struct {
 	LastError string `json:"lastError,omitempty"` // EAI_* name of the last failure: "NONAME" (no such name), "AGAIN" (no answer in time), "FAIL", ...
 }
 
-// NetStat is one interval of outbound TCP activity per destination. Procs on the same sample say who connected.
+// NetStat is one interval of outbound TCP activity per destination, plus the packets the kernel dropped meanwhile
+// (kfree_skb with its reason). Procs on the same sample say who connected.
 type NetStat struct {
-	Dests []NetDest `json:"dests"`
+	Dests     []NetDest     `json:"dests"`
+	Drops     []NetDrop     `json:"drops,omitempty"`     // every drop of the interval, by reason
+	DropFlows []NetDropFlow `json:"dropFlows,omitempty"` // the trouble and notable ones, by reason and addresses
+}
+
+// NetDrop is how many packets the kernel dropped for one reason during the interval.
+type NetDrop struct {
+	Reason string `json:"reason"` // the kernel's name without the SKB_DROP_REASON_ prefix: "TCP_LISTEN_OVERFLOW", "NETFILTER_DROP", "NO_SOCKET", ...
+	Count  uint64 `json:"count"`
+	Tier   string `json:"tier"` // "trouble" (opens an incident) | "notable" (shown with addresses) | "noise" (housekeeping every connection produces)
+}
+
+// NetDropFlow is the drops of one reason from one source address to one destination address and port. The
+// source port is not recorded (it is the client's ephemeral port, different for every attempt). Src/Dst are
+// empty when the packet had no parsable IP header (a Unix socket, a frame dropped before the network layer).
+type NetDropFlow struct {
+	Reason   string `json:"reason"`
+	Proto    string `json:"proto,omitempty"` // "tcp" | "udp" | "icmp" | "" (other or unknown)
+	Src      string `json:"src,omitempty"`
+	Dst      string `json:"dst,omitempty"`
+	Dport    uint16 `json:"dport,omitempty"`
+	Count    uint64 `json:"count"`
+	Listener string `json:"listener,omitempty"` // the process listening on Dport on this host, when the kernel told us (TCP sockets that entered LISTEN while the agent ran)
 }
 
 // NetDest is one destination (address and port) during the interval.
@@ -191,7 +214,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "dns_fail" | "dns_slow"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -227,6 +250,7 @@ type Incident struct {
 	Device string `json:"device,omitempty"`
 	// net_connect_fail / net_retrans: Peak is the rate per second; Culprits are the destinations ("addr:port") that took most of it.
 	// net_connect_slow: Peak is the connect latency p99 in µs; Culprits are the destinations with the slowest connects
+	// net_drop: Peak is dropped packets (trouble tier) in the last 10 s; Culprits are "REASON dst:port (listener)"
 	// dns_fail: Peak is failed lookups in the last 10 s; Culprits are the names. dns_slow: Peak is the lookup p99 in µs
 }
 

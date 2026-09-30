@@ -5,7 +5,69 @@ import type { Level } from "./lens";
 import { formatUs, percentile } from "./hist";
 import { translate, type Key, type Lang, type Params } from "./i18n";
 
-export const NET_KINDS = ["net_connect_fail", "net_connect_slow", "net_retrans"] as const;
+export const NET_KINDS = ["net_connect_fail", "net_connect_slow", "net_retrans", "net_drop"] as const;
+
+export type DropTier = "trouble" | "notable" | "noise";
+const TIER_RANK: Record<DropTier, number> = { trouble: 0, notable: 1, noise: 2 };
+export const asTier = (s: string): DropTier => (s === "trouble" || s === "notable" ? s : "noise");
+
+// Packets dropped for a trouble reason, summed over the samples (housekeeping and notable ones do not count)
+export const troubleDrops = (samples: Sample[]) =>
+  samples.reduce((a, s) => a + (s.net?.drops ?? []).reduce((b, d) => b + (d.tier === "trouble" ? d.count : 0), 0), 0);
+
+export type DropReasonRow = { reason: string; tier: DropTier; count: number };
+
+// Drops by reason over the visible range: trouble first, then notable, then housekeeping; by count within a tier
+export function dropReasonRows(samples: Sample[]): DropReasonRow[] {
+  const acc = new Map<string, DropReasonRow>();
+  for (const s of samples) {
+    for (const d of s.net?.drops ?? []) {
+      const a = acc.get(d.reason) ?? { reason: d.reason, tier: asTier(d.tier), count: 0 };
+      a.count += d.count;
+      acc.set(d.reason, a);
+    }
+  }
+  return [...acc.values()].sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier] || b.count - a.count);
+}
+
+export type DropFlowRow = { key: string; reason: string; tier: DropTier; proto: string; from: string; to: string; listener: string; count: number };
+
+// Drop flows over the visible range (the trouble and notable reasons, with addresses), trouble first, then by count
+export function dropFlowRows(samples: Sample[]): DropFlowRow[] {
+  const acc = new Map<string, DropFlowRow>();
+  for (const s of samples) {
+    for (const f of s.net?.dropFlows ?? []) {
+      const from = f.src ?? "";
+      const to = f.dst ? (f.dport ? `${f.dst}:${f.dport}` : f.dst) : "";
+      const key = `${f.reason}|${f.proto ?? ""}|${from}|${to}`;
+      const a = acc.get(key) ?? { key, reason: f.reason, tier: asTier(tierOfFlow(s, f.reason)), proto: f.proto ?? "", from, to, listener: "", count: 0 };
+      a.count += f.count;
+      if (f.listener) a.listener = f.listener;
+      acc.set(key, a);
+    }
+  }
+  return [...acc.values()].sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier] || b.count - a.count);
+}
+
+// A flow's tier is that of its reason in the same sample's per-reason list (flows only exist for trouble and notable)
+function tierOfFlow(s: Sample, reason: string): string {
+  return s.net?.drops?.find((d) => d.reason === reason)?.tier ?? "notable";
+}
+
+// Client ports are noise: for the summary, a flow is "REASON to dst:port (listener)"
+export function dropFlowLabel(f: DropFlowRow): string {
+  let s = f.reason;
+  if (f.to) s += ` → ${f.to}`;
+  if (f.listener) s += ` (${f.listener})`;
+  return s;
+}
+
+// The kernel's meaning of a reason, when we have words for it (net.drop.<REASON>); otherwise the name itself
+export function dropExplain(reason: string, lang: Lang): string {
+  const k = `net.drop.${reason}` as Key;
+  const s = translate(lang, k);
+  return s === k ? reason : s;
+}
 
 const CURRENT_WINDOW = 5;
 
@@ -25,7 +87,7 @@ export function currentNet(samples: Sample[]) {
   };
   const sum = (f: (d: { fails: number; retrans: number }) => number) =>
     samples.reduce((a, s) => a + (s.net?.dests ?? []).reduce((b, d) => b + f(d), 0), 0);
-  return { p99, connectsPerSec: mean(connectsPerSec), fails: sum((d) => d.fails), retrans: sum((d) => d.retrans), has: samples.some((s) => s.net) };
+  return { p99, connectsPerSec: mean(connectsPerSec), fails: sum((d) => d.fails), retrans: sum((d) => d.retrans), drops: troubleDrops(samples), has: samples.some((s) => s.net) };
 }
 
 export type DestRow = { dest: string; connects: number; fails: number; retrans: number; avgNs: number; maxNs: number };
@@ -89,6 +151,18 @@ export function netSentence(samples: Sample[], lang: Lang, level: Level): string
   const parts: string[] = [];
   if (now.fails > 0) parts.push(tr("net.summary.fails", { n: now.fails, dest: top && top.fails > 0 ? tr("net.summary.mostly", { dest: top.dest }) : "" }));
   if (now.retrans > 0) parts.push(tr("net.summary.retrans", { n: now.retrans, dest: top && top.retrans > 0 ? tr("net.summary.mostly", { dest: top.dest }) : "" }));
+  if (now.drops > 0) {
+    // Flows aggregate the client's ephemeral ports away: the biggest reason+destination over the window
+    const byTarget = new Map<string, { label: string; count: number }>();
+    for (const f of dropFlowRows(samples).filter((f) => f.tier === "trouble")) {
+      const label = dropFlowLabel({ ...f, from: "" });
+      const a = byTarget.get(label) ?? { label, count: 0 };
+      a.count += f.count;
+      byTarget.set(label, a);
+    }
+    const first = [...byTarget.values()].sort((a, b) => b.count - a.count)[0];
+    parts.push(tr("net.summary.drops", { n: now.drops, mostly: first ? tr("net.summary.dropMostly", { what: first.label }) : "" }));
+  }
   const trouble = parts.join(" ");
   if (level !== "ok") return `${trouble} ${state}`.trim();
   return `${state} ${trouble || tr("net.summary.clean")}`.trim();

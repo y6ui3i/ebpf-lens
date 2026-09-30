@@ -32,12 +32,15 @@ type DNSRule struct {
 // NetworkRule: ConnectFails is the number of failed connects in the last 10 s (a burst of refused connects lasts
 // one second and is still an incident); Retrans is a rate per second; ConnectLatency is the connect p99 in µs.
 // A connect p99 at 1 s means the SYN itself was retransmitted (the initial RTO), i.e. packets to that destination
-// are being lost, so the warning sits there.
+// are being lost, so the warning sits there. Drops is the number of packets the kernel dropped for a trouble
+// reason (a full accept queue, a firewall rule, no route, no memory: see internal/netdrop) in the last 10 s;
+// housekeeping drops (duplicates, stale segments) never count.
 type NetworkRule struct {
 	ConnectFails      ExcursionRule `json:"connectFails"`
-	FailSpreadSeconds int           `json:"failSpreadSeconds"` // failures must fall in at least this many of the 10 s (a one-second burst is not an outage)
+	FailSpreadSeconds int           `json:"failSpreadSeconds"` // failures (and drops) must fall in at least this many of the 10 s (a one-second burst is not an outage)
 	ConnectLatency    ExcursionRule `json:"connectLatency"`
 	Retrans           ExcursionRule `json:"retrans"`
+	Drops             ExcursionRule `json:"drops"`
 }
 
 // GPURule: the GPU is "starved" when its utilization is below IdleUtil while a CUDA process is busy on the CPU
@@ -98,6 +101,10 @@ func Default() Config {
 			FailSpreadSeconds: 3,
 			ConnectLatency:    ExcursionRule{Caution: 200_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
 			Retrans:           ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 3, MaxGapSeconds: 5},
+			// Idle, the test host drops nothing for a trouble reason (IPV6DISABLED aside: 14 in 30 s from avahi on a
+			// host without IPv6, which is why that one is judged like the rest and not on its own). A full accept
+			// queue or a firewall rule drops every packet of every attempt, so 10 in 10 s is already a real problem
+			Drops: ExcursionRule{Caution: 10, Warning: 100, MinSeconds: 1, MaxGapSeconds: 10},
 		},
 		// An answer from the local stub (systemd-resolved) takes ~1 ms and one from upstream ~10-50 ms; 100 ms is slow,
 		// and 1 s is a server that did not answer and was retried
@@ -132,7 +139,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

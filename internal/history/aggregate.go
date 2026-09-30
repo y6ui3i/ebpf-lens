@@ -71,7 +71,11 @@ func clone(x model.Sample) model.Sample {
 		}
 	}
 	if x.Net != nil {
-		c.Net = &model.NetStat{Dests: append([]model.NetDest(nil), x.Net.Dests...)}
+		c.Net = &model.NetStat{
+			Dests:     append([]model.NetDest(nil), x.Net.Dests...),
+			Drops:     append([]model.NetDrop(nil), x.Net.Drops...),
+			DropFlows: append([]model.NetDropFlow(nil), x.Net.DropFlows...),
+		}
 	}
 	if x.DNS != nil {
 		c.DNS = &model.DNSStat{Names: append([]model.DNSName(nil), x.DNS.Names...)}
@@ -165,6 +169,28 @@ func merge(c *model.Sample, x model.Sample) {
 			t.LatNs += d.LatNs
 			t.LatMaxNs = max(t.LatMaxNs, d.LatMaxNs)
 		}
+		for _, d := range x.Net.Drops {
+			i := indexOf(len(c.Net.Drops), func(i int) bool { return c.Net.Drops[i].Reason == d.Reason })
+			if i < 0 {
+				c.Net.Drops = append(c.Net.Drops, d)
+				continue
+			}
+			c.Net.Drops[i].Count += d.Count
+		}
+		for _, f := range x.Net.DropFlows {
+			i := indexOf(len(c.Net.DropFlows), func(i int) bool {
+				g := c.Net.DropFlows[i]
+				return g.Reason == f.Reason && g.Src == f.Src && g.Dst == f.Dst && g.Dport == f.Dport && g.Proto == f.Proto
+			})
+			if i < 0 {
+				c.Net.DropFlows = append(c.Net.DropFlows, f)
+				continue
+			}
+			c.Net.DropFlows[i].Count += f.Count
+			if f.Listener != "" {
+				c.Net.DropFlows[i].Listener = f.Listener
+			}
+		}
 	}
 	if x.DNS != nil {
 		if c.DNS == nil {
@@ -233,6 +259,10 @@ func finish(c *model.Sample, n int) {
 			return a.Fails*4+a.Retrans+a.Connects > b.Fails*4+b.Retrans+b.Connects
 		})
 		c.Net.Dests = c.Net.Dests[:maxRows]
+	}
+	if c.Net != nil && len(c.Net.DropFlows) > maxRows {
+		sort.Slice(c.Net.DropFlows, func(i, j int) bool { return c.Net.DropFlows[i].Count > c.Net.DropFlows[j].Count })
+		c.Net.DropFlows = c.Net.DropFlows[:maxRows]
 	}
 	if c.DNS != nil && len(c.DNS.Names) > maxRows {
 		sort.Slice(c.DNS.Names, func(i, j int) bool {

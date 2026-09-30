@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/y6ui3i/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/netdrop"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/biolat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/dnslat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
@@ -92,6 +93,9 @@ func main() {
 		log.Fatalf("tcpconn: %v", err)
 	}
 	defer tc.Close()
+	if tc.Warning != "" {
+		log.Printf("tcpconn: %s", tc.Warning)
+	}
 
 	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
 	dns := openDNS()
@@ -369,12 +373,30 @@ func netSample(tc *tcpconn.Probe, vms *vm.Map, topN int) (model.Sample, error) {
 	if len(dests) > maxDests {
 		dests = dests[:maxDests]
 	}
+	drops, flows, err := tc.Drops()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	slices.SortFunc(drops, func(a, b model.NetDrop) int { return cmpDesc(a.Count, b.Count) })
+	// Trouble first, then by count: the rows that must survive the cap are the ones an incident would name
+	slices.SortFunc(flows, func(a, b model.NetDropFlow) int {
+		if ta, tb := netdrop.Tier(a.Reason) == netdrop.TierTrouble, netdrop.Tier(b.Reason) == netdrop.TierTrouble; ta != tb {
+			if ta {
+				return -1
+			}
+			return 1
+		}
+		return cmpDesc(a.Count, b.Count)
+	})
+	if len(flows) > maxDests {
+		flows = flows[:maxDests]
+	}
 	procs := topBy(all, topN,
 		func(a, b model.ProcStat) int { return cmpDesc(a.WaitCount, b.WaitCount) },
 		func(a, b model.ProcStat) int { return cmpDesc(a.ConnectFails, b.ConnectFails) },
 	)
 	return model.Sample{
-		Probe: "tcpconn", Unit: "usecs", Slots: slots[:], Procs: procs, Net: &model.NetStat{Dests: dests},
+		Probe: "tcpconn", Unit: "usecs", Slots: slots[:], Procs: procs, Net: &model.NetStat{Dests: dests, Drops: drops, DropFlows: flows},
 	}, nil
 }
 
@@ -441,6 +463,16 @@ func printNet(x model.Sample) {
 	for _, s := range x.Procs {
 		fmt.Printf("  %-16s x%-3d connects=%d fails=%d lat=%.2fms max=%.2fms\n",
 			s.Comm, s.Procs, s.WaitCount, s.ConnectFails, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6)
+	}
+	for _, d := range x.Net.Drops {
+		fmt.Printf("drop %-28s %-8s n=%d\n", d.Reason, d.Tier, d.Count)
+	}
+	for _, f := range x.Net.DropFlows {
+		who := ""
+		if f.Listener != "" {
+			who = " listener=" + f.Listener
+		}
+		fmt.Printf("  %-28s %s %s -> %s:%d n=%d%s\n", f.Reason, f.Proto, f.Src, f.Dst, f.Dport, f.Count, who)
 	}
 }
 

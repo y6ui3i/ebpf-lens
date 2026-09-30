@@ -68,7 +68,7 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
   // Network: connects per second, connect latency p99, and failed connects + retransmits in the visible range
   const net = currentNet(netSamples);
   const netSlowLevel = areaLevel(incidents, ["net_connect_slow"], nowMs);
-  const netErrLevel = areaLevel(incidents, ["net_connect_fail", "net_retrans"], nowMs);
+  const netErrLevel = areaLevel(incidents, ["net_connect_fail", "net_retrans", "net_drop"], nowMs);
   const dns = currentDns(dnsSamples);
 
   const rows: Row[] = [
@@ -144,7 +144,7 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
             kind: "value", value: formatUs(net.p99), note: t("use.netSat"),
             level: netSlowLevel, spark: netSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/network",
           },
-          { kind: "value", value: t("use.netErrValue", { fails: net.fails, retrans: net.retrans }), note: t("use.netErr"), level: netErrLevel, to: "/network" },
+          { kind: "value", value: t("use.netErrValue", { fails: net.fails, retrans: net.retrans, drops: net.drops }), note: t("use.netErr"), level: netErrLevel, to: "/network" },
         ],
     },
     {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/y6ui3i/ebpf-lens/internal/model"
+	"github.com/y6ui3i/ebpf-lens/internal/netdrop"
 )
 
 // Incident kinds and levels. Kept as plain strings because they travel as JSON to the UI and to webhooks.
@@ -29,6 +30,7 @@ const (
 	KindNetConnectFail = "net_connect_fail" // outbound TCP connects failing (refused / unreachable / timed out)
 	KindNetConnectSlow = "net_connect_slow" // connect latency p99 high: at 1 s the SYN itself is being retransmitted
 	KindNetRetrans     = "net_retrans"      // TCP segments retransmitted (packet loss or a congested path)
+	KindNetDrop        = "net_drop"         // the kernel dropped packets for a trouble reason (accept queue full, firewall, no route, no memory)
 	KindDNSFail        = "dns_fail"         // name lookups failing (getaddrinfo returned an error)
 	KindDNSSlow        = "dns_slow"         // name lookups slow (getaddrinfo p99)
 
@@ -79,6 +81,8 @@ type hostState struct {
 	disk                         excursion
 	netFail, netSlow, netRetrans excursion
 	netRing                      failRing // failed connects per second over the last failWindow seconds
+	netDrop                      excursion
+	dropRing                     failRing // trouble-tier drops per second over the last failWindow seconds
 	dnsFail, dnsSlow             excursion
 	dnsRing                      failRing
 }
@@ -242,6 +246,13 @@ func (e *Evaluator) OnSample(x model.Sample) {
 		}
 		e.judge(&h.netFail, x.Host, KindNetConnectFail, "", e.cfg.Network.ConnectFails, windowed(&h.netRing, x.Time, fails, e.cfg.Network.FailSpreadSeconds), x.Time, e.destDecorator(x.Host, "fails"))
 		e.judge(&h.netRetrans, x.Host, KindNetRetrans, "", e.cfg.Network.Retrans, float64(retrans)/sec, x.Time, e.destDecorator(x.Host, "retrans"))
+		var drops uint64
+		for _, d := range x.Net.Drops {
+			if d.Tier == netdrop.TierTrouble {
+				drops += d.Count
+			}
+		}
+		e.judge(&h.netDrop, x.Host, KindNetDrop, "", e.cfg.Network.Drops, windowed(&h.dropRing, x.Time, drops, e.cfg.Network.FailSpreadSeconds), x.Time, e.dropDecorator(x.Host))
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
 			e.judge(&h.netSlow, x.Host, KindNetConnectSlow, "", e.cfg.Network.ConnectLatency, p99, x.Time, e.destDecorator(x.Host, "slow"))
 		}
@@ -446,6 +457,70 @@ func (e *Evaluator) destDecorator(host, by string) func(*model.Incident) {
 			end = *i.End
 		}
 		i.Culprits, i.CulpritShare = e.destCulprits(host, i.Start, end, by)
+	}
+}
+
+// dropCulprits applies the culprit grouping rule to the trouble-tier drop flows of [from, to]: first by reason
+// and destination ("TCP_LISTEN_OVERFLOW 192.168.10.250:8080 (python3)"), and when nothing stands out (a scan
+// across many ports, a firewall rule dropping traffic from many sources) by reason alone.
+func (e *Evaluator) dropCulprits(host string, from, to time.Time) ([]model.Culprit, float64) {
+	if e.history == nil {
+		return nil, 0
+	}
+	shares := map[string]float64{}
+	byReason := map[string]float64{}
+	var all float64
+	for _, s := range e.history.Samples(host, "tcpconn") {
+		if s.Time.Before(from) || s.Time.After(to) || s.Net == nil {
+			continue
+		}
+		for _, f := range s.Net.DropFlows {
+			if netdrop.Tier(f.Reason) != netdrop.TierTrouble || f.Count == 0 {
+				continue
+			}
+			v := float64(f.Count)
+			shares[DropName(f)] += v
+			byReason[f.Reason] += v
+			all += v
+		}
+	}
+	if all == 0 {
+		return nil, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	if group, total := GroupCulprits(shares); len(group) > 0 {
+		return group, total
+	}
+	for k, v := range byReason {
+		byReason[k] = v / all
+	}
+	return GroupCulprits(byReason)
+}
+
+// DropName renders a drop flow as a culprit: the reason, the destination, and the listening process when known.
+func DropName(f model.NetDropFlow) string {
+	name := f.Reason
+	if f.Dst != "" {
+		name += " " + f.Dst
+		if f.Dport != 0 {
+			name = fmt.Sprintf("%s %s:%d", f.Reason, f.Dst, f.Dport)
+		}
+	}
+	if f.Listener != "" {
+		name += " (" + f.Listener + ")"
+	}
+	return name
+}
+
+func (e *Evaluator) dropDecorator(host string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare = e.dropCulprits(host, i.Start, end)
 	}
 }
 

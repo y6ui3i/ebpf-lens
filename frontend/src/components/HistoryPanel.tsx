@@ -34,7 +34,7 @@ const ROWS: Row[] = [
   { key: "resource.processes", path: "/processes", probe: "", kinds: ["crash", "crash_loop"] },
   { key: "resource.vms", path: "/vms", probe: "vms", kinds: ["vm_down", "vm_cpu_wait"], value: (s) => s.vms?.length ?? 0, format: (v) => `${v}` },
   { key: "resource.disk", path: "/disk", probe: "biolat", kinds: ["disk_slow", "disk_error"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
-  { key: "resource.network", path: "/network", probe: "tcpconn", kinds: ["net_connect_fail", "net_connect_slow", "net_retrans"], value: retransPerSec, format: (v) => `${v.toFixed(1)}/s` },
+  { key: "resource.network", path: "/network", probe: "tcpconn", kinds: ["net_connect_fail", "net_connect_slow", "net_retrans", "net_drop"], value: retransPerSec, format: (v) => `${v.toFixed(1)}/s` },
   { key: "resource.dns", path: "/dns", probe: "dnslat", kinds: ["dns_fail", "dns_slow"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
   { key: "resource.gpu", path: "/gpu", probe: "gpu", kinds: ["gpu_starved", "vram_full"], value: (s) => { const u = gpuUtil(s); return u == null ? null : u * 100; }, format: (v) => `${Math.round(v)}%` },
 ];

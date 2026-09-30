@@ -64,6 +64,16 @@ func TestDestinationsAndNamesMergeByKey(t *testing.T) {
 	if len(b.Net.Dests) != 2 || b.Net.Dests[0].Fails != 5 {
 		t.Fatalf("dests: %+v", b.Net.Dests)
 	}
+	zs := []model.Sample{
+		{Probe: "tcpconn", Time: sec(0), Slots: []uint64{0}, Net: &model.NetStat{Drops: []model.NetDrop{{Reason: "TCP_LISTEN_OVERFLOW", Count: 3, Tier: "trouble"}},
+			DropFlows: []model.NetDropFlow{{Reason: "TCP_LISTEN_OVERFLOW", Proto: "tcp", Src: "10.0.0.4", Dst: "10.0.0.5", Dport: 8080, Count: 3}}}},
+		{Probe: "tcpconn", Time: sec(1), Slots: []uint64{0}, Net: &model.NetStat{Drops: []model.NetDrop{{Reason: "TCP_LISTEN_OVERFLOW", Count: 2, Tier: "trouble"}, {Reason: "TCP_OLD_DATA", Count: 9, Tier: "noise"}},
+			DropFlows: []model.NetDropFlow{{Reason: "TCP_LISTEN_OVERFLOW", Proto: "tcp", Src: "10.0.0.4", Dst: "10.0.0.5", Dport: 8080, Count: 2, Listener: "python3"}}}},
+	}
+	d := Aggregate(zs, time.Minute)[0]
+	if len(d.Net.Drops) != 2 || d.Net.Drops[0].Count != 5 || len(d.Net.DropFlows) != 1 || d.Net.DropFlows[0].Count != 5 || d.Net.DropFlows[0].Listener != "python3" {
+		t.Fatalf("drops: %+v flows: %+v", d.Net.Drops, d.Net.DropFlows)
+	}
 	ys := []model.Sample{
 		{Probe: "dnslat", Time: sec(0), Slots: []uint64{0}, DNS: &model.DNSStat{Names: []model.DNSName{{Name: "db.internal", Lookups: 2, Fails: 2, LastError: "NONAME"}}}},
 		{Probe: "dnslat", Time: sec(5), Slots: []uint64{0}, DNS: &model.DNSStat{Names: []model.DNSName{{Name: "db.internal", Lookups: 1, Fails: 1}}}},

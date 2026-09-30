@@ -191,6 +191,16 @@ lab での webhook の文面: `[CAUTION] hal: VM fleet-04 is waiting for host CP
 
 検証機で再現: 閉じたポートへ 6 回接続 → `net_connect_fail` が `127.0.0.1:9 (100%)` を名指し。`tc qdisc add dev lo root netem loss 40%` の間にローカルのサーバーへ curl 40 本 → 接続 p99 が 1〜2 秒(SYN の再送 1〜2 回)、再送 40/秒超、どちらも `127.0.0.1:8080` を名指し。再送はカーネルの文脈で起きて持ち主のプロセスが分からないので、宛先ごとにだけ数える。
 
+### カーネルはなぜそのパケットを捨てたのか
+
+5.17 以降のカーネルは、捨てるパケットすべてに理由を付ける(`enum skb_drop_reason`、7.0 では 130 種類)。`kfree_skb` tracepoint がそれを渡してくれる。eBPFLens は破棄を理由ごとに数え、名前は動いているカーネルの BTF から読む(番号は版で変わるので、そのカーネルの名前と必ず一致する)。理由は 3 段に分ける(`internal/netdrop`): **日常**(`TCP_OLD_SEQUENCE`、`TCP_OLD_DATA`、`SOCKET_CLOSE`、`NOT_SPECIFIED`……健全な接続でも出る重複や古いセグメント。何もしていない検証機の毎秒 10 件ほどの破棄は全部これ)、**注目**(`NO_SOCKET`: 誰も待ち受けていないポートへのパケット。`TCP_RESET`……)、**問題**(`TCP_LISTEN_OVERFLOW`: accept 待ち行列が満杯、サーバーが `accept()` を呼ぶ速さが足りない。`SOCKET_RCVBUFF`: アプリが読んでいない。`NETFILTER_DROP`: ファイアウォールのルール。`IP_OUTNOROUTES`、`NEIGH_FAILED`: 経路。`QDISC_DROP`、`CPU_BACKLOG`: インターフェースか CPU の飽和。`NOMEM`、`PROTO_MEM`: メモリ)。注目と問題については BPF プログラムの中でパケット自身のヘッダを読み、*誰が何をどこへ送ったか*を行にする: 理由、プロトコル、送信元アドレス、宛先アドレスとポート。送信元ポートはわざと入れない。クライアントの一時ポートで、入れると拒否されたサービス 1 つが数百行になる。
+
+破棄は softirq の文脈で起きるので、その時の current task はソケットの持ち主と関係がない。代わりに**誰がどのポートで待ち受けているか**を `inet_csk_listen_start` で覚え(`listen()` は呼び出し元の文脈で走る。LISTEN に入るときは状態遷移の tracepoint が鳴らない)、宛先ポートで結合する。そしてカーネルが*報告しない*破棄が 1 つある: accept 待ち行列が満杯のときに届いた SYN は `tcp_conn_request` の中で拒まれるが、呼び出し元が `consume_skb` で消すので `kfree_skb` には出てこない(カーネルが `TCP_LISTEN_OVERFLOW` を付けるのはハンドシェイク最後の ACK だけ)。`tcp_conn_request` の `fexit` で「戻ったとき待ち行列が上限を超えていたか」を見て、その SYN を同じ理由で記録する。どのパケットが拒まれても「サーバーが受け取り切れていない」と出るように。
+
+出来事は 1 つ: `net_drop`(問題の理由の破棄が 10 秒間に 10 件以上、そのうち 3 秒以上に散らばっている。100 件で警告)。大半を占めた理由と宛先を名指しし(`TCP_LISTEN_OVERFLOW 192.168.10.250:8099 (python3)`)、どの流れも目立たなければ理由だけで(多数の送信元からの通信を捨てるファイアウォールのルール)。次の一手は理由で決まる: LISTEN_OVERFLOW なら待ち受けているプロセス、NETFILTER_DROP ならルール、NOROUTES なら `ip route`、MEM ならメモリ画面。
+
+検証機で再現: `listen(1)` で accept しない Python サーバーへ 24 回接続 → 22 回がタイムアウトし、`net_drop` が `TCP_LISTEN_OVERFLOW 192.168.10.250:8099 (python3) (100%)` を名指し。ポート 8098 を捨てる `nft` ルールにクライアントが再試行し続ける → `NETFILTER_DROP 192.168.10.250:8098` が 72%、待ち行列溢れが 28%、1 つの出来事に両方。ついでに見つかったもの: IPv6 経路のないホストで avahi と NetworkManager が出す `IPV6DISABLED`。接続失敗のルールが指していたのと同じ事実が、今度はカーネル自身の言葉で出る。
+
 ## DNS なのか
 
 「結局 DNS だった」が運用の一番古い落ちなのは、名前解決がすべての接続の手前にあるのに誰も計っていないからだ。eBPFLens はアプリケーションが実際に呼ぶ glibc の **`getaddrinfo`** に uprobe を付け、毎秒、名前・呼び出しにかかった時間・結果(`EAI_NONAME` = その名前は存在しない、`EAI_AGAIN` = 時間内に応答なし、…)を、名前ごと・プロセスごとに記録する。リゾルバが下でやること(`/etc/hosts`、nsswitch、ローカルのキャッシュ systemd-resolved、応答しない上流への再試行)はすべてその時間に入る。
@@ -266,6 +276,7 @@ Lens Summary(と各 VM のページ)に **送る報告文** がある。状況�
 10. ✅ GPU × eBPF: libcuda への uprobe でプロセスごとのカーネル起動・転送・同期待ちを測り、「GPU が遊んでいる理由」を出す(上の「なぜ GPU が遊んでいるのか」と [ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md))
 11. ✅ ディスク(biolatency: I/O ごとの待ち時間、ディスクごと、誰が出したか。`disk_slow` / `disk_error`)とネットワーク(tcpconnect / tcpconnlat / tcpretrans を 1 つのプローブに。`net_connect_fail` / `net_connect_slow` / `net_retrans`)
 12. macOS エージェント: サーバー・画面・出来事の仕組みは同じまま、macOS が特別な権限なしに公開している範囲(CPU とロード、メモリ圧迫の段階、kqueue によるプロセスの起動・終了、libproc によるプロセス別 CPU)を流す。macOS には eBPF がないので、実行待ち時間の分布やプロセス別の回収停止は取れない。Mac は「できる範囲」であって本線ではない。収集部は OS ごとに分ける([ADR 0002](docs/adr/0002-collectors-per-os.md))。Windows は需要があれば(ETW になる)
+13. ✅ パケット破棄をカーネル自身の理由付きで(`kfree_skb` + `enum skb_drop_reason`。名前は動いているカーネルの BTF から読む。ポートで待ち受けるプロセスは `inet_csk_listen_start` から。カーネルが報告しない accept 待ち行列満杯の SYN は `tcp_conn_request` の `fexit` から。`net_drop`)
 
 ## 判定のしきい値(仮)
 

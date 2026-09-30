@@ -91,6 +91,8 @@ export function ownerOf(x: Incident, t: TFn): string {
       return (x.peak ?? 0) >= 1_000_000 ? t("owner.network") : x.culprits?.length ? t("owner.dest", { list: names(x, t) }) : t("owner.destUnknown");
     case "net_retrans":
       return t("owner.network");
+    case "net_drop":
+      return x.culprits?.length ? t("owner.dropCulprits", { list: names(x, t) }) : t("owner.dropUnknown");
     case "dns_fail":
       return x.culprits?.length ? t("owner.dnsNames", { list: names(x, t) }) : t("owner.dnsResolver");
     case "dns_slow":
@@ -110,6 +112,13 @@ export function nextOf(x: Incident, t: TFn): string {
   if (x.kind === "vm_cpu_wait") return t("vm.next.cpuWait");
   if (x.kind === "net_connect_slow" && (x.peak ?? 0) >= 1_000_000) return t("next.net_connect_slow_loss");
   if (x.kind === "oom_kill") return t(x.memcg ? "next.oom_kill_memcg" : "next.oom_kill_host");
+  if (x.kind === "net_drop" && x.culprits?.length) {
+    // The culprit is "REASON dst:port (listener)": the reason has its own advice when we know one
+    const reason = x.culprits[0].name.split(" ")[0];
+    const k = `next.drop.${reason}` as Key;
+    const s = t(k);
+    if (s !== k) return s;
+  }
   const key = `next.${x.kind}` as Key;
   const s = t(key);
   return s === key ? t("next.unknown") : s;

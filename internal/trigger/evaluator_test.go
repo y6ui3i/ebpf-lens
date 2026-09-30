@@ -637,6 +637,55 @@ func TestNetConnectFailGroupsByPrefixWhenNoDestinationStandsOut(t *testing.T) {
 	}
 }
 
+// A server with listen(1) that never accepts, hit by 20 clients: the kernel drops the SYNs with TCP_LISTEN_OVERFLOW
+// second after second, while the everyday TCP_OLD_SEQUENCE drops of healthy connections do not count.
+func TestNetDropNamesTheReasonAndTheListener(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		x := netSample(s, -1, nil)
+		x.Net.Drops = []model.NetDrop{{Reason: "TCP_LISTEN_OVERFLOW", Count: 5, Tier: "trouble"}, {Reason: "TCP_OLD_SEQUENCE", Count: 40, Tier: "noise"}}
+		x.Net.DropFlows = []model.NetDropFlow{{Reason: "TCP_LISTEN_OVERFLOW", Proto: "tcp", Src: "192.168.10.4", Dst: "192.168.10.250", Dport: 8080, Count: 5, Listener: "python3"}}
+		h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindNetDrop || r.last().Level != LevelCaution || r.last().Peak != 15 {
+		t.Fatalf("expected a net_drop caution with peak 15 (noise excluded), got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "TCP_LISTEN_OVERFLOW 192.168.10.250:8080 (python3)" || c[0].Share != 1 {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "dropping packets (15 in 10 s") || !contains(text, "mostly TCP_LISTEN_OVERFLOW 192.168.10.250:8080 (python3) (100%)") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+// A firewall rule dropping traffic from twenty sources to twenty ports: no flow reaches 10 %, so the group is
+// formed by reason instead of saying nothing.
+func TestNetDropGroupsByReasonWhenNoFlowStandsOut(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		x := netSample(s, -1, nil)
+		x.Net.Drops = []model.NetDrop{{Reason: "NETFILTER_DROP", Count: 20, Tier: "trouble"}}
+		for i := 0; i < 20; i++ {
+			x.Net.DropFlows = append(x.Net.DropFlows, model.NetDropFlow{Reason: "NETFILTER_DROP", Proto: "tcp", Src: fmt.Sprintf("10.0.0.%d", i), Dst: "192.168.10.250", Dport: uint16(1000 + i), Count: 1})
+		}
+		h.samples["tcpconn"] = append(h.samples["tcpconn"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 {
+		t.Fatalf("expected one incident, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "NETFILTER_DROP" || c[0].Share != 1 {
+		t.Fatalf("culprits: %+v", c)
+	}
+}
+
 func dnsSample(sec, slot int, names []model.DNSName) model.Sample {
 	slots := make([]uint64, 27)
 	if slot >= 0 {

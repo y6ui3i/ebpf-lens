@@ -222,13 +222,15 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 ### Network (`/network`)
 
-![Network: connect time over time, failed connects and retransmissions per destination, and who connected (40 % packet loss on lo: connects take 1–2 s because the SYN is retransmitted)](img/en-network.png)
+![Network: connect time, failed connects and retransmissions per destination, who connected, and the packets the kernel dropped with its reason (a server with listen(1) that never accepts: TCP_LISTEN_OVERFLOW toward port 8099, listener python3; an nft rule: NETFILTER_DROP toward 8098)](img/en-network.png)
 
 *What it is.* Outbound TCP as the socket state machine sees it: how long each connect took to establish, which connects failed, and which destinations needed retransmissions — per destination and per process.
 
 *What you see.* Tiles (connects/s, connect p99, failed connects, retransmissions), a heatmap of connect time, the p50/p99 trend with the caution and warning lines, the destinations, and who connected.
 
 *Reading it.* **Failed** connects are the other side or the path: refused (nothing listens there), unreachable, or timed out. **Retransmissions** to one destination are packet loss or congestion on that path; retransmissions to "clients at addr" are on connections *into* this host. A **connect p99 at 1 s or 3 s** is the tell-tale of loss: the initial SYN was dropped and retransmitted after the 1 s timeout (then 3 s), so a destination that is "slow" at exactly those values is lossy, not far. Retransmits are counted per destination only; the kernel does them without a process context.
+
+*Dropped packets.* The last section lists every packet the kernel threw away, with the kernel's own reason, in three tiers: **housekeeping** (duplicate or stale segments, a socket closed with data queued — every connection produces these; counted only), **notable** (`NO_SOCKET`: a packet for a port nobody listens on, `TCP_RESET`...) and **trouble** (`TCP_LISTEN_OVERFLOW`: the accept queue is full, `NETFILTER_DROP`: a firewall rule, `IP_OUTNOROUTES`: no route, `QDISC_DROP`: a saturated interface, `NOMEM`...). Notable and trouble rows carry the source address, the destination address and port, the protocol, and — for a port a process started listening on while the agent was running — the **listener**. Hover a reason for its meaning. The Dropped packets tile counts the trouble tier only.
 
 ### DNS (`/dns`)
 
@@ -285,6 +287,7 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **Disk I/O error** (`disk_error`) | a block device completed I/O with an error | warning | instant | Check `dmesg` and SMART for that device now; an error is the first sign of a failing disk or a bad cable. |
 | **TCP connects failing** (`net_connect_fail`) | ≥ 5 failed connects in the last 10 s, falling in at least 3 of those seconds (a one-second burst — a check trying a dozen unreachable IPv6 addresses before falling back to IPv4 — is not an outage) | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the destinations that took most of the failures. Refused means nothing listens (the service is down or the port is wrong); unreachable or timed out means the path or a firewall. |
 | **TCP connects slow** (`net_connect_slow`) | connect p99 ≥ 200 ms for 3 s | caution; warning at ≥ 1 s | below 200 ms for more than 5 s | At 1 s the SYN itself was retransmitted: packets to that destination are being lost. Below that, a slow path or an overloaded peer. |
+| **Packets dropped by the kernel** (`net_drop`) | ≥ 10 packets dropped for a trouble reason in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 100 | fewer than 10 in 10 s for more than 10 s | Names the reason and the destination that took most of them (`TCP_LISTEN_OVERFLOW 192.168.10.250:8099 (python3)`), or the reason alone when no flow stands out. The reason names the fix: LISTEN_OVERFLOW is the listening process not accepting fast enough (more workers, a bigger backlog); NETFILTER_DROP a firewall rule (`nft list ruleset`); *NOROUTES / NEIGH_* the routing (`ip route`, the gateway); QDISC_* / CPU_BACKLOG a saturated interface or CPU; *MEM memory. Housekeeping drops never count. |
 | **TCP retransmissions** (`net_retrans`) | ≥ 10 retransmitted segments/s for 3 s | caution; warning at ≥ 100/s | below 10/s for more than 5 s | Packet loss or congestion toward the named destinations; "clients at addr" means the loss is on connections into this host. Check the link, the switch port, and the peer. |
 | **Name lookups failing** (`dns_fail`) | ≥ 5 failed `getaddrinfo` calls in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the names and the error; when no single name stands out, the parent domain (`*.internal.example (NONAME)`). *No such name*: fix the name or the record. *No answer in time*: the DNS server. |
 | **Name lookups slow** (`dns_slow`) | lookup p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Check `resolvectl status` and the upstream server; seconds mean a server that did not answer and was retried. |
@@ -327,7 +330,8 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **A host-wide OOM of a VM** has been reproduced only in unit tests on recorded event shapes, not live.
 - **Thresholds are provisional**, chosen from one 8-core machine. Tune them (§8) to your hosts.
 - **Buffered writes are attributed to the kernel's writeback threads** (`kworker`, `jbd2`), not to the process that wrote; reads and direct writes are attributed to the process. Disk latency includes queueing time, so a saturated disk reads as slow even when healthy.
-- **Retransmissions are per destination only** (no process: the kernel retransmits without one), and inbound connections are folded into one row per client address. Only TCP is watched; UDP and ICMP are not.
+- **Retransmissions are per destination only** (no process: the kernel retransmits without one), and inbound connections are folded into one row per client address. Connects and retransmissions are TCP only; dropped packets cover every protocol.
+- **The listener of a dropped packet is known only for TCP ports that entered LISTEN while the agent was running.** A service that was already listening when the agent started shows no listener until it listens again (the agent starts at boot before most services, so this mostly matters after an agent restart). The tiers of drop reasons are a fixed table; a reason the table does not know is shown as housekeeping.
 - **DNS is measured at glibc's `getaddrinfo`**: programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen, and names are kept to their first 63 bytes.
 - **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
@@ -370,7 +374,8 @@ Trigger file (values shown are the defaults):
   "disk":      {"caution": 10000, "warning": 100000, "minSeconds": 3, "maxGapSeconds": 2},
   "network":   {"connectFails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
                 "connectLatency": {"caution": 200000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5},
-                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5}},
+                "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5},
+                "drops":          {"caution": 10,     "warning": 100,     "minSeconds": 1, "maxGapSeconds": 10}},
   "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
                 "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
 }

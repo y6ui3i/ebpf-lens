@@ -152,6 +152,8 @@ func Text(event string, i model.Incident) string {
 		what = fmt.Sprintf("outbound TCP connects are slow (99%% established within %s, %d s since %s; %s)%s", formatUs(i.Peak), i.Seconds, when, how, destText(i, "connect time"))
 	case KindNetRetrans:
 		what = fmt.Sprintf("TCP segments are being retransmitted (%.0f/s, %d s since %s: packet loss or a congested path)%s", i.Peak, i.Seconds, when, destText(i, "retransmissions"))
+	case KindNetDrop:
+		what = fmt.Sprintf("the kernel is dropping packets (%.0f in 10 s, %d s since %s; the reason names the fix: LISTEN_OVERFLOW is the server not accepting fast enough, NETFILTER_DROP a firewall rule, *NOROUTES the routing, *MEM memory)%s", i.Peak, i.Seconds, when, nameText(i, "drops"))
 	case KindDNSFail:
 		what = fmt.Sprintf("name lookups are failing (%.0f in 10 s, %d s since %s)%s", i.Peak, i.Seconds, when, nameText(i, "failures"))
 	case KindDNSSlow:

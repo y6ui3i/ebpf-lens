@@ -70,6 +70,7 @@ export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, 
   const dnsLevel = areaLevel(incidents, DNS_KINDS, nowMs);
   const dnsHeadline: Key = areaLevel(incidents, ["dns_fail"], nowMs) !== "ok" ? "summary.dns.fail" : "summary.dns.slow";
   const netHeadline: Key = areaLevel(incidents, ["net_connect_fail"], nowMs) !== "ok" ? "summary.net.fail"
+    : areaLevel(incidents, ["net_drop"], nowMs) !== "ok" ? "summary.net.drop"
     : areaLevel(incidents, ["net_retrans"], nowMs) !== "ok" ? "summary.net.retrans" : "summary.net.slow";
   const diskHeadline: Key = areaLevel(incidents, ["disk_error"], nowMs) !== "ok" ? "summary.disk.error" : "summary.disk.slow";
   const gpuHeadline: Key = areaLevel(incidents, ["vram_full"], nowMs) !== "ok" && areaLevel(incidents, ["gpu_starved"], nowMs) === "ok"

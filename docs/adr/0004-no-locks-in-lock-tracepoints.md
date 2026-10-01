@@ -79,9 +79,12 @@ Kernels up to v6.14 would not have locked up here. Checked in `kernel/bpf/hashta
 inside the map, so the nested delete simply fails. In **v6.15** that guard was replaced by
 `raw_res_spin_lock_irqsave()` (rqspinlock, new in the same release), whose slow path calls
 `trace_contention_begin(lock, LCB_F_SPIN)` and `trace_contention_end()` and relies on its own deadlock detection
-and a timeout of `NSEC_PER_SEC / 4` to get out. That did not get this case out within the hard-lockup window. So
-the exposure is v6.15 and later (6.15–6.19 and 7.x; Ubuntu 25.10 and 26.04, a 24.04 HWE kernel at 6.17, current
-Fedora), not 6.1 / 6.8 / 6.12 / 6.14 (Amazon Linux 2023, Ubuntu 24.04 GA, Debian 13).
+and a timeout of `NSEC_PER_SEC / 4` to get out. An AA re-entry is exactly what rqspinlock is meant to detect, and
+here it did not get the CPU out within the hard-lockup window; why not is not established (see the last
+consequence). So the exposure is v6.15 and later, and it goes by the kernel that is booted, not by the
+distribution: Ubuntu 26.04 boots 7.0 and 25.10 boots 6.17, but Ubuntu 24.04 also ships 6.17 kernels (HWE, and
+`linux-aws-6.17`), and Amazon Linux 2023's default AMI moved from 6.1 to 6.18 on 2026-08-17 while instances
+launched earlier stay on 6.1 or 6.12. Check `uname -r`.
 
 ## Decision
 
@@ -103,4 +106,7 @@ Fedora), not 6.1 / 6.8 / 6.12 / 6.14 (Amazon Linux 2023, Ubuntu 24.04 GA, Debian
 - A new probe that attaches to a lock tracepoint, a scheduler tracepoint that can fire under a lock, or anything
   in hardirq / softirq context gets reviewed against this ADR before it is merged.
 - `ebpflens-agent -disable` and `cmd/probe-only` stay in the tree as the tools for this kind of isolation.
-- Not reported upstream. The backtrace above is what there is; the kernel log is kept on the test host.
+- Not reported upstream. The backtrace above is what there is; the kernel log is kept on the test host. Two
+  things are left open: why rqspinlock's AA detection and timeout did not break the nested wait, and whether the
+  lockup reproduces in a VM (the stacks show no hardware dependence, but the only VM run was 15 minutes and the
+  odds depend on CPU count, tick mode and load pattern).

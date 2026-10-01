@@ -21,6 +21,8 @@ type Config struct {
 	DNS       DNSRule       `json:"dns"`       // name resolution (glibc getaddrinfo): failed and slow lookups
 	Files     FilesRule     `json:"files"`     // failed opens (EACCES, EROFS, ENOSPC...) and slow fsync
 	Locks     ExcursionRule `json:"locks"`     // a process's lock wait, in seconds per second (threads' worth blocked on locks)
+	Faults    ExcursionRule `json:"faults"`    // time stalled in major page faults, host-wide, in ms per second
+	IRQ       ExcursionRule `json:"irq"`       // one CPU's share of time in interrupt context, 0..1
 }
 
 // FilesRule: Fails is the number of trouble-tier failed opens (see internal/fileerr: permission denied, read-only
@@ -135,6 +137,12 @@ func Default() Config {
 		// the whole second (measured: 8 threads fighting one mutex → 7.0; idle Go services → 0, their parked
 		// threads are told apart by address). Caution at one thread, warning at four
 		Locks: ExcursionRule{Caution: 1.0, Warning: 4.0, MinSeconds: 3, MaxGapSeconds: 2},
+		// Major faults are the page cache or swap paying for a memory shortage: 100 ms/s stalled is a host reading
+		// its own memory back from disk, 1 s/s is thrashing. Idle, the test host sits at 0
+		Faults: ExcursionRule{Caution: 100, Warning: 1000, MinSeconds: 3, MaxGapSeconds: 2},
+		// One CPU a third of its time in interrupts is a NIC or NVMe landing all its work on one core (idle test host:
+		// under 1 %); at 60 % that core is gone
+		IRQ: ExcursionRule{Caution: 0.3, Warning: 0.6, MinSeconds: 3, MaxGapSeconds: 2},
 	}
 }
 
@@ -161,7 +169,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency, "files.fails": c.Files.Fails, "files.fsyncLatency": c.Files.FsyncLatency, "locks": c.Locks} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency, "files.fails": c.Files.Fails, "files.fsyncLatency": c.Files.FsyncLatency, "locks": c.Locks, "faults": c.Faults, "irq": c.IRQ} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

@@ -16,6 +16,7 @@ import { connectsPerSec, currentNet } from "../lib/net";
 import { currentDns, lookupsPerSec } from "../lib/dns";
 import { currentFiles, fsyncsPerSec } from "../lib/files";
 import { currentLocks, lockSecPerSec, userWaitsPerSec } from "../lib/locks";
+import { busiestCpuShare, currentIrq, irqShare } from "../lib/irq";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -34,8 +35,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, lockSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; lockSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, lockSamples, faultSamples, irqSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; lockSamples: Sample[]; faultSamples: Sample[]; irqSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -76,6 +77,10 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
   const locks = currentLocks(lockSamples);
   const lockLevel = areaLevel(incidents, ["lock_wait"], nowMs);
   const lockIncidents = incidents.filter((x) => x.kind === "lock_wait" && isActive(x, nowMs)).length;
+  const irq = currentIrq(irqSamples);
+  const irqLevel = areaLevel(incidents, ["irq_busy"], nowMs);
+  const irqIncidents = incidents.filter((x) => x.kind === "irq_busy" && isActive(x, nowMs)).length;
+  void faultSamples;
 
   const rows: Row[] = [
     {
@@ -187,6 +192,16 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
           { kind: "value", value: locks.waitsPerSec == null ? "–" : `${Math.round(locks.waitsPerSec).toLocaleString()}/s`, note: t("use.locksUtil"), spark: lockSamples.map(userWaitsPerSec), to: "/locks" },
           { kind: "value", value: locks.secPerSec == null ? "–" : locks.secPerSec.toFixed(2), note: t("use.locksSat"), level: lockLevel, spark: lockSamples.map(lockSecPerSec), to: "/locks" },
           { kind: "value", value: `${lockIncidents}`, note: t("use.locksErr"), level: lockLevel, to: "/locks" },
+        ],
+    },
+    {
+      resource: "resource.irq",
+      cells: !irq.has
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: irq.share == null ? "–" : `${(irq.share * 100).toFixed(1)}%`, note: t("use.irqUtil"), spark: irqSamples.map(irqShare), to: "/irq" },
+          { kind: "value", value: irq.busiestShare == null ? "–" : `${(irq.busiestShare * 100).toFixed(irq.busiestShare < 0.1 ? 1 : 0)}%`, note: t("use.irqSat"), level: irqLevel, spark: irqSamples.map(busiestCpuShare), to: "/irq" },
+          { kind: "value", value: `${irqIncidents}`, note: t("use.irqErr"), level: irqLevel, to: "/irq" },
         ],
     },
     {

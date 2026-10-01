@@ -794,6 +794,53 @@ func TestLockWaitNamesTheProcess(t *testing.T) {
 	}
 }
 
+// A host short of memory: python reads 300 ms/s of its pages back, two thirds of them from swap.
+func TestFaultStallNamesTheProcessAndSwap(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		x := model.Sample{Host: "h", Probe: "pgfault", Time: t0.Add(time.Duration(s) * time.Second), IntervalMs: 1000, Slots: make([]uint64, 27),
+			Faults: &model.FaultStat{Minor: 5000, Major: 300, SwapIn: 200, MajorNs: 300e6},
+			Procs:  []model.ProcStat{{Comm: "python", WaitCount: 280, WaitNs: 290e6, SwapIns: 200}, {Comm: "bash", WaitCount: 20, WaitNs: 10e6}}}
+		h.samples["pgfault"] = append(h.samples["pgfault"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindFaultStall || r.last().Level != LevelCaution || r.last().Peak != 300 {
+		t.Fatalf("expected a fault_stall caution at 300 ms/s, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "python" || c[0].Share < 0.96 || r.last().SwapShare < 0.66 || r.last().SwapShare > 0.67 {
+		t.Fatalf("culprits: %+v swap=%v", c, r.last().SwapShare)
+	}
+	if text := Text("open", r.last()); !contains(text, "300 ms/s in major page faults, 67% of them from swap") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+// A NIC landing all its receive work on CPU 3: 45 % of that CPU in NET_RX for three seconds.
+func TestIRQBusyNamesTheCPUAndVector(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 3; s++ {
+		x := model.Sample{Host: "h", Probe: "irqlat", Time: t0.Add(time.Duration(s) * time.Second), IntervalMs: 1000, Slots: make([]uint64, 27),
+			IRQ: &model.IRQStat{
+				CPUs:     []model.CPUIRQ{{CPU: 0, SoftirqNs: 10e6}, {CPU: 3, SoftirqNs: 400e6, IRQNs: 50e6, IRQCount: 20000}},
+				Softirqs: []model.SoftirqStat{{Vec: "NET_RX", CPU: 3, Count: 30000, Ns: 380e6}, {Vec: "TIMER", CPU: 3, Count: 1000, Ns: 20e6}, {Vec: "TIMER", CPU: 0, Count: 1000, Ns: 10e6}},
+				IRQs:     []model.HardIRQ{{IRQ: 120, Name: "eno1-rx-0", Count: 20000, Ns: 50e6}}}}
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindIRQBusy || r.last().Subject != "cpu3" || r.last().Level != LevelCaution || r.last().Peak < 0.44 || r.last().Peak > 0.46 {
+		t.Fatalf("expected an irq_busy caution for cpu3 at 45%%, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) < 1 || c[0].Name != "softirq NET_RX" || c[0].Share < 0.8 {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "cpu3 spends 45% of its time in interrupts") || !contains(text, "softirq NET_RX") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
 func dnsSample(sec, slot int, names []model.DNSName) model.Sample {
 	slots := make([]uint64, 27)
 	if slot >= 0 {

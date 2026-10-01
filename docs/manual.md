@@ -186,6 +186,8 @@ The menu (☰) has three groups: **eBPFLens** (Dashboard, All panels), **VMs** (
 
 *Reading it.* Usage alone is not a problem; stalling is. A process stalling under a **cgroup limit** is a container or VM at its own cap — the fix is its limit, not the host. Host-wide stalls mean the box is short. PSI reads lower than eBPF when only one process stalls while other CPUs stay busy; that is expected (PSI is weighted by CPU time), and the manual's rule of thumb is: trust the per-process number for *who*, PSI for *the machine as a whole*.
 
+*Page faults and swap.* The second section of the screen: minor faults (free), major faults (the page came from disk) timed per process, with the ones from swap told apart, and the swap size with pages in and out from `/proc` as the cross-check. **Major fault stall** is the number to read: 100 ms per second means processes are waiting for their own memory to come back from disk. The **From swap** column says whether that memory was swapped out (the host ran out) or evicted file pages being re-read (the working set does not fit, or a cold start).
+
 ### VMs (`/vms` and `/vms/<name>`)
 
 ![VM list: the running section and the Stopped (N) fold — eleven VMs stopped within 24 h, opened because nothing runs](img/en-vms.png)
@@ -262,6 +264,16 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* **Wait s/s** is the number to read: 1.0 means one thread's worth of time blocked the whole range; a process at 7.0 has seven threads waiting at any moment, and more CPUs will not help it. Microsecond waits at a high rate are a lock handed around briskly (CPython's GIL: 270,000 a second at ~5 µs); millisecond waits mean the holder does real work, or sleeps, while holding it. **rwsem-read / rwsem-write** under a multi-threaded process is usually `mmap_lock`: mmap, munmap and page faults all take it, so many threads allocating at once contend on it.
 
+### Interrupts (`/irq`)
+
+![Interrupts: each CPU's share of time in interrupt context with its busiest vector, soft interrupts by vector, hard interrupts by line (the NIC's interrupts all land on cpu3)](img/en-irq.png)
+
+*What it is.* Time the CPUs spend in interrupt context, which no process is charged for: soft interrupts per CPU and per vector (NET_RX, NET_TX, TIMER, BLOCK, SCHED, RCU…), hard interrupts per line by the handler's name (the NIC, the NVMe).
+
+*What you see.* Tiles (the busiest CPU's share of its time in interrupts, the share over all CPUs, hard IRQs per second, the busiest vector), a heatmap and the p50/p99 trend of one softirq's run time, a per-CPU table (share, softirq and hardirq time, top vector), soft interrupts by vector, hard interrupts by line.
+
+*Reading it.* One CPU with a high share and NET_RX as its top vector is the network landing on one core: every packet is processed there, and whatever else runs on that core waits. The fix is to spread the interrupts (RSS / multiple queues on the NIC, RPS, irqbalance), not a faster CPU. A softirq **run time** p99 in milliseconds is a backlog being worked off in one go — a burst of packets or block completions — and is felt as latency by everything on that CPU. Threaded IRQ handlers run as kernel threads and appear on the CPU screen instead.
+
 ### GPU (`/gpu`)
 
 ![GPU: busy and VRAM over time, the wait per CUDA call, and the per-process verdicts (an OCR job in a container keeping the GPU 66 % busy while using 131 % of a CPU; the clocks held back by the power cap)](img/en-gpu.png)
@@ -313,6 +325,8 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **File opens failing** (`file_fail`) | ≥ 5 opens failed for a trouble errno (EACCES, EPERM, EROFS, ENOSPC, EDQUOT, EMFILE, ENFILE, EIO, ETXTBSY, ESTALE; not under /proc, /sys, /dev) in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names `process path (ERRNO)`, or `process (ERRNO)` when one process fails on many files. ENOENT never counts (it is shown on the files screen). The errno names the fix: permission → owner / mode / service user; EROFS → `dmesg`, the mount remounted read-only; ENOSPC → free space; EMFILE → a descriptor leak. |
 | **fsync slow** (`fsync_slow`) | fsync p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Names the files that took most of the fsync time. Check the disk screen for the same moment: a slow device or a queue (a backup's writeback in front of a database's commits). |
 | **Waiting for locks** (`lock_wait`) | a process's lock wait (user + kernel, summed over its threads) ≥ 1.0 s per second for 3 s | caution; warning at ≥ 4.0 | below 1.0 for more than 2 s | Names the process and splits the wait between its own locks and the kernel's. Do not add CPUs: the work serializes on a lock. Find it (`perf lock contention`, py-spy, async-profiler, Go's mutex profile), shorten what is done while holding it, split it, or use fewer threads. |
+| **Memory coming back from disk** (`fault_stall`) | time stalled in major page faults ≥ 100 ms per second, host-wide, for 3 s | caution; warning at ≥ 1 s/s | below 100 ms/s for more than 2 s | Names the processes and the share of faults that came from swap. From swap: the host ran out of memory — free it or add it (the reclaim table says who holds it). From the page cache: the working set no longer fits, or a cold start is re-reading binaries. |
+| **One CPU busy with interrupts** (`irq_busy`) | one CPU's share of time in interrupt context ≥ 30 % for 3 s | caution; warning at ≥ 60 % | below 30 % for more than 2 s | Names the CPU and the vectors / lines that took the time. Spread the interrupts: RSS / multiple queues on the NIC, RPS (`/sys/class/net/<dev>/queues/rx-*/rps_cpus`), irqbalance. A faster CPU will not help one core. |
 | **Name lookups slow** (`dns_slow`) | lookup p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Check `resolvectl status` and the upstream server; seconds mean a server that did not answer and was retried. |
 | **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
@@ -357,6 +371,8 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **The listener of a dropped packet is known only for TCP ports that entered LISTEN while the agent was running.** A service that was already listening when the agent started shows no listener until it listens again (the agent starts at boot before most services, so this mostly matters after an agent restart). The tiers of drop reasons are a fixed table; a reason the table does not know is shown as housekeeping.
 - **Failed opens are seen at `open` / `openat` / `openat2` only.** A program that checks a file with `stat()` before opening it (Rust coreutils' `cat`, many shells) fails there, not here. Paths are as the program gave them: relative paths stay relative, and the first 95 bytes are kept. fsync is measured at `do_fsync` (the syscalls); io_uring and NFS server syncs are not seen.
 - **Lock waits are told apart from parking by the number of waiters per futex address.** A lock that only ever has one waiter at a time (two threads handing it back and forth very politely) looks like parking and is not counted; a condition variable with many waiters uses a different futex operation and is skipped on purpose. Kernel lock contention needs the `lock:contention_*` tracepoints (5.19+); without them the user-space half still works.
+- **Page faults are measured at `handle_mm_fault`**, which also serves the kernel's own `get_user_pages`; those are charged to the task that triggered them. Swap pages in/out and the swap size come from `/proc`, not eBPF.
+- **Hard interrupt time is kept per line host-wide and per CPU in total**, not per line per CPU; the culprits of an `irq_busy` incident are the CPU's softirq vectors plus the host's busiest lines. Threaded IRQ handlers are kernel threads and are not counted here.
 - **DNS is measured at glibc's `getaddrinfo`**: programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen, and names are kept to their first 63 bytes.
 - **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
@@ -405,7 +421,9 @@ Trigger file (values shown are the defaults):
                 "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}},
   "files":     {"fails":        {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
                 "fsyncLatency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}},
-  "locks":     {"caution": 1.0, "warning": 4.0, "minSeconds": 3, "maxGapSeconds": 2}
+  "locks":     {"caution": 1.0, "warning": 4.0, "minSeconds": 3, "maxGapSeconds": 2},
+  "faults":    {"caution": 100, "warning": 1000, "minSeconds": 3, "maxGapSeconds": 2},
+  "irq":       {"caution": 0.3, "warning": 0.6, "minSeconds": 3, "maxGapSeconds": 2}
 }
 ```
 

@@ -7,6 +7,7 @@ import { stallMsPerSec, formatMsPerSec } from "../lib/memory";
 import { gpuUtil } from "../lib/gpu";
 import { retransPerSec } from "../lib/net";
 import { lockSecPerSec } from "../lib/locks";
+import { busiestCpuShare } from "../lib/irq";
 import { useHistoryRange } from "../lib/history";
 import { navigate } from "../lib/router";
 import { formatHM, formatTime, useI18n, type Key, type Lang } from "../lib/i18n";
@@ -31,7 +32,7 @@ type Row = {
 // as a line. Clicking a moment opens that area's screen at that moment (?at=), with its full one-second detail
 const ROWS: Row[] = [
   { key: "resource.cpu", path: "/cpu", probe: "runqlat", kinds: ["cpu_wait"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
-  { key: "resource.memory", path: "/memory", probe: "memstall", kinds: ["mem_stall", "oom_kill"], value: stallMsPerSec, format: (v, l) => formatMsPerSec(v, l) },
+  { key: "resource.memory", path: "/memory", probe: "memstall", kinds: ["mem_stall", "oom_kill", "fault_stall"], value: stallMsPerSec, format: (v, l) => formatMsPerSec(v, l) },
   { key: "resource.processes", path: "/processes", probe: "", kinds: ["crash", "crash_loop"] },
   { key: "resource.vms", path: "/vms", probe: "vms", kinds: ["vm_down", "vm_cpu_wait"], value: (s) => s.vms?.length ?? 0, format: (v) => `${v}` },
   { key: "resource.disk", path: "/disk", probe: "biolat", kinds: ["disk_slow", "disk_error"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
@@ -39,9 +40,10 @@ const ROWS: Row[] = [
   { key: "resource.dns", path: "/dns", probe: "dnslat", kinds: ["dns_fail", "dns_slow"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
   { key: "resource.files", path: "/files", probe: "fileops", kinds: ["file_fail", "fsync_slow"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
   { key: "resource.locks", path: "/locks", probe: "lockwait", kinds: ["lock_wait"], value: lockSecPerSec, format: (v) => v.toFixed(2) },
+  { key: "resource.irq", path: "/irq", probe: "irqlat", kinds: ["irq_busy"], value: busiestCpuShare, format: (v) => `${Math.round(v * 100)}%` },
   { key: "resource.gpu", path: "/gpu", probe: "gpu", kinds: ["gpu_starved", "vram_full"], value: (s) => { const u = gpuUtil(s); return u == null ? null : u * 100; }, format: (v) => `${Math.round(v)}%` },
 ];
-const PROBES = ["runqlat", "memstall", "vms", "biolat", "tcpconn", "dnslat", "fileops", "lockwait", "gpu"] as const;
+const PROBES = ["runqlat", "memstall", "vms", "biolat", "tcpconn", "dnslat", "fileops", "lockwait", "pgfault", "irqlat", "gpu"] as const;
 
 // The last 1 / 6 / 24 hours at a glance: when and where something happened, then a click into that area at that time
 export function HistoryPanel({ host, incidents }: { host: string; incidents: Incident[] }) {

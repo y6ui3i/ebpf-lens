@@ -15,6 +15,8 @@ export type Triggers = {
   dns: { fails: ExcursionRule; failSpreadSeconds: number; latency: ExcursionRule }; // failed lookups in 10 s; getaddrinfo p99 in µs
   files: { fails: ExcursionRule; failSpreadSeconds: number; fsyncLatency: ExcursionRule }; // trouble-tier failed opens in 10 s; fsync p99 in µs
   locks: ExcursionRule; // a process's lock wait in seconds per second (threads' worth blocked)
+  faults: ExcursionRule; // time stalled in major page faults, ms per second
+  irq: ExcursionRule; // one CPU's share of time in interrupt context, 0..1
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -46,6 +48,8 @@ export const DEFAULT_TRIGGERS: Triggers = {
     fsyncLatency: { caution: 100_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
   },
   locks: { caution: 1, warning: 4, minSeconds: 3, maxGapSeconds: 2 },
+  faults: { caution: 100, warning: 1000, minSeconds: 3, maxGapSeconds: 2 },
+  irq: { caution: 0.3, warning: 0.6, minSeconds: 3, maxGapSeconds: 2 },
 };
 
 export function useTriggers(): Triggers {
@@ -85,5 +89,7 @@ export function useTriggers(): Triggers {
       fsyncLatency: { ...DEFAULT_TRIGGERS.files.fsyncLatency, ...d.files?.fsyncLatency },
     },
     locks: { ...DEFAULT_TRIGGERS.locks, ...d.locks },
+    faults: { ...DEFAULT_TRIGGERS.faults, ...d.faults },
+    irq: { ...DEFAULT_TRIGGERS.irq, ...d.irq },
   };
 }

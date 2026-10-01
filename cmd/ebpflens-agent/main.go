@@ -25,8 +25,10 @@ import (
 	"github.com/y6ui3i/ebpf-lens/internal/probe/dnslat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/fileops"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/irqlat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/lockwait"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/memstall"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/pgfault"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/proclife"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/runqlat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/tcpconn"
@@ -115,6 +117,19 @@ func main() {
 		log.Printf("lockwait: %s", lw.Warning)
 	}
 
+	pf, err := pgfault.Open()
+	if err != nil {
+		log.Fatalf("pgfault: %v", err)
+	}
+	defer pf.Close()
+	swap := &swapReader{}
+
+	iq, err := irqlat.Open()
+	if err != nil {
+		log.Fatalf("irqlat: %v", err)
+	}
+	defer iq.Close()
+
 	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
 	dns := openDNS()
 	if dns != nil {
@@ -183,6 +198,16 @@ func main() {
 				log.Fatalf("lockwait: %v", err)
 			}
 			lx.Host, lx.Time, lx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			px, err := faultSample(pf, swap, vms, *topN)
+			if err != nil {
+				log.Fatalf("pgfault: %v", err)
+			}
+			px.Host, px.Time, px.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			ix, err := irqSample(iq)
+			if err != nil {
+				log.Fatalf("irqlat: %v", err)
+			}
+			ix.Host, ix.Time, ix.IntervalMs, ix.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
 			var sx *model.Sample
 			if dns != nil {
 				x, err := dnsSample(dns, vms, *topN)
@@ -215,6 +240,8 @@ func main() {
 				printNet(nx)
 				printFiles(fx)
 				printLocks(lx)
+				printFaults(px)
+				printIRQ(ix)
 				if sx != nil {
 					printDNS(*sx)
 				}
@@ -251,6 +278,12 @@ func main() {
 				}
 				if err := send(client, *serverURL, "/api/ingest", lx); err != nil {
 					log.Printf("send lockwait: %v", err)
+				}
+				if err := send(client, *serverURL, "/api/ingest", px); err != nil {
+					log.Printf("send pgfault: %v", err)
+				}
+				if err := send(client, *serverURL, "/api/ingest", ix); err != nil {
+					log.Printf("send irqlat: %v", err)
 				}
 				if sx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *sx); err != nil {
@@ -290,6 +323,12 @@ func main() {
 				log.Fatal(err)
 			}
 			if err := enc.Encode(lx); err != nil {
+				log.Fatal(err)
+			}
+			if err := enc.Encode(px); err != nil {
+				log.Fatal(err)
+			}
+			if err := enc.Encode(ix); err != nil {
 				log.Fatal(err)
 			}
 			if sx != nil {
@@ -525,6 +564,94 @@ func printLocks(x model.Sample) {
 	for _, s := range x.Procs {
 		fmt.Printf("  %-16s x%-3d locks=%d waits=%d user=%.1fms max=%.1fms kernel=%d/%.2fms\n",
 			s.Comm, s.Procs, s.Locks, s.WaitCount, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6, s.KernelLockCount, float64(s.KernelLockNs)/1e6)
+	}
+}
+
+// swapReader turns the cumulative /proc/vmstat swap counters into per-interval deltas and reads the swap size.
+type swapReader struct{ prev *procfs.VMStat }
+
+func (r *swapReader) fill(f *model.FaultStat) {
+	if mi, err := procfs.ReadMemInfo(); err == nil {
+		f.SwapTotalBytes, f.SwapUsedBytes = mi.SwapTotalBytes, mi.SwapTotalBytes-mi.SwapFreeBytes
+	}
+	if v, err := procfs.ReadVMStat(); err == nil {
+		if r.prev != nil {
+			f.SwapInPages, f.SwapOutPages = v.SwapIn-r.prev.SwapIn, v.SwapOut-r.prev.SwapOut
+		}
+		r.prev = &v
+	}
+}
+
+// faultSample builds one interval of page faults: the major-fault latency histogram, the totals with the swap
+// state, and the processes that faulted the most (top by time stalled in major faults and by minor faults).
+func faultSample(pf *pgfault.Probe, swap *swapReader, vms *vm.Map, topN int) (model.Sample, error) {
+	slots, err := pf.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, tot, err := pf.Procs(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	swap.fill(&tot)
+	procs := topBy(all, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.MinorFaults, b.MinorFaults) },
+	)
+	return model.Sample{Probe: "pgfault", Unit: "usecs", Slots: slots[:], Procs: procs, Faults: &tot}, nil
+}
+
+func printFaults(x model.Sample) {
+	f := x.Faults
+	fmt.Printf("fault minor=%d major=%d swapin=%d stall=%.1fms swap=%.0f/%.0fMiB in=%d out=%d\n",
+		f.Minor, f.Major, f.SwapIn, float64(f.MajorNs)/1e6, float64(f.SwapUsedBytes)/(1<<20), float64(f.SwapTotalBytes)/(1<<20), f.SwapInPages, f.SwapOutPages)
+	for _, s := range x.Procs {
+		if s.WaitCount > 0 {
+			fmt.Printf("  %-16s x%-3d minor=%d major=%d swapin=%d stall=%.1fms max=%.1fms\n", s.Comm, s.Procs, s.MinorFaults, s.WaitCount, s.SwapIns, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6)
+		}
+	}
+}
+
+// irqSample builds one interval of interrupt time: the softirq run-time histogram and the per-CPU, per-vector and
+// per-IRQ totals (the busiest first; the lists are capped like the others).
+func irqSample(iq *irqlat.Probe) (model.Sample, error) {
+	slots, err := iq.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	st, err := iq.Read()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	if st.CPUs == nil {
+		st.CPUs = []model.CPUIRQ{}
+	}
+	slices.SortFunc(st.CPUs, func(a, b model.CPUIRQ) int { return a.CPU - b.CPU })
+	slices.SortFunc(st.Softirqs, func(a, b model.SoftirqStat) int { return cmpDesc(a.Ns, b.Ns) })
+	slices.SortFunc(st.IRQs, func(a, b model.HardIRQ) int { return cmpDesc(a.Ns, b.Ns) })
+	if len(st.Softirqs) > maxIRQRows {
+		st.Softirqs = st.Softirqs[:maxIRQRows]
+	}
+	if len(st.IRQs) > maxDests {
+		st.IRQs = st.IRQs[:maxDests]
+	}
+	return model.Sample{Probe: "irqlat", Unit: "usecs", Slots: slots[:], IRQ: &st}, nil
+}
+
+// (cpu, vector) rows: enough for 16 CPUs × the 10 vectors; bigger hosts keep the busiest
+const maxIRQRows = 160
+
+func printIRQ(x model.Sample) {
+	for _, c := range x.IRQ.CPUs {
+		if c.SoftirqNs+c.IRQNs > 1e6 {
+			fmt.Printf("irq cpu%-3d softirq=%.2fms irq=%.2fms (%d)\n", c.CPU, float64(c.SoftirqNs)/1e6, float64(c.IRQNs)/1e6, c.IRQCount)
+		}
+	}
+	for _, s := range x.IRQ.Softirqs[:min(5, len(x.IRQ.Softirqs))] {
+		fmt.Printf("  softirq %-8s cpu%-3d n=%d %.2fms\n", s.Vec, s.CPU, s.Count, float64(s.Ns)/1e6)
+	}
+	for _, s := range x.IRQ.IRQs[:min(5, len(x.IRQ.IRQs))] {
+		fmt.Printf("  irq %-16s n=%d %.2fms\n", s.Name, s.Count, float64(s.Ns)/1e6)
 	}
 }
 

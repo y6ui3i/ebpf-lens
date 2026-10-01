@@ -168,6 +168,14 @@ func Text(event string, i model.Incident) string {
 			where = "kernel locks (mmap_lock, inode locks)"
 		}
 		what = fmt.Sprintf("%s is waiting for locks (%.1f threads' worth of time blocked, %d s since %s, mostly %s; more CPUs will not help, the work serializes on a lock)", i.Subject, i.Peak, i.Seconds, when, where)
+	case KindFaultStall:
+		from := "file pages evicted from the page cache"
+		if i.SwapShare > 0.5 {
+			from = "swap"
+		}
+		what = fmt.Sprintf("processes are stalled reading their memory back from disk (%.0f ms/s in major page faults, %.0f%% of them from %s, %d s since %s)%s", i.Peak, i.SwapShare*100, from, i.Seconds, when, culpritText(i))
+	case KindIRQBusy:
+		what = fmt.Sprintf("%s spends %.0f%% of its time in interrupts (%d s since %s): one core takes the device's work; spread it with RSS / RPS / irqbalance%s", i.Subject, i.Peak*100, i.Seconds, when, nameText(i, "interrupt time"))
 	case KindVRAMFull:
 		what = fmt.Sprintf("VRAM is %.0f%% full (%d s since %s); the next large allocation may fail", i.Peak*100, i.Seconds, when)
 	case KindOOMKill:

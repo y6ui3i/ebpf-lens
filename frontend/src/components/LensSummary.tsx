@@ -11,6 +11,8 @@ import { NET_KINDS, netSentence } from "../lib/net";
 import { DNS_KINDS, dnsSentence } from "../lib/dns";
 import { FILE_KINDS, filesSentence } from "../lib/files";
 import { LOCK_KINDS, locksSentence } from "../lib/locks";
+import { IRQ_KINDS, irqSentence } from "../lib/irq";
+import { FAULT_KINDS, faultsSentence } from "../lib/faults";
 import { VM_AREA_KINDS, runningVms, vmStopsWithin, vmsWaitingForCpu } from "../lib/vms";
 import { useTriggers } from "../lib/useTriggers";
 import { formatHM, formatTime, translate, useI18n, type Key, type Lang, type Params, type TFn } from "../lib/i18n";
@@ -54,8 +56,8 @@ function cpuUtil(samples: Sample[]): number | null {
 
 // "What is happening right now" summary shown at the top of the screen.
 // Levels come from the server's incidents; the numbers in the sentences still come from the samples
-export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, lockSamples, life, incidents }: {
-  host: string; samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; lockSamples: Sample[]; life: Lifecycle; incidents: Incident[];
+export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, lockSamples, faultSamples, irqSamples, life, incidents }: {
+  host: string; samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; lockSamples: Sample[]; faultSamples: Sample[]; irqSamples: Sample[]; life: Lifecycle; incidents: Incident[];
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -63,7 +65,8 @@ export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, 
   const now = current(samples);
   const util = cpuUtil(samples);
   const cpuLevel = areaLevel(incidents, ["cpu_wait"], nowMs);
-  const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
+  const faultLevel = areaLevel(incidents, FAULT_KINDS, nowMs);
+  const memLevel = areaLevel(incidents, ["mem_stall", ...FAULT_KINDS], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
   const vmLevel = areaLevel(incidents, VM_AREA_KINDS, nowMs);
   const gpuLevel = areaLevel(incidents, GPU_KINDS, nowMs);
@@ -74,6 +77,7 @@ export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, 
   const fileLevel = areaLevel(incidents, FILE_KINDS, nowMs);
   const fileHeadline: Key = areaLevel(incidents, ["file_fail"], nowMs) !== "ok" ? "summary.files.fail" : "summary.files.fsync";
   const lockLevel = areaLevel(incidents, LOCK_KINDS, nowMs);
+  const irqLevel = areaLevel(incidents, IRQ_KINDS, nowMs);
   const netHeadline: Key = areaLevel(incidents, ["net_connect_fail"], nowMs) !== "ok" ? "summary.net.fail"
     : areaLevel(incidents, ["net_drop"], nowMs) !== "ok" ? "summary.net.drop"
     : areaLevel(incidents, ["net_retrans"], nowMs) !== "ok" ? "summary.net.retrans" : "summary.net.slow";
@@ -92,13 +96,14 @@ export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, 
   const areas: { level: Level; headline: Key }[] = [
     { level: vmLevel, headline: vmHeadline },
     { level: cpuLevel, headline: CPU_HEADLINE[cpuLevel] },
-    { level: memLevel, headline: MEM_HEADLINE[memLevel] },
+    { level: memLevel, headline: faultLevel !== "ok" && areaLevel(incidents, ["mem_stall"], nowMs) === "ok" ? "summary.faults" : MEM_HEADLINE[memLevel] },
     { level: procLevel, headline: lifecycleHeadline(incidents, nowMs) },
     { level: diskLevel, headline: diskHeadline },
     { level: netLevel, headline: netHeadline },
     { level: dnsLevel, headline: dnsHeadline },
     { level: fileLevel, headline: fileHeadline },
     { level: lockLevel, headline: "summary.locks" },
+    { level: irqLevel, headline: "summary.irq" },
     { level: gpuLevel, headline: gpuHeadline },
   ];
   const worstArea = areas.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a));
@@ -126,7 +131,7 @@ export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, 
   // The findings, as text: rendered below and reused as the evidence of the report ready to send
   const findings: { area: string; level: Level; lines: string[] }[] = [
     { area: t("resource.cpu"), level: cpuLevel, lines: [detail, last ? episodeSentence(last, lang) : "", last ? causeText(samples, last, t) ?? "" : ""] },
-    { area: t("resource.memory"), level: memLevel, lines: [memorySentence(memSamples, lang, memLevel)] },
+    { area: t("resource.memory"), level: memLevel, lines: [memorySentence(memSamples, lang, areaLevel(incidents, ["mem_stall"], nowMs)), faultsSentence(faultSamples, lang, faultLevel)] },
     { area: t("resource.processes"), level: procLevel, lines: [lifecycleSentence(life, lang)] },
     { area: t("resource.vm"), level: vmLevel, lines: [vmSentence(vmSamples, incidents, lang, nowMs)] },
     // Hosts without these probes send no samples; their rows stay away rather than saying "no data" forever
@@ -135,6 +140,7 @@ export function LensSummary({ host, samples, memSamples, vmSamples, gpuSamples, 
     ...(dnsSamples.length > 0 ? [{ area: t("resource.dns"), level: dnsLevel, lines: [dnsSentence(dnsSamples, lang, dnsLevel)] }] : []),
     ...(fileSamples.length > 0 ? [{ area: t("resource.files"), level: fileLevel, lines: [filesSentence(fileSamples, lang, fileLevel)] }] : []),
     ...(lockSamples.length > 0 ? [{ area: t("resource.locks"), level: lockLevel, lines: [locksSentence(lockSamples, lang, lockLevel)] }] : []),
+    ...(irqSamples.length > 0 ? [{ area: t("resource.irq"), level: irqLevel, lines: [irqSentence(irqSamples, lang, irqLevel)] }] : []),
     ...(gpuSamples.length > 0 ? [{ area: t("resource.gpu"), level: gpuLevel, lines: [gpuSentence(gpuSamples, lang, gpuLevel, triggers.gpu.idleUtil)] }] : []),
   ];
   const report = () => hostReport({

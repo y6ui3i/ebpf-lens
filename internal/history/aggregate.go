@@ -85,6 +85,17 @@ func clone(x model.Sample) model.Sample {
 		l.Kernel = append([]model.KernelLock(nil), x.Lock.Kernel...)
 		c.Lock = &l
 	}
+	if x.Faults != nil {
+		f := *x.Faults
+		c.Faults = &f
+	}
+	if x.IRQ != nil {
+		c.IRQ = &model.IRQStat{
+			CPUs:     append([]model.CPUIRQ(nil), x.IRQ.CPUs...),
+			Softirqs: append([]model.SoftirqStat(nil), x.IRQ.Softirqs...),
+			IRQs:     append([]model.HardIRQ(nil), x.IRQ.IRQs...),
+		}
+	}
 	if x.Files != nil {
 		c.Files = &model.FileStat{
 			OpenErrs:  append([]model.FileOpenErr(nil), x.Files.OpenErrs...),
@@ -224,6 +235,52 @@ func merge(c *model.Sample, x model.Sample) {
 			}
 		}
 	}
+	if x.Faults != nil {
+		if c.Faults == nil {
+			c.Faults = &model.FaultStat{}
+		}
+		c.Faults.Minor += x.Faults.Minor
+		c.Faults.Major += x.Faults.Major
+		c.Faults.SwapIn += x.Faults.SwapIn
+		c.Faults.MajorNs += x.Faults.MajorNs
+		c.Faults.SwapInPages += x.Faults.SwapInPages
+		c.Faults.SwapOutPages += x.Faults.SwapOutPages
+		c.Faults.SwapTotalBytes = x.Faults.SwapTotalBytes
+		c.Faults.SwapUsedBytes = max(c.Faults.SwapUsedBytes, x.Faults.SwapUsedBytes)
+	}
+	if x.IRQ != nil {
+		if c.IRQ == nil {
+			c.IRQ = &model.IRQStat{}
+		}
+		for _, q := range x.IRQ.CPUs {
+			i := indexOf(len(c.IRQ.CPUs), func(i int) bool { return c.IRQ.CPUs[i].CPU == q.CPU })
+			if i < 0 {
+				c.IRQ.CPUs = append(c.IRQ.CPUs, q)
+				continue
+			}
+			c.IRQ.CPUs[i].SoftirqNs += q.SoftirqNs
+			c.IRQ.CPUs[i].IRQNs += q.IRQNs
+			c.IRQ.CPUs[i].IRQCount += q.IRQCount
+		}
+		for _, q := range x.IRQ.Softirqs {
+			i := indexOf(len(c.IRQ.Softirqs), func(i int) bool { return c.IRQ.Softirqs[i].Vec == q.Vec && c.IRQ.Softirqs[i].CPU == q.CPU })
+			if i < 0 {
+				c.IRQ.Softirqs = append(c.IRQ.Softirqs, q)
+				continue
+			}
+			c.IRQ.Softirqs[i].Count += q.Count
+			c.IRQ.Softirqs[i].Ns += q.Ns
+		}
+		for _, q := range x.IRQ.IRQs {
+			i := indexOf(len(c.IRQ.IRQs), func(i int) bool { return c.IRQ.IRQs[i].IRQ == q.IRQ })
+			if i < 0 {
+				c.IRQ.IRQs = append(c.IRQ.IRQs, q)
+				continue
+			}
+			c.IRQ.IRQs[i].Count += q.Count
+			c.IRQ.IRQs[i].Ns += q.Ns
+		}
+	}
 	if x.Lock != nil {
 		if c.Lock == nil {
 			c.Lock = &model.LockStat{}
@@ -300,6 +357,8 @@ func mergeProcs(c *model.Sample, ps []model.ProcStat) {
 		t.ConnectFails += p.ConnectFails
 		t.LookupFails += p.LookupFails
 		t.OpenFails += p.OpenFails
+		t.MinorFaults += p.MinorFaults
+		t.SwapIns += p.SwapIns
 		t.Locks = max(t.Locks, p.Locks)
 		t.KernelLockCount += p.KernelLockCount
 		t.KernelLockNs += p.KernelLockNs
@@ -331,6 +390,10 @@ func finish(c *model.Sample, n int) {
 	if c.Net != nil && len(c.Net.DropFlows) > maxRows {
 		sort.Slice(c.Net.DropFlows, func(i, j int) bool { return c.Net.DropFlows[i].Count > c.Net.DropFlows[j].Count })
 		c.Net.DropFlows = c.Net.DropFlows[:maxRows]
+	}
+	if c.IRQ != nil && len(c.IRQ.IRQs) > maxRows {
+		sort.Slice(c.IRQ.IRQs, func(i, j int) bool { return c.IRQ.IRQs[i].Ns > c.IRQ.IRQs[j].Ns })
+		c.IRQ.IRQs = c.IRQ.IRQs[:maxRows]
 	}
 	if c.Files != nil && len(c.Files.OpenFails) > maxRows {
 		sort.Slice(c.Files.OpenFails, func(i, j int) bool { return c.Files.OpenFails[i].Count > c.Files.OpenFails[j].Count })

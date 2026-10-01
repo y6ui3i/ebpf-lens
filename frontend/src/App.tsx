@@ -35,12 +35,15 @@ import { FilesPanel } from "./components/FilesPanel";
 import { FILE_KINDS } from "./lib/files";
 import { LocksPanel } from "./components/LocksPanel";
 import { LOCK_KINDS } from "./lib/locks";
+import { IrqPanel } from "./components/IrqPanel";
+import { IRQ_KINDS } from "./lib/irq";
+import { FAULT_KINDS } from "./lib/faults";
 import { VmListPanel } from "./components/VmListPanel";
 import { VmPanel } from "./components/VmPanel";
 import type { Sample } from "./types/model";
 
 const WINDOW = 300; // last 5 minutes (one column per second)
-const PROBES = ["runqlat", "memstall", "vms", "gpu", "biolat", "tcpconn", "dnslat", "fileops", "lockwait"] as const;
+const PROBES = ["runqlat", "memstall", "vms", "gpu", "biolat", "tcpconn", "dnslat", "fileops", "lockwait", "pgfault", "irqlat"] as const;
 const EMPTY: Sample[] = [];
 const PROCESS_KINDS = ["oom_kill", "crash", "crash_loop"] as const;
 const TICK_MS = 30_000; // re-evaluate "ended within the last 5 minutes" even when no new data arrives
@@ -79,6 +82,8 @@ export default function App() {
   const dnsSamples = byProbe.dnslat ?? EMPTY;
   const fileSamples = byProbe.fileops ?? EMPTY;
   const lockSamples = byProbe.lockwait ?? EMPTY;
+  const faultSamples = byProbe.pgfault ?? EMPTY;
+  const irqSamples = byProbe.irqlat ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
   // The visible range follows the CPU samples (live) or is the fixed window around the moment (past)
   const liveWin = useMemo(() => timeWindow(samples, WINDOW), [samples]);
@@ -91,7 +96,7 @@ export default function App() {
   }, []);
   const nowMs = Date.now();
   const cpuLevel = areaLevel(incidents, ["cpu_wait"], nowMs);
-  const memLevel = areaLevel(incidents, ["mem_stall"], nowMs);
+  const memLevel = areaLevel(incidents, ["mem_stall", ...FAULT_KINDS], nowMs);
   const procLevel = areaLevel(incidents, PROCESS_KINDS, nowMs);
   const agentLevel = areaLevel(incidents, ["agent_down"], nowMs);
   // A VM stop, or a VM waiting for host CPU, counts toward the headline like any other area
@@ -102,8 +107,9 @@ export default function App() {
   const dnsLevel = areaLevel(incidents, DNS_KINDS, nowMs);
   const fileLevel = areaLevel(incidents, FILE_KINDS, nowMs);
   const lockLevel = areaLevel(incidents, LOCK_KINDS, nowMs);
-  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel, diskLevel, netLevel, dnsLevel, fileLevel, lockLevel);
-  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel, "/disk": diskLevel, "/network": netLevel, "/dns": dnsLevel, "/files": fileLevel, "/locks": lockLevel };
+  const irqLevel = areaLevel(incidents, IRQ_KINDS, nowMs);
+  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel, diskLevel, netLevel, dnsLevel, fileLevel, lockLevel, irqLevel);
+  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel, "/disk": diskLevel, "/network": netLevel, "/dns": dnsLevel, "/files": fileLevel, "/locks": lockLevel, "/irq": irqLevel };
   // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level
   const lifecycle = lifecycleFrom(useSettings().ui.vm);
   const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs, lifecycle).map((v) => ({ name: v.name, running: v.running, level: v.level, phase: v.phase }));
@@ -178,7 +184,7 @@ export default function App() {
               <ImpactPanel samples={samples} incidents={incidents} />
             </PanelSection>
             <PanelSection id="memory" title={t("page.memory")}>
-              <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} level={memLevel} />
+              <MemoryPanel samples={memSamples} faultSamples={faultSamples} win={win} schemeKey={schemeKey} level={memLevel} />
             </PanelSection>
             <PanelSection id="processes" title={t("page.processes")}>
               <LifecyclePanel events={events} life={life} dropped={dropped} level={procLevel} />
@@ -198,6 +204,9 @@ export default function App() {
             <PanelSection id="locks" title={t("page.locks")}>
               <LocksPanel samples={lockSamples} win={win} schemeKey={schemeKey} level={lockLevel} />
             </PanelSection>
+            <PanelSection id="irq" title={t("page.irq")}>
+              <IrqPanel samples={irqSamples} win={win} schemeKey={schemeKey} level={irqLevel} />
+            </PanelSection>
             <PanelSection id="gpu" title={t("page.gpu")}>
               <GpuPanel samples={gpuSamples} win={win} schemeKey={schemeKey} level={gpuLevel} />
             </PanelSection>
@@ -206,7 +215,7 @@ export default function App() {
             </PanelSection>
           </AllPanels>
         ) : path === "/memory" ? (
-          <MemoryPanel samples={memSamples} win={win} schemeKey={schemeKey} level={memLevel} />
+          <MemoryPanel samples={memSamples} faultSamples={faultSamples} win={win} schemeKey={schemeKey} level={memLevel} />
         ) : path === "/disk" ? (
           <DiskPanel samples={diskSamples} win={win} schemeKey={schemeKey} level={diskLevel} />
         ) : path === "/network" ? (
@@ -217,6 +226,8 @@ export default function App() {
           <FilesPanel samples={fileSamples} win={win} schemeKey={schemeKey} level={fileLevel} />
         ) : path === "/locks" ? (
           <LocksPanel samples={lockSamples} win={win} schemeKey={schemeKey} level={lockLevel} />
+        ) : path === "/irq" ? (
+          <IrqPanel samples={irqSamples} win={win} schemeKey={schemeKey} level={irqLevel} />
         ) : path === "/gpu" ? (
           <GpuPanel samples={gpuSamples} win={win} schemeKey={schemeKey} level={gpuLevel} />
         ) : path === "/processes" ? (
@@ -230,8 +241,8 @@ export default function App() {
           />
         ) : (
           <>
-            <LensSummary host={host} samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} fileSamples={fileSamples} lockSamples={lockSamples} life={life} incidents={incidents} />
-            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} fileSamples={fileSamples} lockSamples={lockSamples} events={events} life={life} incidents={incidents} win={win} />
+            <LensSummary host={host} samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} fileSamples={fileSamples} lockSamples={lockSamples} faultSamples={faultSamples} irqSamples={irqSamples} life={life} incidents={incidents} />
+            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} fileSamples={fileSamples} lockSamples={lockSamples} faultSamples={faultSamples} irqSamples={irqSamples} events={events} life={life} incidents={incidents} win={win} />
           </>
         )}
       </main>
@@ -275,6 +286,7 @@ const SECTIONS: { id: string; titleKey: Key }[] = [
   { id: "dns", titleKey: "page.dns" },
   { id: "files", titleKey: "page.files" },
   { id: "locks", titleKey: "page.locks" },
+  { id: "irq", titleKey: "page.irq" },
   { id: "gpu", titleKey: "page.gpu" },
   { id: "vms", titleKey: "page.vms" },
 ];

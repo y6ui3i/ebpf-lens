@@ -16,14 +16,60 @@ type Sample struct {
 	CPUs       int        `json:"cpus"`       // Used as the denominator for CPU utilization
 	BusyNs     uint64     `json:"busyNs"`     // Total CPU time used by all processes (measured with eBPF; excludes idle)
 	Procs      []ProcStat `json:"procs,omitempty"`
-	Mem        *MemStat   `json:"mem,omitempty"`   // memstall only
-	VMs        []VMInfo   `json:"vms,omitempty"`   // probe "vms" only: the VMs running on this host
-	GPU        *GPUStat   `json:"gpu,omitempty"`   // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
-	Disk       *DiskStat  `json:"disk,omitempty"`  // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
-	Net        *NetStat   `json:"net,omitempty"`   // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
-	DNS        *DNSStat   `json:"dns,omitempty"`   // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
-	Files      *FileStat  `json:"files,omitempty"` // probe "fileops" only. Its Slots are a histogram of fsync latency
-	Lock       *LockStat  `json:"lock,omitempty"`  // probe "lockwait" only. Its Slots are a histogram of contended user-lock waits
+	Mem        *MemStat   `json:"mem,omitempty"`    // memstall only
+	VMs        []VMInfo   `json:"vms,omitempty"`    // probe "vms" only: the VMs running on this host
+	GPU        *GPUStat   `json:"gpu,omitempty"`    // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+	Disk       *DiskStat  `json:"disk,omitempty"`   // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
+	Net        *NetStat   `json:"net,omitempty"`    // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
+	DNS        *DNSStat   `json:"dns,omitempty"`    // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
+	Files      *FileStat  `json:"files,omitempty"`  // probe "fileops" only. Its Slots are a histogram of fsync latency
+	Lock       *LockStat  `json:"lock,omitempty"`   // probe "lockwait" only. Its Slots are a histogram of contended user-lock waits
+	Faults     *FaultStat `json:"faults,omitempty"` // probe "pgfault" only. Its Slots are a histogram of major page fault latency
+	IRQ        *IRQStat   `json:"irq,omitempty"`    // probe "irqlat" only. Its Slots are a histogram of one softirq's run time
+}
+
+// FaultStat is one interval of page faults, host-wide, with the swap state from /proc as a cross-check. Procs on
+// the same sample say who faulted (Wait* = major faults: count, time stalled; MinorFaults; SwapIns).
+type FaultStat struct {
+	Minor          uint64 `json:"minor"`
+	Major          uint64 `json:"major"`   // the page had to come from disk (page cache miss, or swap)
+	SwapIn         uint64 `json:"swapIn"`  // major faults on anonymous memory: read back from swap
+	MajorNs        uint64 `json:"majorNs"` // time processes spent stalled in major faults
+	SwapTotalBytes uint64 `json:"swapTotalBytes"`
+	SwapUsedBytes  uint64 `json:"swapUsedBytes"`
+	SwapInPages    uint64 `json:"swapInPages"`  // /proc/vmstat pswpin over the interval (cross-check)
+	SwapOutPages   uint64 `json:"swapOutPages"` // /proc/vmstat pswpout over the interval: pages written to swap
+}
+
+// IRQStat is one interval of interrupt time.
+type IRQStat struct {
+	CPUs     []CPUIRQ      `json:"cpus"`               // per CPU: time in softirq and in hardirq
+	Softirqs []SoftirqStat `json:"softirqs,omitempty"` // per (vector, CPU)
+	IRQs     []HardIRQ     `json:"irqs,omitempty"`     // per IRQ line
+}
+
+// CPUIRQ is one CPU's interrupt time during the interval.
+type CPUIRQ struct {
+	CPU       int    `json:"cpu"`
+	SoftirqNs uint64 `json:"softirqNs"`
+	IRQNs     uint64 `json:"irqNs"`
+	IRQCount  uint64 `json:"irqCount"`
+}
+
+// SoftirqStat is one softirq vector on one CPU during the interval.
+type SoftirqStat struct {
+	Vec   string `json:"vec"` // "NET_RX" | "NET_TX" | "TIMER" | "BLOCK" | "SCHED" | "RCU" | "TASKLET" | "HRTIMER" | "HI" | "IRQ_POLL"
+	CPU   int    `json:"cpu"`
+	Count uint64 `json:"count"`
+	Ns    uint64 `json:"ns"`
+}
+
+// HardIRQ is one interrupt line during the interval, by its handler's name.
+type HardIRQ struct {
+	IRQ   int    `json:"irq"`
+	Name  string `json:"name"` // "eno1", "nvme0q3", "xhci_hcd"...
+	Count uint64 `json:"count"`
+	Ns    uint64 `json:"ns"`
 }
 
 // LockStat is one interval of lock waiting, host-wide. Procs on the same sample say who waited (Wait* = contended
@@ -255,6 +301,9 @@ type ProcStat struct {
 	Locks           int    `json:"locks,omitempty"`           // distinct contended lock addresses
 	KernelLockCount uint64 `json:"kernelLockCount,omitempty"` // kernel lock contention events
 	KernelLockNs    uint64 `json:"kernelLockNs,omitempty"`
+	// pgfault only. In pgfault, Wait* means "major page faults: count, time stalled"
+	MinorFaults uint64 `json:"minorFaults,omitempty"`
+	SwapIns     uint64 `json:"swapIns,omitempty"` // major faults on anonymous memory
 }
 
 // HostInfo is used for the list of hosts known to the server.
@@ -269,7 +318,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait" | "fault_stall" | "irq_busy"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -311,6 +360,11 @@ type Incident struct {
 	// fsync_slow: Peak is the fsync p99 in µs; Culprits are the files with most of the fsync time
 	// lock_wait: Subject is the process; Peak is its lock wait in seconds per second (threads' worth blocked);
 	// Culprits split that between "user lock" and the kernel lock kinds
+	// fault_stall: Peak is time stalled in major page faults in ms per second; Culprits are the processes;
+	// SwapShare is the share of those faults that were swap-ins (the rest: file pages evicted from the page cache)
+	SwapShare float64 `json:"swapShare,omitempty"`
+	// irq_busy: Subject is "cpuN"; Peak is that CPU's share of time in interrupt context (0..1); Culprits are the
+	// softirq vectors and IRQ lines that took most of it
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

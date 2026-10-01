@@ -98,6 +98,10 @@ export function incidentDetail(x: Incident, lang: Lang, t: TFn): string {
     case "dns_slow":
     case "fsync_slow":
       return (x.peak == null ? "" : formatUs(x.peak)) + (x.culprits?.length ? t("incident.names", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) }) : "");
+    case "fault_stall":
+      return t("incident.faultStall", { n: (x.peak ?? 0).toFixed(0), pct: Math.round((x.swapShare ?? 0) * 100), from: t((x.swapShare ?? 0) > 0.5 ? "faults.summary.fromSwap" : "faults.summary.fromCache") }) + culpritSummary(x, t);
+    case "irq_busy":
+      return t("incident.irqBusy", { pct: Math.round((x.peak ?? 0) * 100), cpu: x.subject ?? "?" }) + (x.culprits?.length ? t("incident.names", { list: culpritList(x.culprits, t, { max: CULPRIT_NAMES }) }) : "");
     case "lock_wait":
       return t("incident.lockWait", { n: (x.peak ?? 0).toFixed(1), where: (x.culprits?.find((c) => c.name === "kernel lock")?.share ?? 0) > 0.5 ? t("locks.summary.kernel") : t("locks.summary.user") });
     case "file_fail":

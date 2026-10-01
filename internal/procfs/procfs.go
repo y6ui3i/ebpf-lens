@@ -9,10 +9,12 @@ import (
 	"strings"
 )
 
-// MemInfo holds the two /proc/meminfo values needed to compute usage (in bytes).
+// MemInfo holds the /proc/meminfo values needed to compute usage and swap (in bytes).
 type MemInfo struct {
 	TotalBytes     uint64
 	AvailableBytes uint64
+	SwapTotalBytes uint64
+	SwapFreeBytes  uint64
 }
 
 func ReadMemInfo() (MemInfo, error) {
@@ -37,12 +39,50 @@ func ReadMemInfo() (MemInfo, error) {
 			m.TotalBytes = kb * 1024
 		case "MemAvailable:":
 			m.AvailableBytes = kb * 1024
+		case "SwapTotal:":
+			m.SwapTotalBytes = kb * 1024
+		case "SwapFree:":
+			m.SwapFreeBytes = kb * 1024
 		}
 	}
 	if m.TotalBytes == 0 {
 		return m, fmt.Errorf("MemTotal not found")
 	}
 	return m, sc.Err()
+}
+
+// VMStat holds the cumulative swap counters from /proc/vmstat (pages).
+type VMStat struct {
+	SwapIn  uint64 // pswpin
+	SwapOut uint64 // pswpout
+}
+
+// ReadVMStat reads the swap counters.
+func ReadVMStat() (VMStat, error) {
+	f, err := os.Open("/proc/vmstat")
+	if err != nil {
+		return VMStat{}, err
+	}
+	defer f.Close()
+	var v VMStat
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) != 2 {
+			continue
+		}
+		n, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch fields[0] {
+		case "pswpin":
+			v.SwapIn = n
+		case "pswpout":
+			v.SwapOut = n
+		}
+	}
+	return v, sc.Err()
 }
 
 // PSI is the kernel's cumulative Pressure Stall Information (microseconds).

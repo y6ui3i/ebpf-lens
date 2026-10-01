@@ -20,6 +20,7 @@ export const ROUTES: Route[] = [
   { path: "/dns", labelKey: "page.dns" },
   { path: "/files", labelKey: "page.files" },
   { path: "/locks", labelKey: "page.locks" },
+  { path: "/irq", labelKey: "page.irq" },
   { path: "/gpu", labelKey: "page.gpu" },
 ];
 

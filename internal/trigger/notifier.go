@@ -158,6 +158,10 @@ func Text(event string, i model.Incident) string {
 		what = fmt.Sprintf("name lookups are failing (%.0f in 10 s, %d s since %s)%s", i.Peak, i.Seconds, when, nameText(i, "failures"))
 	case KindDNSSlow:
 		what = fmt.Sprintf("name lookups are slow (99%% resolved within %s, %d s since %s)%s", formatUs(i.Peak), i.Seconds, when, nameText(i, "lookup time"))
+	case KindFileFail:
+		what = fmt.Sprintf("file opens are failing (%.0f in 10 s, %d s since %s; EACCES / EPERM is a permission, EROFS a read-only mount, ENOSPC a full disk, EMFILE / ENFILE a file descriptor leak or limit)%s", i.Peak, i.Seconds, when, nameText(i, "failures"))
+	case KindFsyncSlow:
+		what = fmt.Sprintf("fsync is slow (99%% completed within %s, %d s since %s: the disk is stalling and whoever commits feels it)%s", formatUs(i.Peak), i.Seconds, when, nameText(i, "fsync time"))
 	case KindVRAMFull:
 		what = fmt.Sprintf("VRAM is %.0f%% full (%d s since %s); the next large allocation may fail", i.Peak*100, i.Seconds, when)
 	case KindOOMKill:

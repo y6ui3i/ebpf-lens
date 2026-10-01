@@ -18,10 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/y6ui3i/ebpf-lens/internal/fileerr"
 	"github.com/y6ui3i/ebpf-lens/internal/model"
 	"github.com/y6ui3i/ebpf-lens/internal/netdrop"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/biolat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/dnslat"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/fileops"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/memstall"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/proclife"
@@ -97,6 +99,12 @@ func main() {
 		log.Printf("tcpconn: %s", tc.Warning)
 	}
 
+	fo, err := fileops.Open()
+	if err != nil {
+		log.Fatalf("fileops: %v", err)
+	}
+	defer fo.Close()
+
 	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
 	dns := openDNS()
 	if dns != nil {
@@ -155,6 +163,11 @@ func main() {
 				log.Fatalf("tcpconn: %v", err)
 			}
 			nx.Host, nx.Time, nx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			fx, err := fileSample(fo, vms, *topN)
+			if err != nil {
+				log.Fatalf("fileops: %v", err)
+			}
+			fx.Host, fx.Time, fx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
 			var sx *model.Sample
 			if dns != nil {
 				x, err := dnsSample(dns, vms, *topN)
@@ -185,6 +198,7 @@ func main() {
 				printMem(mx)
 				printDisk(dx)
 				printNet(nx)
+				printFiles(fx)
 				if sx != nil {
 					printDNS(*sx)
 				}
@@ -215,6 +229,9 @@ func main() {
 				}
 				if err := send(client, *serverURL, "/api/ingest", nx); err != nil {
 					log.Printf("send tcpconn: %v", err)
+				}
+				if err := send(client, *serverURL, "/api/ingest", fx); err != nil {
+					log.Printf("send fileops: %v", err)
 				}
 				if sx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *sx); err != nil {
@@ -248,6 +265,9 @@ func main() {
 				log.Fatal(err)
 			}
 			if err := enc.Encode(nx); err != nil {
+				log.Fatal(err)
+			}
+			if err := enc.Encode(fx); err != nil {
 				log.Fatal(err)
 			}
 			if sx != nil {
@@ -398,6 +418,62 @@ func netSample(tc *tcpconn.Probe, vms *vm.Map, topN int) (model.Sample, error) {
 	return model.Sample{
 		Probe: "tcpconn", Unit: "usecs", Slots: slots[:], Procs: procs, Net: &model.NetStat{Dests: dests, Drops: drops, DropFlows: flows},
 	}, nil
+}
+
+// fileSample builds one interval of file data: the fsync latency histogram, the failed opens (trouble first, then
+// by count), the fsynced files, and the processes that fsynced or failed the most.
+func fileSample(fo *fileops.Probe, vms *vm.Map, topN int) (model.Sample, error) {
+	slots, err := fo.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, err := fo.Procs(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	errs, fails, err := fo.Opens(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	files, err := fo.Files()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	tierRank := map[string]int{fileerr.TierTrouble: 0, fileerr.TierNotable: 1, fileerr.TierNoise: 2}
+	slices.SortFunc(fails, func(a, b model.FileOpenFail) int {
+		if d := tierRank[a.Tier] - tierRank[b.Tier]; d != 0 {
+			return d
+		}
+		return cmpDesc(a.Count, b.Count)
+	})
+	if len(fails) > maxDests {
+		fails = fails[:maxDests]
+	}
+	slices.SortFunc(errs, func(a, b model.FileOpenErr) int { return cmpDesc(a.Count, b.Count) })
+	slices.SortFunc(files, func(a, b model.FileSync) int { return cmpDesc(a.LatNs, b.LatNs) })
+	if len(files) > maxDests {
+		files = files[:maxDests]
+	}
+	procs := topBy(all, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.OpenFails, b.OpenFails) },
+	)
+	return model.Sample{Probe: "fileops", Unit: "usecs", Slots: slots[:], Procs: procs,
+		Files: &model.FileStat{OpenErrs: errs, OpenFails: fails, Fsyncs: files}}, nil
+}
+
+func printFiles(x model.Sample) {
+	for _, e := range x.Files.OpenErrs {
+		fmt.Printf("open %-8s n=%d\n", e.Error, e.Count)
+	}
+	for _, f := range x.Files.OpenFails {
+		if f.Tier != fileerr.TierNoise {
+			fmt.Printf("  %-16s %-8s %-8s %s n=%d\n", f.Comm, f.Error, f.Tier, f.Path, f.Count)
+		}
+	}
+	for _, f := range x.Files.Fsyncs {
+		fmt.Printf("fsync %-40s n=%d avg=%.2fms max=%.2fms\n", f.Name, f.Fsyncs, float64(f.LatNs)/1e6/float64(max(1, f.Fsyncs)), float64(f.LatMaxNs)/1e6)
+	}
 }
 
 func openDNS() *dnslat.Probe {

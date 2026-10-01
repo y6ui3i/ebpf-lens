@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/y6ui3i/ebpf-lens/internal/fileerr"
 	"github.com/y6ui3i/ebpf-lens/internal/model"
 	"github.com/y6ui3i/ebpf-lens/internal/netdrop"
 )
@@ -33,6 +34,8 @@ const (
 	KindNetDrop        = "net_drop"         // the kernel dropped packets for a trouble reason (accept queue full, firewall, no route, no memory)
 	KindDNSFail        = "dns_fail"         // name lookups failing (getaddrinfo returned an error)
 	KindDNSSlow        = "dns_slow"         // name lookups slow (getaddrinfo p99)
+	KindFileFail       = "file_fail"        // opens failing for a trouble reason (EACCES, EROFS, ENOSPC, EMFILE...)
+	KindFsyncSlow      = "fsync_slow"       // fsync p99 high: the disk stalls and the committing process feels it
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -85,6 +88,8 @@ type hostState struct {
 	dropRing                     failRing // trouble-tier drops per second over the last failWindow seconds
 	dnsFail, dnsSlow             excursion
 	dnsRing                      failRing
+	fileFail, fsyncSlow          excursion
+	fileRing                     failRing
 }
 
 // failRing counts failures per second over the last failWindow seconds (for the windowed rules).
@@ -255,6 +260,20 @@ func (e *Evaluator) OnSample(x model.Sample) {
 		e.judge(&h.netDrop, x.Host, KindNetDrop, "", e.cfg.Network.Drops, windowed(&h.dropRing, x.Time, drops, e.cfg.Network.FailSpreadSeconds), x.Time, e.dropDecorator(x.Host))
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
 			e.judge(&h.netSlow, x.Host, KindNetConnectSlow, "", e.cfg.Network.ConnectLatency, p99, x.Time, e.destDecorator(x.Host, "slow"))
+		}
+	case "fileops":
+		if x.Files == nil {
+			return
+		}
+		var fails uint64
+		for _, f := range x.Files.OpenFails {
+			if f.Tier == fileerr.TierTrouble {
+				fails += f.Count
+			}
+		}
+		e.judge(&h.fileFail, x.Host, KindFileFail, "", e.cfg.Files.Fails, windowed(&h.fileRing, x.Time, fails, e.cfg.Files.FailSpreadSeconds), x.Time, e.fileDecorator(x.Host))
+		if p99, ok := Percentile(x.Slots, 0.99); ok {
+			e.judge(&h.fsyncSlow, x.Host, KindFsyncSlow, "", e.cfg.Files.FsyncLatency, p99, x.Time, e.fsyncDecorator(x.Host))
 		}
 	case "dnslat":
 		if x.DNS == nil {
@@ -521,6 +540,90 @@ func (e *Evaluator) dropDecorator(host string) func(*model.Incident) {
 			end = *i.End
 		}
 		i.Culprits, i.CulpritShare = e.dropCulprits(host, i.Start, end)
+	}
+}
+
+// fileCulprits applies the culprit grouping rule to trouble-tier failed opens over the fileops samples of
+// [from, to]: by "comm path (ERRNO)", and when nothing stands out (one process failing on many files, a leak
+// hitting EMFILE on everything) by "comm (ERRNO)".
+func (e *Evaluator) fileCulprits(host string, from, to time.Time) ([]model.Culprit, float64) {
+	if e.history == nil {
+		return nil, 0
+	}
+	shares := map[string]float64{}
+	byProc := map[string]float64{}
+	var all float64
+	for _, s := range e.history.Samples(host, "fileops") {
+		if s.Time.Before(from) || s.Time.After(to) || s.Files == nil {
+			continue
+		}
+		for _, f := range s.Files.OpenFails {
+			if f.Tier != fileerr.TierTrouble || f.Count == 0 {
+				continue
+			}
+			v := float64(f.Count)
+			shares[fmt.Sprintf("%s %s (%s)", f.Comm, f.Path, f.Error)] += v
+			byProc[fmt.Sprintf("%s (%s)", f.Comm, f.Error)] += v
+			all += v
+		}
+	}
+	if all == 0 {
+		return nil, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	if group, total := GroupCulprits(shares); len(group) > 0 {
+		return group, total
+	}
+	for k, v := range byProc {
+		byProc[k] = v / all
+	}
+	return GroupCulprits(byProc)
+}
+
+func (e *Evaluator) fileDecorator(host string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare = e.fileCulprits(host, i.Start, end)
+	}
+}
+
+// fsyncCulprits applies the culprit grouping rule to files by their share of the total fsync time in [from, to].
+func (e *Evaluator) fsyncCulprits(host string, from, to time.Time) ([]model.Culprit, float64) {
+	if e.history == nil {
+		return nil, 0
+	}
+	shares := map[string]float64{}
+	var all float64
+	for _, s := range e.history.Samples(host, "fileops") {
+		if s.Time.Before(from) || s.Time.After(to) || s.Files == nil {
+			continue
+		}
+		for _, f := range s.Files.Fsyncs {
+			shares[f.Name] += float64(f.LatNs)
+			all += float64(f.LatNs)
+		}
+	}
+	if all == 0 {
+		return nil, 0
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	return GroupCulprits(shares)
+}
+
+func (e *Evaluator) fsyncDecorator(host string) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		i.Culprits, i.CulpritShare = e.fsyncCulprits(host, i.Start, end)
 	}
 }
 

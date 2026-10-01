@@ -14,6 +14,7 @@ import { currentGpu, gpuUtil, pct as gpuPct, throttleKey, vramUsed } from "../li
 import { currentDisk, diskBytesPerSec, formatRate } from "../lib/disk";
 import { connectsPerSec, currentNet } from "../lib/net";
 import { currentDns, lookupsPerSec } from "../lib/dns";
+import { currentFiles, fsyncsPerSec } from "../lib/files";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -32,8 +33,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -70,6 +71,7 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
   const netSlowLevel = areaLevel(incidents, ["net_connect_slow"], nowMs);
   const netErrLevel = areaLevel(incidents, ["net_connect_fail", "net_retrans", "net_drop"], nowMs);
   const dns = currentDns(dnsSamples);
+  const files = currentFiles(fileSamples);
 
   const rows: Row[] = [
     {
@@ -158,6 +160,19 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
             level: areaLevel(incidents, ["dns_slow"], nowMs), spark: dnsSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/dns",
           },
           { kind: "value", value: `${dns.fails}`, note: t("use.dnsErr"), level: areaLevel(incidents, ["dns_fail"], nowMs), to: "/dns" },
+        ],
+    },
+    {
+      resource: "resource.files",
+      cells: !files.has
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: files.fsyncsPerSec == null ? "–" : `${files.fsyncsPerSec.toFixed(1)}/s`, note: t("use.filesUtil"), spark: fileSamples.map(fsyncsPerSec), to: "/files" },
+          {
+            kind: "value", value: formatUs(files.p99), note: t("use.filesSat"),
+            level: areaLevel(incidents, ["fsync_slow"], nowMs), spark: fileSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/files",
+          },
+          { kind: "value", value: `${files.fails}`, note: t("use.filesErr"), level: areaLevel(incidents, ["file_fail"], nowMs), to: "/files" },
         ],
     },
     {

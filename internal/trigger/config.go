@@ -19,6 +19,16 @@ type Config struct {
 	Disk      ExcursionRule `json:"disk"`      // block I/O latency p99, in µs
 	Network   NetworkRule   `json:"network"`   // outbound TCP: failed connects, slow connects, retransmissions
 	DNS       DNSRule       `json:"dns"`       // name resolution (glibc getaddrinfo): failed and slow lookups
+	Files     FilesRule     `json:"files"`     // failed opens (EACCES, EROFS, ENOSPC...) and slow fsync
+}
+
+// FilesRule: Fails is the number of trouble-tier failed opens (see internal/fileerr: permission denied, read-only
+// file system, no space, too many open files...) in the last 10 s; ENOENT never counts. FsyncLatency is the fsync
+// p99 in µs: an SSD syncs in about a millisecond, an HDD in ten; 100 ms is a queue, a second is a stalled disk.
+type FilesRule struct {
+	Fails             ExcursionRule `json:"fails"`
+	FailSpreadSeconds int           `json:"failSpreadSeconds"` // as for NetworkRule
+	FsyncLatency      ExcursionRule `json:"fsyncLatency"`
 }
 
 // DNSRule: Fails is the number of failed lookups in the last 10 s (a burst of NXDOMAINs lasts one second);
@@ -113,6 +123,13 @@ func Default() Config {
 			FailSpreadSeconds: 3,
 			Latency:           ExcursionRule{Caution: 100_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
 		},
+		// Idle, the test host fails no open for a trouble reason outside /proc (lsof's EACCES on other users'
+		// /proc/<pid>/fd is filed as noise). A service denied its key, or a disk gone read-only, fails on every try
+		Files: FilesRule{
+			Fails:             ExcursionRule{Caution: 5, Warning: 50, MinSeconds: 1, MaxGapSeconds: 10},
+			FailSpreadSeconds: 3,
+			FsyncLatency:      ExcursionRule{Caution: 100_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
+		},
 	}
 }
 
@@ -131,7 +148,7 @@ func Load(path string) (Config, error) {
 
 // Validate rejects values that would make the rules meaningless (e.g. warning below caution).
 func (c Config) Validate() error {
-	for name, n := range map[string]int{"network.failSpreadSeconds": c.Network.FailSpreadSeconds, "dns.failSpreadSeconds": c.DNS.FailSpreadSeconds} {
+	for name, n := range map[string]int{"network.failSpreadSeconds": c.Network.FailSpreadSeconds, "dns.failSpreadSeconds": c.DNS.FailSpreadSeconds, "files.failSpreadSeconds": c.Files.FailSpreadSeconds} {
 		if n < 1 || n > 10 {
 			return fmt.Errorf("%s must be between 1 and 10 (the window is 10 s)", name)
 		}
@@ -139,7 +156,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency, "files.fails": c.Files.Fails, "files.fsyncLatency": c.Files.FsyncLatency} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

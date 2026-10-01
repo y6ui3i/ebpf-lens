@@ -209,6 +209,16 @@ lab での webhook の文面: `[CAUTION] hal: VM fleet-04 is waiting for host CP
 
 検証機で再現: `db-N.internal.invalid` を 8 回引く → `dns_fail` が `*.internal.invalid (NONAME)` を名指し。ブラックホールを向いたプロセス専用の `resolv.conf`(`unshare -m` + bind mount、`timeout:1`)で 6 回引く → `dns_slow` の警告、1.04 秒。glibc を通さずに名前解決するプログラム(Go の組み込みリゾルバ、コンテナ内の musl)は見えない。その限界は画面にも書いてある。
 
+## どのファイルが、なぜ開けないのか
+
+設定ミスの半分は、何かが落ちるずっと前に `open()` の失敗として現れる。設定が指す場所に無い証明書、サービスのユーザーが読めない秘密鍵、読み取り専用になったマウント上のログディレクトリ、ディスクリプタを漏らし続けて `EMFILE` に至るプロセス。エラーはせいぜいプログラムのログの中にあり、eBPFLens はログを読まない(ADR 0001)。そこでエージェントは syscall の生の tracepoint(`sys_enter` / `sys_exit` を `open` / `openat` / `openat2` に絞る。`do_sys_openat2` も `do_filp_open` も最近のカーネルではインライン化されていてトレースできない)を掛け、失敗した open をすべて記録する: **どのプロセスが、どのパスを、どの errno で**。`internal/fileerr` が 3 段に分ける: **問題**(EACCES、EPERM、EROFS、ENOSPC、EDQUOT、EMFILE、ENFILE、EIO、ETXTBSY、ESTALE。ファイルはあるのにプログラムが手にできない)、**注目**(ENOENT。パス付きで表に出すが出来事にはしない。プログラムは一日中あるかどうか分からないファイルを探している。何もしていない検証機でも毎秒 40 件ほど失敗する。ロケールファイル、Python の `pyvenv.cfg` 探し、`/root/.curlrc`)、**日常**(`/proc`、`/sys`、`/dev` の下は errno を問わず。`lsof` が他ユーザーの `/proc/<pid>/fd` を読んで EACCES を数百件出す。EEXIST、ENXIO……)。
+
+もう半分は **fsync**。データベースのコミットは fsync で、ディスク画面が「SSD が 300 ms 止まった」と言うとき、こちらは*誰がどのファイルで待ったか*を言う。`do_fsync`(`fsync` と `fdatasync` の着地点。`vfs_fsync_range` なら io_uring も拾えるがインライン化されていて鳴らない)の fentry/fexit で、プロセスごと・ファイルごとの待ちを測る。ファイル名と親ディレクトリ名を fd の先の dentry から読むので、`ebpflens.db-wal` と `ebpflens.db` を見分けられる。
+
+出来事は 2 つ: `file_fail`(問題の段の失敗が 10 秒間に 5 件以上、そのうち 3 秒以上に散らばる。50 件で警告)は `comm path (ERRNO)` を名指しし、1 つのプロセスが多数のファイルで失敗していれば(ディスクリプタ漏れ)`comm (ERRNO)` にまとめる。`fsync_slow`(fsync p99 ≥ 100 ms。1 秒で警告)は fsync の時間の大半を占めたファイルを名指しする。次の一手は errno で決まる: EACCES なら `ls -l` とサービスのユーザー、EROFS なら `dmesg` で再マウントを探す、ENOSPC なら空きを作る、EMFILE なら `ls /proc/<pid>/fd | wc -l`。
+
+検証機で再現: 一般ユーザーが毎秒 `open("/root/lenstest/server.key")` を試す → `file_fail` 注意、`python3 /root/lenstest/server.key (EACCES) (100%)` を名指し。SATA SSD へ `dd … conv=fsync` で 256 MB 書く横で別プロセスが小さなジャーナルを fsync → `fsync_slow` **警告**、p99 1.04 秒、名指しは `lenstest/a (76%)`、`lenstest/journal (24%)`。小さなジャーナルのコミットが大きな書き込みの writeback の後ろで待った。バックアップの横で動くデータベースが感じるのがまさにこれ。限界: 開く前に `stat()` で確かめるプログラム(Rust 版 coreutils の `cat` など)はそこで失敗するので open には出ない。パスはプログラムが渡したままで、相対パスは相対のまま。
+
 ## なぜ GPU が遊んでいるのか
 
 `nvidia-smi` は「GPU は 30% 稼働」とは言うが、なぜかは言えない。eBPFLens は両側から答える([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):
@@ -277,7 +287,7 @@ Lens Summary(と各 VM のページ)に **送る報告文** がある。状況�
 11. ✅ ディスク(biolatency: I/O ごとの待ち時間、ディスクごと、誰が出したか。`disk_slow` / `disk_error`)とネットワーク(tcpconnect / tcpconnlat / tcpretrans を 1 つのプローブに。`net_connect_fail` / `net_connect_slow` / `net_retrans`)
 12. macOS エージェント: サーバー・画面・出来事の仕組みは同じまま、macOS が特別な権限なしに公開している範囲(CPU とロード、メモリ圧迫の段階、kqueue によるプロセスの起動・終了、libproc によるプロセス別 CPU)を流す。macOS には eBPF がないので、実行待ち時間の分布やプロセス別の回収停止は取れない。Mac は「できる範囲」であって本線ではない。収集部は OS ごとに分ける([ADR 0002](docs/adr/0002-collectors-per-os.md))。Windows は需要があれば(ETW になる)
 13. ✅ パケット破棄をカーネル自身の理由付きで(`kfree_skb` + `enum skb_drop_reason`。名前は動いているカーネルの BTF から読む。ポートで待ち受けるプロセスは `inet_csk_listen_start` から。カーネルが報告しない accept 待ち行列満杯の SYN は `tcp_conn_request` の `fexit` から。`net_drop`)
-14. eBPF でしか見えないものをさらに、この順で(2026-09-30 に決めた。「報告文はもういい、eBPF 側を広げる」): **ファイル操作の失敗と fsync 待ち**(`openat` の ENOENT / EACCES をパスとプロセス付きで。設定ミスの半分はこれ。`ext4_sync_file_enter/exit` で「DB の fsync が 300 ms 止まった」をディスク画面につなぐ)、**ロック・futex 待ち**(`contention_begin/end`、`futex`: CPU も I/O も待っていないのに自分の鎖で止まっている。GPU 判定の「別の待ち」に欠けていた答え)、**ページフォールト・スワップ**(`page_fault_user`、swap in/out: スワップ往復しているホストの被害者。メモリ画面を回収停止の先へ広げる)、**softirq / IRQ 遅延**(`softirq_entry/exit`、`irq_handler_*`: ネットワーク割り込みが 1 つの CPU を占有。高負荷 NIC と VM ホスト向け)
+14. ✅(先頭のみ)/ 予定: eBPF でしか見えないものをさらに、この順で(2026-09-30 に決めた。「報告文はもういい、eBPF 側を広げる」): **✅ ファイル操作の失敗と fsync 待ち**(「どのファイルが、なぜ開けないのか」を参照。`open` / `openat` / `openat2` の生の syscall tracepoint でパス・プロセス・errno を取り、問題 / 注目 / 日常に分ける。`do_fsync` でプロセスごと・ファイルごと。`file_fail` / `fsync_slow`)、**ロック・futex 待ち**(`contention_begin/end`、`futex`: CPU も I/O も待っていないのに自分の鎖で止まっている。GPU 判定の「別の待ち」に欠けていた答え)、**ページフォールト・スワップ**(`page_fault_user`、swap in/out: スワップ往復しているホストの被害者。メモリ画面を回収停止の先へ広げる)、**softirq / IRQ 遅延**(`softirq_entry/exit`、`irq_handler_*`: ネットワーク割り込みが 1 つの CPU を占有。高負荷 NIC と VM ホスト向け)
 
 ## 判定のしきい値(仮)
 

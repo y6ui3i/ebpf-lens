@@ -686,6 +686,85 @@ func TestNetDropGroupsByReasonWhenNoFlowStandsOut(t *testing.T) {
 	}
 }
 
+func fileSample(sec, slot int, fails []model.FileOpenFail, fsyncs []model.FileSync) model.Sample {
+	slots := make([]uint64, 27)
+	if slot >= 0 {
+		slots[slot] = 100
+	}
+	return model.Sample{Host: "h", Probe: "fileops", Time: t0.Add(time.Duration(sec) * time.Second), IntervalMs: 1000, Slots: slots,
+		Files: &model.FileStat{OpenFails: fails, Fsyncs: fsyncs}}
+}
+
+// A service denied its private key retries every second; python looking for modules (ENOENT) and lsof reading
+// /proc (EACCES, filed as noise by the agent) never count.
+func TestFileFailNamesTheProcessPathAndErrno(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		x := fileSample(s, -1, []model.FileOpenFail{
+			{Comm: "nginx", Path: "/etc/ssl/private/server.key", Error: "EACCES", Count: 3, Tier: "trouble"},
+			{Comm: "python3", Path: "/usr/lib/python3/dist-packages/x.so", Error: "ENOENT", Count: 40, Tier: "notable"},
+			{Comm: "lsof", Path: "/proc/1/fd", Error: "EACCES", Count: 30, Tier: "noise"},
+		}, nil)
+		h.samples["fileops"] = append(h.samples["fileops"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindFileFail || r.last().Level != LevelCaution || r.last().Peak != 9 {
+		t.Fatalf("expected a file_fail caution with peak 9, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "nginx /etc/ssl/private/server.key (EACCES)" || c[0].Share != 1 {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "file opens are failing (9 in 10 s") || !contains(text, "mostly nginx /etc/ssl/private/server.key (EACCES) (100%)") {
+		t.Fatalf("text: %s", text)
+	}
+}
+
+// A descriptor leak: one process fails on twenty different files with EMFILE; no path stands out, the group is
+// formed by process and errno.
+func TestFileFailGroupsByProcessWhenNoPathStandsOut(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		var fails []model.FileOpenFail
+		for i := 0; i < 20; i++ {
+			fails = append(fails, model.FileOpenFail{Comm: "leaky", Path: fmt.Sprintf("/var/lib/leaky/%d.log", i), Error: "EMFILE", Count: 1, Tier: "trouble"})
+		}
+		x := fileSample(s, -1, fails, nil)
+		h.samples["fileops"] = append(h.samples["fileops"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 {
+		t.Fatalf("expected one incident, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "leaky (EMFILE)" {
+		t.Fatalf("culprits: %+v", c)
+	}
+}
+
+// An fsync p99 in slot 17 (131-262 ms) for three seconds: the DB's WAL took most of the time.
+func TestFsyncSlowNamesTheFile(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	h := &fakeHistory{samples: map[string][]model.Sample{}}
+	e.SetHistory(h)
+	for s := 0; s < 3; s++ {
+		x := fileSample(s, 17, nil, []model.FileSync{{Name: "ebpflens/ebpflens.db-wal", Fsyncs: 3, LatNs: 600e6, LatMaxNs: 250e6}, {Name: "journal/system.journal", Fsyncs: 1, LatNs: 20e6}})
+		h.samples["fileops"] = append(h.samples["fileops"], x)
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindFsyncSlow || r.last().Level != LevelCaution {
+		t.Fatalf("expected an fsync_slow caution, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 1 || c[0].Name != "ebpflens/ebpflens.db-wal" || c[0].Share < 0.96 {
+		t.Fatalf("culprits: %+v", c)
+	}
+}
+
 func dnsSample(sec, slot int, names []model.DNSName) model.Sample {
 	slots := make([]uint64, 27)
 	if slot >= 0 {

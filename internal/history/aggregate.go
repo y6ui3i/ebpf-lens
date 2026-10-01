@@ -80,6 +80,13 @@ func clone(x model.Sample) model.Sample {
 	if x.DNS != nil {
 		c.DNS = &model.DNSStat{Names: append([]model.DNSName(nil), x.DNS.Names...)}
 	}
+	if x.Files != nil {
+		c.Files = &model.FileStat{
+			OpenErrs:  append([]model.FileOpenErr(nil), x.Files.OpenErrs...),
+			OpenFails: append([]model.FileOpenFail(nil), x.Files.OpenFails...),
+			Fsyncs:    append([]model.FileSync(nil), x.Files.Fsyncs...),
+		}
+	}
 	return c
 }
 
@@ -212,6 +219,41 @@ func merge(c *model.Sample, x model.Sample) {
 			}
 		}
 	}
+	if x.Files != nil {
+		if c.Files == nil {
+			c.Files = &model.FileStat{}
+		}
+		for _, e := range x.Files.OpenErrs {
+			i := indexOf(len(c.Files.OpenErrs), func(i int) bool { return c.Files.OpenErrs[i].Error == e.Error })
+			if i < 0 {
+				c.Files.OpenErrs = append(c.Files.OpenErrs, e)
+				continue
+			}
+			c.Files.OpenErrs[i].Count += e.Count
+		}
+		for _, f := range x.Files.OpenFails {
+			i := indexOf(len(c.Files.OpenFails), func(i int) bool {
+				g := c.Files.OpenFails[i]
+				return g.Comm == f.Comm && g.Path == f.Path && g.Error == f.Error
+			})
+			if i < 0 {
+				c.Files.OpenFails = append(c.Files.OpenFails, f)
+				continue
+			}
+			c.Files.OpenFails[i].Count += f.Count
+		}
+		for _, f := range x.Files.Fsyncs {
+			i := indexOf(len(c.Files.Fsyncs), func(i int) bool { return c.Files.Fsyncs[i].Name == f.Name })
+			if i < 0 {
+				c.Files.Fsyncs = append(c.Files.Fsyncs, f)
+				continue
+			}
+			t := &c.Files.Fsyncs[i]
+			t.Fsyncs += f.Fsyncs
+			t.LatNs += f.LatNs
+			t.LatMaxNs = max(t.LatMaxNs, f.LatMaxNs)
+		}
+	}
 }
 
 func mergeProcs(c *model.Sample, ps []model.ProcStat) {
@@ -263,6 +305,14 @@ func finish(c *model.Sample, n int) {
 	if c.Net != nil && len(c.Net.DropFlows) > maxRows {
 		sort.Slice(c.Net.DropFlows, func(i, j int) bool { return c.Net.DropFlows[i].Count > c.Net.DropFlows[j].Count })
 		c.Net.DropFlows = c.Net.DropFlows[:maxRows]
+	}
+	if c.Files != nil && len(c.Files.OpenFails) > maxRows {
+		sort.Slice(c.Files.OpenFails, func(i, j int) bool { return c.Files.OpenFails[i].Count > c.Files.OpenFails[j].Count })
+		c.Files.OpenFails = c.Files.OpenFails[:maxRows]
+	}
+	if c.Files != nil && len(c.Files.Fsyncs) > maxRows {
+		sort.Slice(c.Files.Fsyncs, func(i, j int) bool { return c.Files.Fsyncs[i].LatNs > c.Files.Fsyncs[j].LatNs })
+		c.Files.Fsyncs = c.Files.Fsyncs[:maxRows]
 	}
 	if c.DNS != nil && len(c.DNS.Names) > maxRows {
 		sort.Slice(c.DNS.Names, func(i, j int) bool {

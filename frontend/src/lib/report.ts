@@ -97,6 +97,10 @@ export function ownerOf(x: Incident, t: TFn): string {
       return x.culprits?.length ? t("owner.dnsNames", { list: names(x, t) }) : t("owner.dnsResolver");
     case "dns_slow":
       return t("owner.dnsResolver");
+    case "file_fail":
+      return x.culprits?.length ? t("owner.fileCulprits", { list: names(x, t) }) : t("owner.fileUnknown");
+    case "fsync_slow":
+      return x.culprits?.length ? t("owner.fsyncFiles", { list: names(x, t) }) : t("owner.fsyncDisk");
     case "gpu_starved":
       return t("owner.app", { comm: x.subject ?? "?" });
     case "vram_full":

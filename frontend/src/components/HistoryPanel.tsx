@@ -36,9 +36,10 @@ const ROWS: Row[] = [
   { key: "resource.disk", path: "/disk", probe: "biolat", kinds: ["disk_slow", "disk_error"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
   { key: "resource.network", path: "/network", probe: "tcpconn", kinds: ["net_connect_fail", "net_connect_slow", "net_retrans", "net_drop"], value: retransPerSec, format: (v) => `${v.toFixed(1)}/s` },
   { key: "resource.dns", path: "/dns", probe: "dnslat", kinds: ["dns_fail", "dns_slow"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
+  { key: "resource.files", path: "/files", probe: "fileops", kinds: ["file_fail", "fsync_slow"], value: (s) => percentile(s.slots, 0.99), log: true, format: (v) => formatUs(v) },
   { key: "resource.gpu", path: "/gpu", probe: "gpu", kinds: ["gpu_starved", "vram_full"], value: (s) => { const u = gpuUtil(s); return u == null ? null : u * 100; }, format: (v) => `${Math.round(v)}%` },
 ];
-const PROBES = ["runqlat", "memstall", "vms", "biolat", "tcpconn", "dnslat", "gpu"] as const;
+const PROBES = ["runqlat", "memstall", "vms", "biolat", "tcpconn", "dnslat", "fileops", "gpu"] as const;
 
 // The last 1 / 6 / 24 hours at a glance: when and where something happened, then a click into that area at that time
 export function HistoryPanel({ host, incidents }: { host: string; incidents: Incident[] }) {

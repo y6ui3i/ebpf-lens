@@ -16,12 +16,44 @@ type Sample struct {
 	CPUs       int        `json:"cpus"`       // Used as the denominator for CPU utilization
 	BusyNs     uint64     `json:"busyNs"`     // Total CPU time used by all processes (measured with eBPF; excludes idle)
 	Procs      []ProcStat `json:"procs,omitempty"`
-	Mem        *MemStat   `json:"mem,omitempty"`  // memstall only
-	VMs        []VMInfo   `json:"vms,omitempty"`  // probe "vms" only: the VMs running on this host
-	GPU        *GPUStat   `json:"gpu,omitempty"`  // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
-	Disk       *DiskStat  `json:"disk,omitempty"` // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
-	Net        *NetStat   `json:"net,omitempty"`  // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
-	DNS        *DNSStat   `json:"dns,omitempty"`  // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
+	Mem        *MemStat   `json:"mem,omitempty"`   // memstall only
+	VMs        []VMInfo   `json:"vms,omitempty"`   // probe "vms" only: the VMs running on this host
+	GPU        *GPUStat   `json:"gpu,omitempty"`   // probe "gpu" only. Its Slots are a histogram of how long CUDA calls waited for the GPU
+	Disk       *DiskStat  `json:"disk,omitempty"`  // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
+	Net        *NetStat   `json:"net,omitempty"`   // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
+	DNS        *DNSStat   `json:"dns,omitempty"`   // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
+	Files      *FileStat  `json:"files,omitempty"` // probe "fileops" only. Its Slots are a histogram of fsync latency
+}
+
+// FileStat is one interval of failed opens and fsync waits. Procs on the same sample say who fsynced (Wait*) and
+// how many of their opens failed (OpenFails).
+type FileStat struct {
+	OpenErrs  []FileOpenErr  `json:"openErrs,omitempty"`  // every failed open of the interval, by errno
+	OpenFails []FileOpenFail `json:"openFails,omitempty"` // the rows: process, errno, path (top ones)
+	Fsyncs    []FileSync     `json:"fsyncs,omitempty"`    // fsync waits by file
+}
+
+// FileOpenErr is how many opens failed with one errno during the interval.
+type FileOpenErr struct {
+	Error string `json:"error"` // "ENOENT", "EACCES", ...
+	Count uint64 `json:"count"`
+}
+
+// FileOpenFail is the failed opens of one process for one path with one errno.
+type FileOpenFail struct {
+	Comm  string `json:"comm"`
+	Path  string `json:"path"` // as the caller gave it (the first 95 bytes; relative paths stay relative)
+	Error string `json:"error"`
+	Count uint64 `json:"count"`
+	Tier  string `json:"tier"` // "trouble" (EACCES, EROFS, ENOSPC, EMFILE...: opens an incident) | "notable" (ENOENT: shown) | "noise" (under /proc, /sys, /dev; EEXIST...)
+}
+
+// FileSync is the fsync calls on one file ("parentdir/name", each name cut to 31 bytes) during the interval.
+type FileSync struct {
+	Name     string `json:"name"`
+	Fsyncs   uint64 `json:"fsyncs"`
+	LatNs    uint64 `json:"latNs"`
+	LatMaxNs uint64 `json:"latMaxNs"`
 }
 
 // DNSStat is one interval of name resolution (glibc getaddrinfo) per name. Procs on the same sample say who resolved.
@@ -200,6 +232,8 @@ type ProcStat struct {
 	ConnectFails uint64 `json:"connectFails,omitempty"`
 	// dnslat only. In dnslat, Wait* means "time spent in getaddrinfo"
 	LookupFails uint64 `json:"lookupFails,omitempty"`
+	// fileops only. In fileops, Wait* means "time spent in fsync"
+	OpenFails uint64 `json:"openFails,omitempty"`
 }
 
 // HostInfo is used for the list of hosts known to the server.
@@ -214,7 +248,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -252,6 +286,8 @@ type Incident struct {
 	// net_connect_slow: Peak is the connect latency p99 in µs; Culprits are the destinations with the slowest connects
 	// net_drop: Peak is dropped packets (trouble tier) in the last 10 s; Culprits are "REASON dst:port (listener)"
 	// dns_fail: Peak is failed lookups in the last 10 s; Culprits are the names. dns_slow: Peak is the lookup p99 in µs
+	// file_fail: Peak is trouble-tier failed opens in the last 10 s; Culprits are "comm path (ERRNO)"
+	// fsync_slow: Peak is the fsync p99 in µs; Culprits are the files with most of the fsync time
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

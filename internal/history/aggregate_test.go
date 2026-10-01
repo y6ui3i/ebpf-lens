@@ -74,6 +74,14 @@ func TestDestinationsAndNamesMergeByKey(t *testing.T) {
 	if len(d.Net.Drops) != 2 || d.Net.Drops[0].Count != 5 || len(d.Net.DropFlows) != 1 || d.Net.DropFlows[0].Count != 5 || d.Net.DropFlows[0].Listener != "python3" {
 		t.Fatalf("drops: %+v flows: %+v", d.Net.Drops, d.Net.DropFlows)
 	}
+	ws := []model.Sample{
+		{Probe: "fileops", Time: sec(0), Slots: []uint64{0}, Files: &model.FileStat{OpenFails: []model.FileOpenFail{{Comm: "nginx", Path: "/etc/k", Error: "EACCES", Count: 2, Tier: "trouble"}}, Fsyncs: []model.FileSync{{Name: "db/wal", Fsyncs: 1, LatNs: 5e6, LatMaxNs: 5e6}}}},
+		{Probe: "fileops", Time: sec(2), Slots: []uint64{0}, Files: &model.FileStat{OpenFails: []model.FileOpenFail{{Comm: "nginx", Path: "/etc/k", Error: "EACCES", Count: 3, Tier: "trouble"}}, Fsyncs: []model.FileSync{{Name: "db/wal", Fsyncs: 2, LatNs: 30e6, LatMaxNs: 25e6}}}},
+	}
+	e := Aggregate(ws, time.Minute)[0]
+	if len(e.Files.OpenFails) != 1 || e.Files.OpenFails[0].Count != 5 || len(e.Files.Fsyncs) != 1 || e.Files.Fsyncs[0].Fsyncs != 3 || e.Files.Fsyncs[0].LatMaxNs != 25e6 {
+		t.Fatalf("files: %+v %+v", e.Files.OpenFails, e.Files.Fsyncs)
+	}
 	ys := []model.Sample{
 		{Probe: "dnslat", Time: sec(0), Slots: []uint64{0}, DNS: &model.DNSStat{Names: []model.DNSName{{Name: "db.internal", Lookups: 2, Fails: 2, LastError: "NONAME"}}}},
 		{Probe: "dnslat", Time: sec(5), Slots: []uint64{0}, DNS: &model.DNSStat{Names: []model.DNSName{{Name: "db.internal", Lookups: 1, Fails: 1}}}},

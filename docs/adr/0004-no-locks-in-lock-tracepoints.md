@@ -40,7 +40,7 @@ htab_lock_bucket
 htab_lru_map_delete_elem                       <- same map, same key: the same bucket
 bpf_prog_..._handle_contention_end             <- lockwait's program, nested
 __traceiter_contention_end
-resilient_queued_spin_lock_slowpath+0x4d6      <- the bucket lock is acquired: it fires contention_end for itself
+resilient_queued_spin_lock_slowpath+0x4d6      <- this attempt gives up (error path) and fires contention_end itself
 htab_lock_bucket
 htab_lru_map_delete_elem                       <- delete this thread's start-time entry
 bpf_prog_..._handle_contention_end             <- lockwait's program
@@ -54,8 +54,9 @@ irq_enter_rcu
 sysvec_apic_timer_interrupt
 ```
 
-CPU 1 is stuck the same way through `handle_contention_begin` (`htab_lru_map_update_elem`, then a nested
-`handle_contention_end`). The only BPF programs named anywhere in the log are `handle_contention_begin` and
+CPU 1 is stuck the same way through `handle_contention_begin`: `htab_lru_map_update_elem` gets the bucket lock
+through the slow path (`+0x305`, the success path, `contention_end` with 0), and the nested
+`handle_contention_end` goes for a bucket lock again. The only BPF programs named anywhere in the log are `handle_contention_begin` and
 `handle_contention_end`. `irqlat` and the NVIDIA driver appear in no stack.
 
 So `lockwait` did it alone:
@@ -63,14 +64,14 @@ So `lockwait` did it alone:
 1. `jiffies_lock` is contended when the CPUs wake from idle together. Acquiring it fires `lock:contention_end`.
 2. `lockwait`'s program deletes the waiter's start time from an LRU hash map keyed by thread id.
 3. The map's bucket lock — BPF's resilient queued spinlock, rqspinlock — is contended too. Its slow path fires
-   `lock:contention_end` for itself once it has the lock.
-4. The same program runs again, nested, on the same CPU, with the same thread id, and goes for the same bucket:
-   the lock this CPU has just taken.
-5. The CPU never releases `jiffies_lock`. Every other CPU stops behind it.
+   `lock:contention_end` itself, both when it gets the lock and when it gives up.
+4. The same program runs again, nested, on the same CPU, with the same thread id, and goes for the same bucket
+   — on CPU 1, the lock that CPU has just taken.
+5. The nested attempt never returns (next section). CPU 7 never releases `jiffies_lock`, and every other CPU
+   stops behind it.
 
 Everything observed fits: the timing (idle after load is when the tick interrupts contend `jiffies_lock`), the
-`clocksource: Long readout interval` stalls of 1–7 s before each lockup (rqspinlock timing out and letting the
-nested attempt fail, in quarter-second steps), and the apparent need for `irqlat` and the GPU probe (both add
+`clocksource: Long readout interval` stalls of 1–7 s before each lockup (the same stall, ended by another waiter arriving), and the apparent need for `irqlat` and the GPU probe (both add
 map-lock contention and wake-ups, so removing either lowered the odds enough to survive a 4-minute trial; the VM
 "not reproducing" was a 15-minute sample of something that took 50 minutes on the host).
 

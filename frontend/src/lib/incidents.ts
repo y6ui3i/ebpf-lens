@@ -4,7 +4,7 @@ import type { Incident } from "../types/model";
 import type { Level } from "./lens";
 import type { Key } from "./i18n";
 
-export type IncidentKind = "cpu_wait" | "vm_cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait";
+export type IncidentKind = "cpu_wait" | "vm_cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait" | "fault_stall" | "irq_busy";
 
 // Instant incidents (an OOM kill, a crash) have no duration, so they keep an area at their level for this long afterwards
 const INSTANT_LINGER_MS = 5 * 60 * 1000;
@@ -65,6 +65,8 @@ const KIND_KEY: Record<IncidentKind, Key> = {
   file_fail: "incident.kind.file_fail",
   fsync_slow: "incident.kind.fsync_slow",
   lock_wait: "incident.kind.lock_wait",
+  fault_stall: "incident.kind.fault_stall",
+  irq_busy: "incident.kind.irq_busy",
 };
 
 // Translation key for a kind label (unknown kinds from a newer server fall back to a generic label)

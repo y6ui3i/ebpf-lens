@@ -25,8 +25,10 @@ import (
 	"github.com/y6ui3i/ebpf-lens/internal/probe/dnslat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/fileops"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/irqlat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/lockwait"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/memstall"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/pgfault"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/proclife"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/runqlat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/tcpconn"
@@ -41,7 +43,15 @@ func main() {
 	serverURL := flag.String("server", "", "ebpflens-server to send to (e.g. http://127.0.0.1:8080)")
 	hostFlag := flag.String("host", "", "host name (defaults to os.Hostname)")
 	topN := flag.Int("top", 8, "number of processes to send (each for the top by wait time and the top by CPU usage)")
+	disable := flag.String("disable", "", "comma-separated probes not to load (lockwait, pgfault, irqlat, gpu, dnslat): a debugging aid for isolating a probe")
 	flag.Parse()
+	disabled := map[string]bool{}
+	for _, name := range strings.Split(*disable, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			disabled[name] = true
+			log.Printf("%s: disabled by -disable", name)
+		}
+	}
 
 	host := *hostFlag
 	if host == "" {
@@ -106,23 +116,48 @@ func main() {
 	}
 	defer fo.Close()
 
-	lw, err := lockwait.Open()
-	if err != nil {
-		log.Fatalf("lockwait: %v", err)
+	var lw *lockwait.Probe
+	if !disabled["lockwait"] {
+		if lw, err = lockwait.Open(); err != nil {
+			log.Fatalf("lockwait: %v", err)
+		}
+		defer lw.Close()
+		if lw.Warning != "" {
+			log.Printf("lockwait: %s", lw.Warning)
+		}
 	}
-	defer lw.Close()
-	if lw.Warning != "" {
-		log.Printf("lockwait: %s", lw.Warning)
+
+	var pf *pgfault.Probe
+	if !disabled["pgfault"] {
+		if pf, err = pgfault.Open(); err != nil {
+			log.Fatalf("pgfault: %v", err)
+		}
+		defer pf.Close()
+	}
+	swap := &swapReader{}
+
+	var iq *irqlat.Probe
+	if !disabled["irqlat"] {
+		if iq, err = irqlat.Open(); err != nil {
+			log.Fatalf("irqlat: %v", err)
+		}
+		defer iq.Close()
 	}
 
 	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
-	dns := openDNS()
-	if dns != nil {
-		defer dns.Close()
+	var dns *dnslat.Probe
+	if !disabled["dnslat"] {
+		dns = openDNS()
+		if dns != nil {
+			defer dns.Close()
+		}
 	}
 
 	// GPU: optional. A host without an NVIDIA driver, or without libcuda, simply sends no "gpu" samples
-	gw := openGPU()
+	gw := &gpuWatch{comm: map[uint32]string{}}
+	if !disabled["gpu"] {
+		gw = openGPU()
+	}
 	defer gw.Close()
 
 	sig := make(chan os.Signal, 1)
@@ -178,11 +213,32 @@ func main() {
 				log.Fatalf("fileops: %v", err)
 			}
 			fx.Host, fx.Time, fx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
-			lx, err := lockSample(lw, vms, *topN)
-			if err != nil {
-				log.Fatalf("lockwait: %v", err)
+			// The optional probes (-disable) produce nil samples that are neither printed nor sent
+			var lx, px, ix *model.Sample
+			if lw != nil {
+				x, err := lockSample(lw, vms, *topN)
+				if err != nil {
+					log.Fatalf("lockwait: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+				lx = &x
 			}
-			lx.Host, lx.Time, lx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			if pf != nil {
+				x, err := faultSample(pf, swap, vms, *topN)
+				if err != nil {
+					log.Fatalf("pgfault: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+				px = &x
+			}
+			if iq != nil {
+				x, err := irqSample(iq)
+				if err != nil {
+					log.Fatalf("irqlat: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs, x.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
+				ix = &x
+			}
 			var sx *model.Sample
 			if dns != nil {
 				x, err := dnsSample(dns, vms, *topN)
@@ -214,7 +270,19 @@ func main() {
 				printDisk(dx)
 				printNet(nx)
 				printFiles(fx)
-				printLocks(lx)
+				for _, x := range []*model.Sample{lx, px, ix} {
+					if x == nil {
+						continue
+					}
+					switch x.Probe {
+					case "lockwait":
+						printLocks(*x)
+					case "pgfault":
+						printFaults(*x)
+					case "irqlat":
+						printIRQ(*x)
+					}
+				}
 				if sx != nil {
 					printDNS(*sx)
 				}
@@ -249,8 +317,13 @@ func main() {
 				if err := send(client, *serverURL, "/api/ingest", fx); err != nil {
 					log.Printf("send fileops: %v", err)
 				}
-				if err := send(client, *serverURL, "/api/ingest", lx); err != nil {
-					log.Printf("send lockwait: %v", err)
+				for _, x := range []*model.Sample{lx, px, ix} {
+					if x == nil {
+						continue
+					}
+					if err := send(client, *serverURL, "/api/ingest", *x); err != nil {
+						log.Printf("send %s: %v", x.Probe, err)
+					}
 				}
 				if sx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *sx); err != nil {
@@ -289,8 +362,12 @@ func main() {
 			if err := enc.Encode(fx); err != nil {
 				log.Fatal(err)
 			}
-			if err := enc.Encode(lx); err != nil {
-				log.Fatal(err)
+			for _, x := range []*model.Sample{lx, px, ix} {
+				if x != nil {
+					if err := enc.Encode(*x); err != nil {
+						log.Fatal(err)
+					}
+				}
 			}
 			if sx != nil {
 				if err := enc.Encode(*sx); err != nil {
@@ -525,6 +602,94 @@ func printLocks(x model.Sample) {
 	for _, s := range x.Procs {
 		fmt.Printf("  %-16s x%-3d locks=%d waits=%d user=%.1fms max=%.1fms kernel=%d/%.2fms\n",
 			s.Comm, s.Procs, s.Locks, s.WaitCount, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6, s.KernelLockCount, float64(s.KernelLockNs)/1e6)
+	}
+}
+
+// swapReader turns the cumulative /proc/vmstat swap counters into per-interval deltas and reads the swap size.
+type swapReader struct{ prev *procfs.VMStat }
+
+func (r *swapReader) fill(f *model.FaultStat) {
+	if mi, err := procfs.ReadMemInfo(); err == nil {
+		f.SwapTotalBytes, f.SwapUsedBytes = mi.SwapTotalBytes, mi.SwapTotalBytes-mi.SwapFreeBytes
+	}
+	if v, err := procfs.ReadVMStat(); err == nil {
+		if r.prev != nil {
+			f.SwapInPages, f.SwapOutPages = v.SwapIn-r.prev.SwapIn, v.SwapOut-r.prev.SwapOut
+		}
+		r.prev = &v
+	}
+}
+
+// faultSample builds one interval of page faults: the major-fault latency histogram, the totals with the swap
+// state, and the processes that faulted the most (top by time stalled in major faults and by minor faults).
+func faultSample(pf *pgfault.Probe, swap *swapReader, vms *vm.Map, topN int) (model.Sample, error) {
+	slots, err := pf.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	all, tot, err := pf.Procs(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	swap.fill(&tot)
+	procs := topBy(all, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.MinorFaults, b.MinorFaults) },
+	)
+	return model.Sample{Probe: "pgfault", Unit: "usecs", Slots: slots[:], Procs: procs, Faults: &tot}, nil
+}
+
+func printFaults(x model.Sample) {
+	f := x.Faults
+	fmt.Printf("fault minor=%d major=%d swapin=%d stall=%.1fms swap=%.0f/%.0fMiB in=%d out=%d\n",
+		f.Minor, f.Major, f.SwapIn, float64(f.MajorNs)/1e6, float64(f.SwapUsedBytes)/(1<<20), float64(f.SwapTotalBytes)/(1<<20), f.SwapInPages, f.SwapOutPages)
+	for _, s := range x.Procs {
+		if s.WaitCount > 0 {
+			fmt.Printf("  %-16s x%-3d minor=%d major=%d swapin=%d stall=%.1fms max=%.1fms\n", s.Comm, s.Procs, s.MinorFaults, s.WaitCount, s.SwapIns, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6)
+		}
+	}
+}
+
+// irqSample builds one interval of interrupt time: the softirq run-time histogram and the per-CPU, per-vector and
+// per-IRQ totals (the busiest first; the lists are capped like the others).
+func irqSample(iq *irqlat.Probe) (model.Sample, error) {
+	slots, err := iq.Delta()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	st, err := iq.Read()
+	if err != nil {
+		return model.Sample{}, err
+	}
+	if st.CPUs == nil {
+		st.CPUs = []model.CPUIRQ{}
+	}
+	slices.SortFunc(st.CPUs, func(a, b model.CPUIRQ) int { return a.CPU - b.CPU })
+	slices.SortFunc(st.Softirqs, func(a, b model.SoftirqStat) int { return cmpDesc(a.Ns, b.Ns) })
+	slices.SortFunc(st.IRQs, func(a, b model.HardIRQ) int { return cmpDesc(a.Ns, b.Ns) })
+	if len(st.Softirqs) > maxIRQRows {
+		st.Softirqs = st.Softirqs[:maxIRQRows]
+	}
+	if len(st.IRQs) > maxDests {
+		st.IRQs = st.IRQs[:maxDests]
+	}
+	return model.Sample{Probe: "irqlat", Unit: "usecs", Slots: slots[:], IRQ: &st}, nil
+}
+
+// (cpu, vector) rows: enough for 16 CPUs × the 10 vectors; bigger hosts keep the busiest
+const maxIRQRows = 160
+
+func printIRQ(x model.Sample) {
+	for _, c := range x.IRQ.CPUs {
+		if c.SoftirqNs+c.IRQNs > 1e6 {
+			fmt.Printf("irq cpu%-3d softirq=%.2fms irq=%.2fms (%d)\n", c.CPU, float64(c.SoftirqNs)/1e6, float64(c.IRQNs)/1e6, c.IRQCount)
+		}
+	}
+	for _, s := range x.IRQ.Softirqs[:min(5, len(x.IRQ.Softirqs))] {
+		fmt.Printf("  softirq %-8s cpu%-3d n=%d %.2fms\n", s.Vec, s.CPU, s.Count, float64(s.Ns)/1e6)
+	}
+	for _, s := range x.IRQ.IRQs[:min(5, len(x.IRQ.IRQs))] {
+		fmt.Printf("  irq %-16s n=%d %.2fms\n", s.Name, s.Count, float64(s.Ns)/1e6)
 	}
 }
 

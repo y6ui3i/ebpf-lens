@@ -25,6 +25,14 @@
 #define FUTEX_LOCK_PI 6
 #define MAX_KINDS 8
 
+// LCB_F_* flags of the contention tracepoints
+#define LCB_F_SPIN 1
+#define LCB_F_READ 2
+#define LCB_F_WRITE 4
+#define LCB_F_RT 8
+#define LCB_F_PERCPU 16
+#define LCB_F_MUTEX 32
+
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 // One futex address in one process
@@ -66,6 +74,23 @@ struct kstart {
 	u32 flags;
 	u32 pad;
 };
+
+// A spinlock wait in progress on this CPU. Spinlock contention can happen in hardirq and softirq context, where
+// a locking map (hash, LRU) must not be touched: the bucket lock contending there fires the very tracepoint this
+// program is attached to, and on the test host that path, together with the NVIDIA interrupt handler, stalled
+// CPUs for seconds and hard-locked the machine (2026-10-01). A spinner does not sleep or migrate, so a per-CPU
+// slot is enough; sleeping locks (mutex, rwsem) are process context and keep the per-thread map
+struct spin_start {
+	u64 ts;
+	u64 lock;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct spin_start);
+} spin SEC(".maps");
 
 struct kind_val {
 	u64 waits;
@@ -204,14 +229,6 @@ int BPF_PROG(handle_sys_exit, struct pt_regs *regs, long ret)
 
 // --- kernel locks ---
 
-// LCB_F_* flags of the contention tracepoints
-#define LCB_F_SPIN 1
-#define LCB_F_READ 2
-#define LCB_F_WRITE 4
-#define LCB_F_RT 8
-#define LCB_F_PERCPU 16
-#define LCB_F_MUTEX 32
-
 // Kind index, must match kindNames on the Go side
 static __always_inline u32 kind_of(u32 flags)
 {
@@ -236,6 +253,16 @@ int BPF_PROG(handle_contention_begin, void *lock, unsigned int flags)
 	u32 tid = (u32)bpf_get_current_pid_tgid();
 	struct kstart s = {};
 
+	if (flags & LCB_F_SPIN) {
+		u32 zero = 0;
+		struct spin_start *sp = bpf_map_lookup_elem(&spin, &zero);
+
+		if (sp) {
+			sp->ts = bpf_ktime_get_ns();
+			sp->lock = (u64)lock;
+		}
+		return 0;
+	}
 	s.ts = bpf_ktime_get_ns();
 	s.flags = flags;
 	bpf_map_update_elem(&kstart, &tid, &s, BPF_ANY);
@@ -246,7 +273,9 @@ SEC("tp_btf/contention_end")
 int BPF_PROG(handle_contention_end, void *lock, int ret)
 {
 	u32 tid = (u32)bpf_get_current_pid_tgid();
-	struct kstart *s = bpf_map_lookup_elem(&kstart, &tid);
+	u32 zero = 0;
+	struct spin_start *sp = bpf_map_lookup_elem(&spin, &zero);
+	struct kstart *s;
 	struct task_struct *t;
 	struct proc_key pk = {};
 	struct kproc_val *pv;
@@ -254,6 +283,22 @@ int BPF_PROG(handle_contention_end, void *lock, int ret)
 	u64 delta;
 	u32 kind;
 
+	// A spinlock wait ending on this CPU: per-CPU totals only, no per-process row (this may be interrupt
+	// context, where "current" is whoever was interrupted)
+	if (sp && sp->ts && sp->lock == (u64)lock) {
+		delta = bpf_ktime_get_ns() - sp->ts;
+		sp->ts = 0;
+		kind = 3;
+		kv = bpf_map_lookup_elem(&kinds, &kind);
+		if (kv) {
+			kv->waits += 1;
+			kv->ns += delta;
+			if (delta > kv->max_ns)
+				kv->max_ns = delta;
+		}
+		return 0;
+	}
+	s = bpf_map_lookup_elem(&kstart, &tid);
 	if (!s)
 		return 0;
 	delta = bpf_ktime_get_ns() - s->ts;

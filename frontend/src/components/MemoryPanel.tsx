@@ -7,15 +7,19 @@ import { LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
 import { useTriggers } from "../lib/useTriggers";
 import { formatHMS, formatTime, useI18n } from "../lib/i18n";
 import { currentMem, formatBytes, formatMsPerSec, psiMsPerSec, stallMsPerSec, stalledProcs } from "../lib/memory";
+import { currentFaults, faulterRows } from "../lib/faults";
 import { Heatmap, CHART_HEIGHT } from "./Heatmap";
 
 // Time processes spent stalled freeing memory themselves (reclaim) because memory ran short.
 // `level` is the memory area's level from the server's mem_stall incidents
-export function MemoryPanel({ samples, win, schemeKey, level }: { samples: Sample[]; win: TimeWindow; schemeKey: string; level: Level }) {
+export function MemoryPanel({ samples, faultSamples, win, schemeKey, level }: { samples: Sample[]; faultSamples?: Sample[]; win: TimeWindow; schemeKey: string; level: Level }) {
   const { lang, t } = useI18n();
-  const thresholds = useTriggers().memory; // ms/s, the same numbers the server judges with
+  const triggers = useTriggers();
+  const thresholds = triggers.memory; // ms/s, the same numbers the server judges with
   const now = currentMem(samples);
   const procs = stalledProcs(samples);
+  const faults = currentFaults(faultSamples ?? []);
+  const faulters = faulterRows(faultSamples ?? []);
   const [hoverMs, setHoverMs] = useState<number | null>(null);
 
   return (
@@ -85,6 +89,55 @@ export function MemoryPanel({ samples, win, schemeKey, level }: { samples: Sampl
           </div>
         )}
       </div>
+
+      {faults.has && (
+        <div className="mt-8" style={{ borderTop: "1px solid var(--grid)" }}>
+          <h3 className="mt-5 text-base font-semibold">{t("faults.title")}</h3>
+          <div className="text-xs" style={{ color: "var(--text-muted)" }}>handle_mm_fault · pgfault</div>
+          <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>{t("faults.desc")}</p>
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <Tile label={t("faults.tileStall")} value={formatMsPerSec(faults.stall, lang)} note={t("faults.tileStallNote")} level={(faults.stall ?? 0) >= triggers.faults.caution ? "caution" : undefined} />
+            <Tile label={t("faults.tileMajor")} value={faults.majorPerSec == null ? "–" : faults.majorPerSec.toFixed(faults.majorPerSec < 10 ? 1 : 0)} note={t("faults.tileMajorNote")} />
+            <Tile
+              label={t("faults.tileSwap")}
+              value={faults.faults?.swapTotalBytes ? formatBytes(faults.faults.swapUsedBytes) : t("faults.tileNoSwap")}
+              note={faults.faults?.swapTotalBytes ? t("faults.tileSwapNote", { total: formatBytes(faults.faults.swapTotalBytes), out: faults.swapOutPages.toLocaleString(), in: faults.swapInPages.toLocaleString() }) : ""}
+            />
+          </div>
+          <h4 className="mt-5 mb-1 text-sm font-semibold" style={{ color: "var(--text-secondary)" }}>{t("faults.procsTitle")}</h4>
+          {faulters.length === 0 ? (
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>{t("common.none")}</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[30rem] text-sm tabular">
+                <thead style={{ color: "var(--text-muted)" }}>
+                  <tr>
+                    <th className="py-1 text-left font-normal">{t("common.process")}</th>
+                    <th className="py-1 text-right font-normal">{t("faults.colMinor")}</th>
+                    <th className="py-1 text-right font-normal">{t("faults.colMajor")}</th>
+                    <th className="py-1 text-right font-normal">{t("faults.colSwapIn")}</th>
+                    <th className="py-1 text-right font-normal">{t("faults.colStall")}</th>
+                    <th className="py-1 text-right font-normal">{t("faults.colMax")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {faulters.slice(0, 10).map((p) => (
+                    <tr key={p.comm} style={{ borderTop: "1px solid var(--grid)" }}>
+                      <td className="py-1.5">{p.procs > 1 ? `${p.comm} ×${p.procs}` : p.comm}</td>
+                      <td className="py-1.5 text-right" style={{ color: "var(--text-secondary)" }}>{p.minor.toLocaleString()}</td>
+                      <td className="py-1.5 text-right" style={{ color: p.major ? "var(--text-primary)" : "var(--text-secondary)" }}>{p.major.toLocaleString()}</td>
+                      <td className="py-1.5 text-right" style={{ color: p.swapIns ? "var(--status-warning)" : "var(--text-secondary)" }}>{p.swapIns.toLocaleString()}</td>
+                      <td className="py-1.5 text-right">{(p.stallNs / 1e6).toFixed(1)} ms</td>
+                      <td className="py-1.5 text-right" style={{ color: "var(--text-secondary)" }}>{(p.maxNs / 1e6).toFixed(2)} ms</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="mt-2 text-xs" style={{ color: "var(--text-muted)" }}>{t("faults.procsNote")}</p>
+        </div>
+      )}
     </section>
   );
 }

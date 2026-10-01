@@ -29,6 +29,57 @@ export interface Sample {
   dns?: DNSStat; // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
   files?: FileStat; // probe "fileops" only. Its Slots are a histogram of fsync latency
   lock?: LockStat; // probe "lockwait" only. Its Slots are a histogram of contended user-lock waits
+  faults?: FaultStat; // probe "pgfault" only. Its Slots are a histogram of major page fault latency
+  irq?: IRQStat; // probe "irqlat" only. Its Slots are a histogram of one softirq's run time
+}
+/**
+ * FaultStat is one interval of page faults, host-wide, with the swap state from /proc as a cross-check. Procs on
+ * the same sample say who faulted (Wait* = major faults: count, time stalled; MinorFaults; SwapIns).
+ */
+export interface FaultStat {
+  minor: number /* uint64 */;
+  major: number /* uint64 */; // the page had to come from disk (page cache miss, or swap)
+  swapIn: number /* uint64 */; // major faults on anonymous memory: read back from swap
+  majorNs: number /* uint64 */; // time processes spent stalled in major faults
+  swapTotalBytes: number /* uint64 */;
+  swapUsedBytes: number /* uint64 */;
+  swapInPages: number /* uint64 */; // /proc/vmstat pswpin over the interval (cross-check)
+  swapOutPages: number /* uint64 */; // /proc/vmstat pswpout over the interval: pages written to swap
+}
+/**
+ * IRQStat is one interval of interrupt time.
+ */
+export interface IRQStat {
+  cpus: CPUIRQ[]; // per CPU: time in softirq and in hardirq
+  softirqs?: SoftirqStat[]; // per (vector, CPU)
+  irqs?: HardIRQ[]; // per IRQ line
+}
+/**
+ * CPUIRQ is one CPU's interrupt time during the interval.
+ */
+export interface CPUIRQ {
+  cpu: number /* int */;
+  softirqNs: number /* uint64 */;
+  irqNs: number /* uint64 */;
+  irqCount: number /* uint64 */;
+}
+/**
+ * SoftirqStat is one softirq vector on one CPU during the interval.
+ */
+export interface SoftirqStat {
+  vec: string; // "NET_RX" | "NET_TX" | "TIMER" | "BLOCK" | "SCHED" | "RCU" | "TASKLET" | "HRTIMER" | "HI" | "IRQ_POLL"
+  cpu: number /* int */;
+  count: number /* uint64 */;
+  ns: number /* uint64 */;
+}
+/**
+ * HardIRQ is one interrupt line during the interval, by its handler's name.
+ */
+export interface HardIRQ {
+  irq: number /* int */;
+  name: string; // "eno1", "nvme0q3", "xhci_hcd"...
+  count: number /* uint64 */;
+  ns: number /* uint64 */;
 }
 /**
  * LockStat is one interval of lock waiting, host-wide. Procs on the same sample say who waited (Wait* = contended
@@ -299,6 +350,11 @@ export interface ProcStat {
   locks?: number /* int */; // distinct contended lock addresses
   kernelLockCount?: number /* uint64 */; // kernel lock contention events
   kernelLockNs?: number /* uint64 */;
+  /**
+   * pgfault only. In pgfault, Wait* means "major page faults: count, time stalled"
+   */
+  minorFaults?: number /* uint64 */;
+  swapIns?: number /* uint64 */; // major faults on anonymous memory
 }
 /**
  * HostInfo is used for the list of hosts known to the server.
@@ -315,7 +371,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait" | "fault_stall" | "irq_busy"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;
@@ -359,6 +415,19 @@ export interface Incident {
    * disk_error: Subject is the device, Count the failed I/Os in that second
    */
   device?: string;
+  /**
+   * net_connect_fail / net_retrans: Peak is the rate per second; Culprits are the destinations ("addr:port") that took most of it.
+   * net_connect_slow: Peak is the connect latency p99 in µs; Culprits are the destinations with the slowest connects
+   * net_drop: Peak is dropped packets (trouble tier) in the last 10 s; Culprits are "REASON dst:port (listener)"
+   * dns_fail: Peak is failed lookups in the last 10 s; Culprits are the names. dns_slow: Peak is the lookup p99 in µs
+   * file_fail: Peak is trouble-tier failed opens in the last 10 s; Culprits are "comm path (ERRNO)"
+   * fsync_slow: Peak is the fsync p99 in µs; Culprits are the files with most of the fsync time
+   * lock_wait: Subject is the process; Peak is its lock wait in seconds per second (threads' worth blocked);
+   * Culprits split that between "user lock" and the kernel lock kinds
+   * fault_stall: Peak is time stalled in major page faults in ms per second; Culprits are the processes;
+   * SwapShare is the share of those faults that were swap-ins (the rest: file pages evicted from the page cache)
+   */
+  swapShare?: number /* float64 */;
 }
 /**
  * Culprit is one member of the group that was using the CPU while an incident's subject waited.

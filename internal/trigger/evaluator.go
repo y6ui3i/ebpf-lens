@@ -37,6 +37,8 @@ const (
 	KindFileFail       = "file_fail"        // opens failing for a trouble reason (EACCES, EROFS, ENOSPC, EMFILE...)
 	KindFsyncSlow      = "fsync_slow"       // fsync p99 high: the disk stalls and the committing process feels it
 	KindLockWait       = "lock_wait"        // a process's threads are blocked on locks (its own, or the kernel's) for more than a thread's worth of time
+	KindFaultStall     = "fault_stall"      // processes stall in major page faults: their memory is coming back from disk (page cache eviction or swap)
+	KindIRQBusy        = "irq_busy"         // one CPU spends a large share of its time in interrupt context
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -92,6 +94,10 @@ type hostState struct {
 	fileFail, fsyncSlow          excursion
 	fileRing                     failRing
 	locks                        map[string]*excursion // process name -> its lock-wait excursion
+	faults                       excursion
+	faultLast                    float64            // swap share of the latest sample's major faults
+	irq                          map[int]*excursion // cpu -> its interrupt-share excursion
+	irqLast                      map[int][]model.Culprit
 }
 
 // failRing counts failures per second over the last failWindow seconds (for the windowed rules).
@@ -187,7 +193,7 @@ func (e *Evaluator) Config() Config {
 func (e *Evaluator) state(host string) *hostState {
 	h := e.host[host]
 	if h == nil {
-		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}, vmcpu: map[string]*excursion{}, locks: map[string]*excursion{}}
+		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}, vmcpu: map[string]*excursion{}, locks: map[string]*excursion{}, irq: map[int]*excursion{}, irqLast: map[int][]model.Culprit{}}
 		e.host[host] = h
 	}
 	return h
@@ -299,6 +305,39 @@ func (e *Evaluator) OnSample(x model.Sample) {
 				if !ex.active && ex.open == nil {
 					delete(h.locks, comm)
 				}
+			}
+		}
+	case "pgfault":
+		if x.Faults == nil || x.IntervalMs <= 0 {
+			return
+		}
+		sec := float64(x.IntervalMs) / 1000
+		if x.Faults.Major > 0 {
+			h.faultLast = float64(x.Faults.SwapIn) / float64(x.Faults.Major)
+		}
+		e.judge(&h.faults, x.Host, KindFaultStall, "", e.cfg.Faults, float64(x.Faults.MajorNs)/1e6/sec, x.Time, e.faultDecorator(x.Host, h))
+	case "irqlat":
+		if x.IRQ == nil || x.IntervalMs <= 0 {
+			return
+		}
+		wall := float64(x.IntervalMs) * 1e6
+		seen := map[int]bool{}
+		for _, c := range x.IRQ.CPUs {
+			ex := h.irq[c.CPU]
+			if ex == nil {
+				ex = &excursion{}
+				h.irq[c.CPU] = ex
+			}
+			seen[c.CPU] = true
+			h.irqLast[c.CPU] = irqCulprits(x.IRQ, c.CPU)
+			cpu := c.CPU
+			e.judge(ex, x.Host, KindIRQBusy, fmt.Sprintf("cpu%d", c.CPU), e.cfg.IRQ, float64(c.SoftirqNs+c.IRQNs)/wall, x.Time, func(i *model.Incident) {
+				i.Culprits, i.CulpritShare = h.irqLast[cpu], 1
+			})
+		}
+		for cpu, ex := range h.irq {
+			if !seen[cpu] {
+				e.judge(ex, x.Host, KindIRQBusy, fmt.Sprintf("cpu%d", cpu), e.cfg.IRQ, 0, x.Time, nil)
 			}
 		}
 	case "dnslat":
@@ -670,6 +709,88 @@ func lockDecorator(p model.ProcStat) func(*model.Incident) {
 		i.CulpritShare = 1
 		i.Count = p.Locks
 	}
+}
+
+// faultCulprits applies the culprit grouping rule to processes by their share of time stalled in major faults
+// over the pgfault samples of [from, to], and returns the swap share of those faults.
+func (e *Evaluator) faultCulprits(host string, from, to time.Time) ([]model.Culprit, float64, float64) {
+	if e.history == nil {
+		return nil, 0, 0
+	}
+	shares := map[string]float64{}
+	var all, major, swap float64
+	for _, s := range e.history.Samples(host, "pgfault") {
+		if s.Time.Before(from) || s.Time.After(to) || s.Faults == nil {
+			continue
+		}
+		major += float64(s.Faults.Major)
+		swap += float64(s.Faults.SwapIn)
+		for _, p := range s.Procs {
+			shares[p.Comm] += float64(p.WaitNs)
+			all += float64(p.WaitNs)
+		}
+	}
+	var swapShare float64
+	if major > 0 {
+		swapShare = swap / major
+	}
+	if all == 0 {
+		return nil, 0, swapShare
+	}
+	for k, v := range shares {
+		shares[k] = v / all
+	}
+	group, total := GroupCulprits(shares)
+	return group, total, swapShare
+}
+
+func (e *Evaluator) faultDecorator(host string, h *hostState) func(*model.Incident) {
+	return func(i *model.Incident) {
+		end := i.Updated
+		if i.End != nil {
+			end = *i.End
+		}
+		var swapShare float64
+		i.Culprits, i.CulpritShare, swapShare = e.faultCulprits(host, i.Start, end)
+		if i.Culprits == nil {
+			swapShare = h.faultLast
+		}
+		i.SwapShare = swapShare
+	}
+}
+
+// irqCulprits names what took one CPU's interrupt time in this sample: its softirq vectors, and the IRQ lines
+// (host-wide, since hardirqs are not kept per CPU and line) when hardirq time outweighs softirq time.
+func irqCulprits(st *model.IRQStat, cpu int) []model.Culprit {
+	var soft, hard uint64
+	for _, c := range st.CPUs {
+		if c.CPU == cpu {
+			soft, hard = c.SoftirqNs, c.IRQNs
+		}
+	}
+	total := float64(soft + hard)
+	if total == 0 {
+		return nil
+	}
+	shares := map[string]float64{}
+	for _, s := range st.Softirqs {
+		if s.CPU == cpu {
+			shares["softirq "+s.Vec] += float64(s.Ns) / total
+		}
+	}
+	if hard > 0 {
+		var allIRQ uint64
+		for _, q := range st.IRQs {
+			allIRQ += q.Ns
+		}
+		for _, q := range st.IRQs {
+			if allIRQ > 0 {
+				shares["irq "+q.Name] += float64(hard) / total * float64(q.Ns) / float64(allIRQ)
+			}
+		}
+	}
+	group, _ := GroupCulprits(shares)
+	return group
 }
 
 // --- who issued the I/O ---

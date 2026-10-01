@@ -101,6 +101,11 @@ export function ownerOf(x: Incident, t: TFn): string {
       return x.culprits?.length ? t("owner.fileCulprits", { list: names(x, t) }) : t("owner.fileUnknown");
     case "fsync_slow":
       return x.culprits?.length ? t("owner.fsyncFiles", { list: names(x, t) }) : t("owner.fsyncDisk");
+    case "fault_stall":
+      if (!x.culprits?.length) return t("owner.faultsHost");
+      return (x.swapShare ?? 0) > 0.5 ? t("owner.faultsSwap", { list: names(x, t) }) : t("owner.faultsCache", { list: names(x, t) });
+    case "irq_busy":
+      return t("owner.irq", { list: x.culprits?.length ? names(x, t) : "?", cpu: x.subject ?? "?" });
     case "lock_wait": {
       const kernel = x.culprits?.find((c) => c.name === "kernel lock");
       return kernel && kernel.share > 0.5 ? t("owner.lockKernel", { comm: x.subject ?? "?" }) : t("owner.lockApp", { comm: x.subject ?? "?" });

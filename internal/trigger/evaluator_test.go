@@ -765,6 +765,35 @@ func TestFsyncSlowNamesTheFile(t *testing.T) {
 	}
 }
 
+// Eight threads fighting one mutex: seven of them are always blocked, so the process's lock wait is 7 s per
+// second — a warning. An idle Go service's parked threads never reach the sample (the agent filters them out).
+func TestLockWaitNamesTheProcess(t *testing.T) {
+	r := &recorder{}
+	e := New(Default(), r)
+	for s := 0; s < 3; s++ {
+		x := model.Sample{Host: "h", Probe: "lockwait", Time: t0.Add(time.Duration(s) * time.Second), IntervalMs: 1000, Slots: make([]uint64, 27),
+			Lock:  &model.LockStat{UserWaits: 20000, UserNs: 7e9},
+			Procs: []model.ProcStat{{Comm: "mutex", Procs: 1, Locks: 1, WaitCount: 20000, WaitNs: 7e9, KernelLockNs: 2e6}, {Comm: "python3", Procs: 1, WaitNs: 50e6, KernelLockNs: 300e6}}}
+		e.OnSample(x)
+	}
+	if len(r.got) != 1 || r.last().Kind != KindLockWait || r.last().Level != LevelWarning || r.last().Subject != "mutex" || r.last().Peak < 6.9 || r.last().Peak > 7.1 {
+		t.Fatalf("expected a lock_wait warning for mutex at ~7.0, got %+v", r.got)
+	}
+	if c := r.last().Culprits; len(c) != 2 || c[0].Name != "user lock" || c[0].Share < 0.99 {
+		t.Fatalf("culprits: %+v", c)
+	}
+	if text := Text("open", r.last()); !contains(text, "mutex is waiting for locks (7.0 threads' worth") || !contains(text, "mostly its own locks") {
+		t.Fatalf("text: %s", text)
+	}
+	// The process leaves the top list: its excursion is judged at zero and closes after the gap
+	for s := 3; s < 7; s++ {
+		e.OnSample(model.Sample{Host: "h", Probe: "lockwait", Time: t0.Add(time.Duration(s) * time.Second), IntervalMs: 1000, Slots: make([]uint64, 27), Lock: &model.LockStat{}})
+	}
+	if r.last().Ongoing() {
+		t.Fatalf("expected the lock_wait incident to close, got %+v", r.last())
+	}
+}
+
 func dnsSample(sec, slot int, names []model.DNSName) model.Sample {
 	slots := make([]uint64, 27)
 	if slot >= 0 {

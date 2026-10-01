@@ -80,6 +80,11 @@ func clone(x model.Sample) model.Sample {
 	if x.DNS != nil {
 		c.DNS = &model.DNSStat{Names: append([]model.DNSName(nil), x.DNS.Names...)}
 	}
+	if x.Lock != nil {
+		l := *x.Lock
+		l.Kernel = append([]model.KernelLock(nil), x.Lock.Kernel...)
+		c.Lock = &l
+	}
 	if x.Files != nil {
 		c.Files = &model.FileStat{
 			OpenErrs:  append([]model.FileOpenErr(nil), x.Files.OpenErrs...),
@@ -219,6 +224,23 @@ func merge(c *model.Sample, x model.Sample) {
 			}
 		}
 	}
+	if x.Lock != nil {
+		if c.Lock == nil {
+			c.Lock = &model.LockStat{}
+		}
+		c.Lock.UserWaits += x.Lock.UserWaits
+		c.Lock.UserNs += x.Lock.UserNs
+		c.Lock.ParkedNs += x.Lock.ParkedNs
+		for _, k := range x.Lock.Kernel {
+			i := indexOf(len(c.Lock.Kernel), func(i int) bool { return c.Lock.Kernel[i].Kind == k.Kind })
+			if i < 0 {
+				c.Lock.Kernel = append(c.Lock.Kernel, k)
+				continue
+			}
+			c.Lock.Kernel[i].Count += k.Count
+			c.Lock.Kernel[i].LatNs += k.LatNs
+		}
+	}
 	if x.Files != nil {
 		if c.Files == nil {
 			c.Files = &model.FileStat{}
@@ -277,6 +299,10 @@ func mergeProcs(c *model.Sample, ps []model.ProcStat) {
 		t.WriteBytes += p.WriteBytes
 		t.ConnectFails += p.ConnectFails
 		t.LookupFails += p.LookupFails
+		t.OpenFails += p.OpenFails
+		t.Locks = max(t.Locks, p.Locks)
+		t.KernelLockCount += p.KernelLockCount
+		t.KernelLockNs += p.KernelLockNs
 		addSlots(&t.Slots, p.Slots)
 	}
 }

@@ -23,6 +23,23 @@ type Sample struct {
 	Net        *NetStat   `json:"net,omitempty"`   // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
 	DNS        *DNSStat   `json:"dns,omitempty"`   // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
 	Files      *FileStat  `json:"files,omitempty"` // probe "fileops" only. Its Slots are a histogram of fsync latency
+	Lock       *LockStat  `json:"lock,omitempty"`  // probe "lockwait" only. Its Slots are a histogram of contended user-lock waits
+}
+
+// LockStat is one interval of lock waiting, host-wide. Procs on the same sample say who waited (Wait* = contended
+// user-space locks, KernelLock* = kernel locks).
+type LockStat struct {
+	UserWaits uint64       `json:"userWaits"` // contended futex waits (an address two or more threads waited on)
+	UserNs    uint64       `json:"userNs"`
+	ParkedNs  uint64       `json:"parkedNs"`         // single-waiter futex time: threads parked on their own address (idle workers), not lock waits
+	Kernel    []KernelLock `json:"kernel,omitempty"` // kernel lock contention by kind
+}
+
+// KernelLock is the kernel lock contention of one kind during the interval.
+type KernelLock struct {
+	Kind  string `json:"kind"` // "mutex" | "rwsem-read" | "rwsem-write" | "spinlock" | "rtmutex" | "percpu-rwsem" | "other"
+	Count uint64 `json:"count"`
+	LatNs uint64 `json:"latNs"`
 }
 
 // FileStat is one interval of failed opens and fsync waits. Procs on the same sample say who fsynced (Wait*) and
@@ -234,6 +251,10 @@ type ProcStat struct {
 	LookupFails uint64 `json:"lookupFails,omitempty"`
 	// fileops only. In fileops, Wait* means "time spent in fsync"
 	OpenFails uint64 `json:"openFails,omitempty"`
+	// lockwait only. In lockwait, Wait* means "time blocked on a contended user-space lock"
+	Locks           int    `json:"locks,omitempty"`           // distinct contended lock addresses
+	KernelLockCount uint64 `json:"kernelLockCount,omitempty"` // kernel lock contention events
+	KernelLockNs    uint64 `json:"kernelLockNs,omitempty"`
 }
 
 // HostInfo is used for the list of hosts known to the server.
@@ -248,7 +269,7 @@ type HostInfo struct {
 type Incident struct {
 	ID      string     `json:"id"` // host + kind + subject + start; stable across updates
 	Host    string     `json:"host"`
-	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow"
+	Kind    string     `json:"kind"`              // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait"
 	Level   string     `json:"level"`             // "caution" | "warning"
 	Subject string     `json:"subject,omitempty"` // process name for oom_kill / crash / crash_loop
 	Start   time.Time  `json:"start"`
@@ -288,6 +309,8 @@ type Incident struct {
 	// dns_fail: Peak is failed lookups in the last 10 s; Culprits are the names. dns_slow: Peak is the lookup p99 in µs
 	// file_fail: Peak is trouble-tier failed opens in the last 10 s; Culprits are "comm path (ERRNO)"
 	// fsync_slow: Peak is the fsync p99 in µs; Culprits are the files with most of the fsync time
+	// lock_wait: Subject is the process; Peak is its lock wait in seconds per second (threads' worth blocked);
+	// Culprits split that between "user lock" and the kernel lock kinds
 }
 
 // Culprit is one member of the group that was using the CPU while an incident's subject waited.

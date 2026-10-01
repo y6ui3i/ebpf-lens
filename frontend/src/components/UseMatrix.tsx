@@ -1,7 +1,7 @@
 import type { Incident, ProcEvent, Sample } from "../types/model";
 import { formatUs, percentile } from "../lib/hist";
 import { current, LEVEL_COLOR, LEVEL_ICON, LEVEL_KEY, type Level } from "../lib/lens";
-import { areaLevel } from "../lib/incidents";
+import { areaLevel, isActive } from "../lib/incidents";
 import { useI18n, type Key } from "../lib/i18n";
 import type { Lifecycle } from "../lib/lifecycle";
 import type { TimeWindow } from "../lib/timeWindow";
@@ -15,6 +15,7 @@ import { currentDisk, diskBytesPerSec, formatRate } from "../lib/disk";
 import { connectsPerSec, currentNet } from "../lib/net";
 import { currentDns, lookupsPerSec } from "../lib/dns";
 import { currentFiles, fsyncsPerSec } from "../lib/files";
+import { currentLocks, lockSecPerSec, userWaitsPerSec } from "../lib/locks";
 
 // USE method (Brendan Gregg): look at utilization / saturation / errors for each resource.
 // Adding probes only fills in cells; the screen does not grow vertically
@@ -33,8 +34,8 @@ const COLUMNS: { title: Key; hint: Key }[] = [
 ];
 
 // Levels in the cells come from the server's incidents; the numbers still come from samples and events
-export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, events, life, incidents, win }: {
-  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
+export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamples, netSamples, dnsSamples, fileSamples, lockSamples, events, life, incidents, win }: {
+  samples: Sample[]; memSamples: Sample[]; vmSamples: Sample[]; gpuSamples: Sample[]; diskSamples: Sample[]; netSamples: Sample[]; dnsSamples: Sample[]; fileSamples: Sample[]; lockSamples: Sample[]; events: ProcEvent[]; life: Lifecycle; incidents: Incident[]; win: TimeWindow;
 }) {
   const { lang, t } = useI18n();
   const triggers = useTriggers();
@@ -72,6 +73,9 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
   const netErrLevel = areaLevel(incidents, ["net_connect_fail", "net_retrans", "net_drop"], nowMs);
   const dns = currentDns(dnsSamples);
   const files = currentFiles(fileSamples);
+  const locks = currentLocks(lockSamples);
+  const lockLevel = areaLevel(incidents, ["lock_wait"], nowMs);
+  const lockIncidents = incidents.filter((x) => x.kind === "lock_wait" && isActive(x, nowMs)).length;
 
   const rows: Row[] = [
     {
@@ -173,6 +177,16 @@ export function UseMatrix({ samples, memSamples, vmSamples, gpuSamples, diskSamp
             level: areaLevel(incidents, ["fsync_slow"], nowMs), spark: fileSamples.map((s) => percentile(s.slots, 0.99)), log: true, to: "/files",
           },
           { kind: "value", value: `${files.fails}`, note: t("use.filesErr"), level: areaLevel(incidents, ["file_fail"], nowMs), to: "/files" },
+        ],
+    },
+    {
+      resource: "resource.locks",
+      cells: !locks.has
+        ? [{ kind: "na" }, { kind: "na" }, { kind: "na" }]
+        : [
+          { kind: "value", value: locks.waitsPerSec == null ? "–" : `${Math.round(locks.waitsPerSec).toLocaleString()}/s`, note: t("use.locksUtil"), spark: lockSamples.map(userWaitsPerSec), to: "/locks" },
+          { kind: "value", value: locks.secPerSec == null ? "–" : locks.secPerSec.toFixed(2), note: t("use.locksSat"), level: lockLevel, spark: lockSamples.map(lockSecPerSec), to: "/locks" },
+          { kind: "value", value: `${lockIncidents}`, note: t("use.locksErr"), level: lockLevel, to: "/locks" },
         ],
     },
     {

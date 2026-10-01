@@ -20,6 +20,7 @@ type Config struct {
 	Network   NetworkRule   `json:"network"`   // outbound TCP: failed connects, slow connects, retransmissions
 	DNS       DNSRule       `json:"dns"`       // name resolution (glibc getaddrinfo): failed and slow lookups
 	Files     FilesRule     `json:"files"`     // failed opens (EACCES, EROFS, ENOSPC...) and slow fsync
+	Locks     ExcursionRule `json:"locks"`     // a process's lock wait, in seconds per second (threads' worth blocked on locks)
 }
 
 // FilesRule: Fails is the number of trouble-tier failed opens (see internal/fileerr: permission denied, read-only
@@ -130,6 +131,10 @@ func Default() Config {
 			FailSpreadSeconds: 3,
 			FsyncLatency:      ExcursionRule{Caution: 100_000, Warning: 1_000_000, MinSeconds: 3, MaxGapSeconds: 5},
 		},
+		// Lock wait is summed over a process's threads: 1.0 means one thread's worth of time blocked on locks
+		// the whole second (measured: 8 threads fighting one mutex → 7.0; idle Go services → 0, their parked
+		// threads are told apart by address). Caution at one thread, warning at four
+		Locks: ExcursionRule{Caution: 1.0, Warning: 4.0, MinSeconds: 3, MaxGapSeconds: 2},
 	}
 }
 
@@ -156,7 +161,7 @@ func (c Config) Validate() error {
 	if c.GPU.IdleUtil <= 0 || c.GPU.IdleUtil > 1 {
 		return fmt.Errorf("gpu: idleUtil must be in (0, 1]")
 	}
-	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency, "files.fails": c.Files.Fails, "files.fsyncLatency": c.Files.FsyncLatency} {
+	for name, r := range map[string]ExcursionRule{"cpu": c.CPU, "memory": c.Memory, "gpu.starved": c.GPU.Starved, "gpu.vram": c.GPU.VRAM, "disk": c.Disk, "network.connectFails": c.Network.ConnectFails, "network.connectLatency": c.Network.ConnectLatency, "network.retrans": c.Network.Retrans, "network.drops": c.Network.Drops, "dns.fails": c.DNS.Fails, "dns.latency": c.DNS.Latency, "files.fails": c.Files.Fails, "files.fsyncLatency": c.Files.FsyncLatency, "locks": c.Locks} {
 		switch {
 		case r.Caution <= 0 || r.Warning <= 0:
 			return fmt.Errorf("%s: thresholds must be positive", name)

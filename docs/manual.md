@@ -252,6 +252,16 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* The **error names the fix**: `EACCES` / `EPERM` is ownership, mode or AppArmor (`ls -l`, the service user); `EROFS` is a mount that went read-only (`dmesg`); `ENOSPC` is a full disk; `EMFILE` / `ENFILE` is a descriptor leak or limit (`ls /proc/<pid>/fd | wc -l`). `ENOENT` rows are shown because "nginx cannot find /etc/ssl/certs/x.pem" belongs on the screen, but they never open an incident: programs look for optional files all day long. Failures under `/proc`, `/sys` and `/dev` are only counted. An **fsync p99** of 100 ms is a queue on the disk and a second is a stalled disk; the files table says which file took the time, and the disk screen at the same moment says why the disk was slow.
 
+### Locks (`/locks`)
+
+![Locks: lock wait per process in threads' worth of time, the distribution of one contended wait, and kernel locks by kind (8 threads fighting one mutex: 7.0 threads' worth blocked; CPython's GIL mutex at 270,000 handoffs a second)](img/en-locks.png)
+
+*What it is.* Time blocked waiting for a lock — the wait that is neither CPU nor I/O. User-space locks through the futex syscall (an address two or more threads waited on is a lock; a thread parked alone on its own address is idle, not blocked), and kernel lock contention (mutex, rwsem, spinlock) per process and per kind.
+
+*What you see.* Tiles (lock wait in threads' worth of time per second, contended waits per second, wait p99, kernel lock wait), a heatmap and the p50/p99 trend of one contended wait, who waited (with the split between user and kernel locks and the number of distinct contended locks), and kernel locks by kind.
+
+*Reading it.* **Wait s/s** is the number to read: 1.0 means one thread's worth of time blocked the whole range; a process at 7.0 has seven threads waiting at any moment, and more CPUs will not help it. Microsecond waits at a high rate are a lock handed around briskly (CPython's GIL: 270,000 a second at ~5 µs); millisecond waits mean the holder does real work, or sleeps, while holding it. **rwsem-read / rwsem-write** under a multi-threaded process is usually `mmap_lock`: mmap, munmap and page faults all take it, so many threads allocating at once contend on it.
+
 ### GPU (`/gpu`)
 
 ![GPU: busy and VRAM over time, the wait per CUDA call, and the per-process verdicts (an OCR job in a container keeping the GPU 66 % busy while using 131 % of a CPU; the clocks held back by the power cap)](img/en-gpu.png)
@@ -302,6 +312,7 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **Name lookups failing** (`dns_fail`) | ≥ 5 failed `getaddrinfo` calls in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the names and the error; when no single name stands out, the parent domain (`*.internal.example (NONAME)`). *No such name*: fix the name or the record. *No answer in time*: the DNS server. |
 | **File opens failing** (`file_fail`) | ≥ 5 opens failed for a trouble errno (EACCES, EPERM, EROFS, ENOSPC, EDQUOT, EMFILE, ENFILE, EIO, ETXTBSY, ESTALE; not under /proc, /sys, /dev) in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names `process path (ERRNO)`, or `process (ERRNO)` when one process fails on many files. ENOENT never counts (it is shown on the files screen). The errno names the fix: permission → owner / mode / service user; EROFS → `dmesg`, the mount remounted read-only; ENOSPC → free space; EMFILE → a descriptor leak. |
 | **fsync slow** (`fsync_slow`) | fsync p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Names the files that took most of the fsync time. Check the disk screen for the same moment: a slow device or a queue (a backup's writeback in front of a database's commits). |
+| **Waiting for locks** (`lock_wait`) | a process's lock wait (user + kernel, summed over its threads) ≥ 1.0 s per second for 3 s | caution; warning at ≥ 4.0 | below 1.0 for more than 2 s | Names the process and splits the wait between its own locks and the kernel's. Do not add CPUs: the work serializes on a lock. Find it (`perf lock contention`, py-spy, async-profiler, Go's mutex profile), shorten what is done while holding it, split it, or use fewer threads. |
 | **Name lookups slow** (`dns_slow`) | lookup p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Check `resolvectl status` and the upstream server; seconds mean a server that did not answer and was retried. |
 | **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
@@ -345,6 +356,7 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **Retransmissions are per destination only** (no process: the kernel retransmits without one), and inbound connections are folded into one row per client address. Connects and retransmissions are TCP only; dropped packets cover every protocol.
 - **The listener of a dropped packet is known only for TCP ports that entered LISTEN while the agent was running.** A service that was already listening when the agent started shows no listener until it listens again (the agent starts at boot before most services, so this mostly matters after an agent restart). The tiers of drop reasons are a fixed table; a reason the table does not know is shown as housekeeping.
 - **Failed opens are seen at `open` / `openat` / `openat2` only.** A program that checks a file with `stat()` before opening it (Rust coreutils' `cat`, many shells) fails there, not here. Paths are as the program gave them: relative paths stay relative, and the first 95 bytes are kept. fsync is measured at `do_fsync` (the syscalls); io_uring and NFS server syncs are not seen.
+- **Lock waits are told apart from parking by the number of waiters per futex address.** A lock that only ever has one waiter at a time (two threads handing it back and forth very politely) looks like parking and is not counted; a condition variable with many waiters uses a different futex operation and is skipped on purpose. Kernel lock contention needs the `lock:contention_*` tracepoints (5.19+); without them the user-space half still works.
 - **DNS is measured at glibc's `getaddrinfo`**: programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen, and names are kept to their first 63 bytes.
 - **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
@@ -392,7 +404,8 @@ Trigger file (values shown are the defaults):
   "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
                 "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}},
   "files":     {"fails":        {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
-                "fsyncLatency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
+                "fsyncLatency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}},
+  "locks":     {"caution": 1.0, "warning": 4.0, "minSeconds": 3, "maxGapSeconds": 2}
 }
 ```
 

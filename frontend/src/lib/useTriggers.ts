@@ -13,6 +13,7 @@ export type Triggers = {
   disk: ExcursionRule; // block I/O latency p99, in µs
   network: { connectFails: ExcursionRule; failSpreadSeconds: number; connectLatency: ExcursionRule; retrans: ExcursionRule; drops: ExcursionRule }; // failed connects in 10 s (in at least failSpreadSeconds of them), µs, per second, trouble drops in 10 s
   dns: { fails: ExcursionRule; failSpreadSeconds: number; latency: ExcursionRule }; // failed lookups in 10 s; getaddrinfo p99 in µs
+  files: { fails: ExcursionRule; failSpreadSeconds: number; fsyncLatency: ExcursionRule }; // trouble-tier failed opens in 10 s; fsync p99 in µs
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -37,6 +38,11 @@ export const DEFAULT_TRIGGERS: Triggers = {
     fails: { caution: 5, warning: 50, minSeconds: 1, maxGapSeconds: 10 },
     failSpreadSeconds: 3,
     latency: { caution: 100_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
+  },
+  files: {
+    fails: { caution: 5, warning: 50, minSeconds: 1, maxGapSeconds: 10 },
+    failSpreadSeconds: 3,
+    fsyncLatency: { caution: 100_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
   },
 };
 
@@ -70,6 +76,11 @@ export function useTriggers(): Triggers {
       fails: { ...DEFAULT_TRIGGERS.dns.fails, ...d.dns?.fails },
       failSpreadSeconds: d.dns?.failSpreadSeconds ?? DEFAULT_TRIGGERS.dns.failSpreadSeconds,
       latency: { ...DEFAULT_TRIGGERS.dns.latency, ...d.dns?.latency },
+    },
+    files: {
+      fails: { ...DEFAULT_TRIGGERS.files.fails, ...d.files?.fails },
+      failSpreadSeconds: d.files?.failSpreadSeconds ?? DEFAULT_TRIGGERS.files.failSpreadSeconds,
+      fsyncLatency: { ...DEFAULT_TRIGGERS.files.fsyncLatency, ...d.files?.fsyncLatency },
     },
   };
 }

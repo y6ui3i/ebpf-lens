@@ -54,6 +54,8 @@ export function SettingsPanel() {
     { key: "settings.rule.netDrops", get: (tr) => tr.network.drops, set: (tr, r) => ({ ...tr, network: { ...tr.network, drops: r } }) },
     { key: "settings.rule.dnsFails", get: (tr) => tr.dns.fails, set: (tr, r) => ({ ...tr, dns: { ...tr.dns, fails: r } }) },
     { key: "settings.rule.dnsLatency", get: (tr) => tr.dns.latency, set: (tr, r) => ({ ...tr, dns: { ...tr.dns, latency: r } }) },
+    { key: "settings.rule.fileFails", get: (tr) => tr.files.fails, set: (tr, r) => ({ ...tr, files: { ...tr.files, fails: r } }) },
+    { key: "settings.rule.fsyncLatency", get: (tr) => tr.files.fsyncLatency, set: (tr, r) => ({ ...tr, files: { ...tr.files, fsyncLatency: r } }) },
     { key: "settings.rule.gpuStarved", get: (tr) => tr.gpu.starved, set: (tr, r) => ({ ...tr, gpu: { ...tr.gpu, starved: r } }), step: 0.05 },
     { key: "settings.rule.vram", get: (tr) => tr.gpu.vram, set: (tr, r) => ({ ...tr, gpu: { ...tr.gpu, vram: r } }), step: 0.01 },
   ];
@@ -126,6 +128,9 @@ export function SettingsPanel() {
         </Field>
         <Field label={t("settings.dnsSpread")}>
           <Num value={draft.triggers.dns.failSpreadSeconds} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, dns: { ...d.triggers.dns, failSpreadSeconds: v } } }))} />
+        </Field>
+        <Field label={t("settings.fileSpread")}>
+          <Num value={draft.triggers.files.failSpreadSeconds} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, files: { ...d.triggers.files, failSpreadSeconds: v } } }))} />
         </Field>
         <Field label={t("settings.agentDown")}>
           <Num value={draft.triggers.agentDown.afterSeconds} onChange={(v) => edit((d) => ({ ...d, triggers: { ...d.triggers, agentDown: { afterSeconds: v } } }))} />

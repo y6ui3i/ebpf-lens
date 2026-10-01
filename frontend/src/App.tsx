@@ -31,12 +31,14 @@ import { NetworkPanel } from "./components/NetworkPanel";
 import { NET_KINDS } from "./lib/net";
 import { DnsPanel } from "./components/DnsPanel";
 import { DNS_KINDS } from "./lib/dns";
+import { FilesPanel } from "./components/FilesPanel";
+import { FILE_KINDS } from "./lib/files";
 import { VmListPanel } from "./components/VmListPanel";
 import { VmPanel } from "./components/VmPanel";
 import type { Sample } from "./types/model";
 
 const WINDOW = 300; // last 5 minutes (one column per second)
-const PROBES = ["runqlat", "memstall", "vms", "gpu", "biolat", "tcpconn", "dnslat"] as const;
+const PROBES = ["runqlat", "memstall", "vms", "gpu", "biolat", "tcpconn", "dnslat", "fileops"] as const;
 const EMPTY: Sample[] = [];
 const PROCESS_KINDS = ["oom_kill", "crash", "crash_loop"] as const;
 const TICK_MS = 30_000; // re-evaluate "ended within the last 5 minutes" even when no new data arrives
@@ -73,6 +75,7 @@ export default function App() {
   const diskSamples = byProbe.biolat ?? EMPTY;
   const netSamples = byProbe.tcpconn ?? EMPTY;
   const dnsSamples = byProbe.dnslat ?? EMPTY;
+  const fileSamples = byProbe.fileops ?? EMPTY;
   const life = useMemo(() => analyze(events), [events]);
   // The visible range follows the CPU samples (live) or is the fixed window around the moment (past)
   const liveWin = useMemo(() => timeWindow(samples, WINDOW), [samples]);
@@ -94,8 +97,9 @@ export default function App() {
   const diskLevel = areaLevel(incidents, DISK_KINDS, nowMs);
   const netLevel = areaLevel(incidents, NET_KINDS, nowMs);
   const dnsLevel = areaLevel(incidents, DNS_KINDS, nowMs);
-  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel, diskLevel, netLevel, dnsLevel);
-  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel, "/disk": diskLevel, "/network": netLevel, "/dns": dnsLevel };
+  const fileLevel = areaLevel(incidents, FILE_KINDS, nowMs);
+  const overall = worst(cpuLevel, memLevel, procLevel, agentLevel, vmLevel, gpuLevel, diskLevel, netLevel, dnsLevel, fileLevel);
+  const levels = { "/": overall, "/all": overall, "/vms": vmLevel, "/cpu": cpuLevel, "/processes": procLevel, "/memory": memLevel, "/gpu": gpuLevel, "/disk": diskLevel, "/network": netLevel, "/dns": dnsLevel, "/files": fileLevel };
   // The menu lists every known VM (running now, or with an incident in the last 24 h) with its own state and level
   const lifecycle = lifecycleFrom(useSettings().ui.vm);
   const navVms: NavVm[] = knownVms(vmSamples, incidents, nowMs, lifecycle).map((v) => ({ name: v.name, running: v.running, level: v.level, phase: v.phase }));
@@ -184,6 +188,9 @@ export default function App() {
             <PanelSection id="dns" title={t("page.dns")}>
               <DnsPanel samples={dnsSamples} win={win} schemeKey={schemeKey} level={dnsLevel} />
             </PanelSection>
+            <PanelSection id="files" title={t("page.files")}>
+              <FilesPanel samples={fileSamples} win={win} schemeKey={schemeKey} level={fileLevel} />
+            </PanelSection>
             <PanelSection id="gpu" title={t("page.gpu")}>
               <GpuPanel samples={gpuSamples} win={win} schemeKey={schemeKey} level={gpuLevel} />
             </PanelSection>
@@ -199,6 +206,8 @@ export default function App() {
           <NetworkPanel samples={netSamples} win={win} schemeKey={schemeKey} level={netLevel} />
         ) : path === "/dns" ? (
           <DnsPanel samples={dnsSamples} win={win} schemeKey={schemeKey} level={dnsLevel} />
+        ) : path === "/files" ? (
+          <FilesPanel samples={fileSamples} win={win} schemeKey={schemeKey} level={fileLevel} />
         ) : path === "/gpu" ? (
           <GpuPanel samples={gpuSamples} win={win} schemeKey={schemeKey} level={gpuLevel} />
         ) : path === "/processes" ? (
@@ -212,8 +221,8 @@ export default function App() {
           />
         ) : (
           <>
-            <LensSummary host={host} samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} life={life} incidents={incidents} />
-            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} events={events} life={life} incidents={incidents} win={win} />
+            <LensSummary host={host} samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} fileSamples={fileSamples} life={life} incidents={incidents} />
+            <UseMatrix samples={samples} memSamples={memSamples} vmSamples={vmSamples} gpuSamples={gpuSamples} diskSamples={diskSamples} netSamples={netSamples} dnsSamples={dnsSamples} fileSamples={fileSamples} events={events} life={life} incidents={incidents} win={win} />
           </>
         )}
       </main>
@@ -255,6 +264,7 @@ const SECTIONS: { id: string; titleKey: Key }[] = [
   { id: "disk", titleKey: "page.disk" },
   { id: "network", titleKey: "page.network" },
   { id: "dns", titleKey: "page.dns" },
+  { id: "files", titleKey: "page.files" },
   { id: "gpu", titleKey: "page.gpu" },
   { id: "vms", titleKey: "page.vms" },
 ];

@@ -27,6 +27,42 @@ export interface Sample {
   disk?: DiskStat; // probe "biolat" only. Its Slots are a histogram of block I/O latency (issue to completion)
   net?: NetStat; // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
   dns?: DNSStat; // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
+  files?: FileStat; // probe "fileops" only. Its Slots are a histogram of fsync latency
+}
+/**
+ * FileStat is one interval of failed opens and fsync waits. Procs on the same sample say who fsynced (Wait*) and
+ * how many of their opens failed (OpenFails).
+ */
+export interface FileStat {
+  openErrs?: FileOpenErr[]; // every failed open of the interval, by errno
+  openFails?: FileOpenFail[]; // the rows: process, errno, path (top ones)
+  fsyncs?: FileSync[]; // fsync waits by file
+}
+/**
+ * FileOpenErr is how many opens failed with one errno during the interval.
+ */
+export interface FileOpenErr {
+  error: string; // "ENOENT", "EACCES", ...
+  count: number /* uint64 */;
+}
+/**
+ * FileOpenFail is the failed opens of one process for one path with one errno.
+ */
+export interface FileOpenFail {
+  comm: string;
+  path: string; // as the caller gave it (the first 95 bytes; relative paths stay relative)
+  error: string;
+  count: number /* uint64 */;
+  tier: string; // "trouble" (EACCES, EROFS, ENOSPC, EMFILE...: opens an incident) | "notable" (ENOENT: shown) | "noise" (under /proc, /sys, /dev; EEXIST...)
+}
+/**
+ * FileSync is the fsync calls on one file ("parentdir/name", each name cut to 31 bytes) during the interval.
+ */
+export interface FileSync {
+  name: string;
+  fsyncs: number /* uint64 */;
+  latNs: number /* uint64 */;
+  latMaxNs: number /* uint64 */;
 }
 /**
  * DNSStat is one interval of name resolution (glibc getaddrinfo) per name. Procs on the same sample say who resolved.
@@ -234,6 +270,10 @@ export interface ProcStat {
    * dnslat only. In dnslat, Wait* means "time spent in getaddrinfo"
    */
   lookupFails?: number /* uint64 */;
+  /**
+   * fileops only. In fileops, Wait* means "time spent in fsync"
+   */
+  openFails?: number /* uint64 */;
 }
 /**
  * HostInfo is used for the list of hosts known to the server.
@@ -250,7 +290,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;

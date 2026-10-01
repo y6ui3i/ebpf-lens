@@ -242,6 +242,16 @@ Then the VM's own CPU-wait heatmap and trend (host side — this is steal time w
 
 *Reading it.* **No such name** (`EAI_NONAME`) is a wrong or retired name, or a missing record — fix the configuration or the zone. **No answer in time** (`EAI_AGAIN`) is a DNS server that is down or unreachable. A local cache answers in about 1 ms and an upstream server in tens of ms; a p99 of **seconds** is a server that did not answer and was retried. Programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen.
 
+### Files (`/files`)
+
+![Files: failed opens by errno and by process/path (a user denied a root-only key: EACCES, trouble), fsync time over time, the files fsynced and who waited (a 256 MB dd with conv=fsync on the SATA SSD next to a small journal)](img/en-files.png)
+
+*What it is.* Two things about files seen from inside the kernel: opens that failed (the raw syscall tracepoints for `open` / `openat` / `openat2`: process, path, errno) and fsync waits (`do_fsync`: how long, per process and per file).
+
+*What you see.* Tiles (failed opens of the trouble tier, fsync/s, fsync p99, distinct files fsynced), the failed opens by errno as chips and as rows (trouble first, then files not found), a heatmap of fsync time, the p50/p99 trend with the caution and warning lines, the files fsynced, and who fsynced or failed to open.
+
+*Reading it.* The **error names the fix**: `EACCES` / `EPERM` is ownership, mode or AppArmor (`ls -l`, the service user); `EROFS` is a mount that went read-only (`dmesg`); `ENOSPC` is a full disk; `EMFILE` / `ENFILE` is a descriptor leak or limit (`ls /proc/<pid>/fd | wc -l`). `ENOENT` rows are shown because "nginx cannot find /etc/ssl/certs/x.pem" belongs on the screen, but they never open an incident: programs look for optional files all day long. Failures under `/proc`, `/sys` and `/dev` are only counted. An **fsync p99** of 100 ms is a queue on the disk and a second is a stalled disk; the files table says which file took the time, and the disk screen at the same moment says why the disk was slow.
+
 ### GPU (`/gpu`)
 
 ![GPU: busy and VRAM over time, the wait per CUDA call, and the per-process verdicts (an OCR job in a container keeping the GPU 66 % busy while using 131 % of a CPU; the clocks held back by the power cap)](img/en-gpu.png)
@@ -290,6 +300,8 @@ Incidents are decided **on the server** by fixed rules (the thresholds are a JSO
 | **Packets dropped by the kernel** (`net_drop`) | ≥ 10 packets dropped for a trouble reason in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 100 | fewer than 10 in 10 s for more than 10 s | Names the reason and the destination that took most of them (`TCP_LISTEN_OVERFLOW 192.168.10.250:8099 (python3)`), or the reason alone when no flow stands out. The reason names the fix: LISTEN_OVERFLOW is the listening process not accepting fast enough (more workers, a bigger backlog); NETFILTER_DROP a firewall rule (`nft list ruleset`); *NOROUTES / NEIGH_* the routing (`ip route`, the gateway); QDISC_* / CPU_BACKLOG a saturated interface or CPU; *MEM memory. Housekeeping drops never count. |
 | **TCP retransmissions** (`net_retrans`) | ≥ 10 retransmitted segments/s for 3 s | caution; warning at ≥ 100/s | below 10/s for more than 5 s | Packet loss or congestion toward the named destinations; "clients at addr" means the loss is on connections into this host. Check the link, the switch port, and the peer. |
 | **Name lookups failing** (`dns_fail`) | ≥ 5 failed `getaddrinfo` calls in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names the names and the error; when no single name stands out, the parent domain (`*.internal.example (NONAME)`). *No such name*: fix the name or the record. *No answer in time*: the DNS server. |
+| **File opens failing** (`file_fail`) | ≥ 5 opens failed for a trouble errno (EACCES, EPERM, EROFS, ENOSPC, EDQUOT, EMFILE, ENFILE, EIO, ETXTBSY, ESTALE; not under /proc, /sys, /dev) in the last 10 s, in at least 3 of those seconds | caution; warning at ≥ 50 | fewer than 5 in 10 s for more than 10 s | Names `process path (ERRNO)`, or `process (ERRNO)` when one process fails on many files. ENOENT never counts (it is shown on the files screen). The errno names the fix: permission → owner / mode / service user; EROFS → `dmesg`, the mount remounted read-only; ENOSPC → free space; EMFILE → a descriptor leak. |
+| **fsync slow** (`fsync_slow`) | fsync p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Names the files that took most of the fsync time. Check the disk screen for the same moment: a slow device or a queue (a backup's writeback in front of a database's commits). |
 | **Name lookups slow** (`dns_slow`) | lookup p99 ≥ 100 ms for 3 s | caution; warning at ≥ 1 s | below 100 ms for more than 5 s | Check `resolvectl status` and the upstream server; seconds mean a server that did not answer and was retried. |
 | **VRAM nearly full** (`vram_full`) | ≥ 90 % of VRAM in use for 3 s | caution; warning at ≥ 97 % | below 90 % for more than 2 s | The next large allocation will fail and kill the job. The GPU screen says which process holds the VRAM. |
 
@@ -332,6 +344,7 @@ Delivery is asynchronous with one retry; a dead webhook never blocks the agents.
 - **Buffered writes are attributed to the kernel's writeback threads** (`kworker`, `jbd2`), not to the process that wrote; reads and direct writes are attributed to the process. Disk latency includes queueing time, so a saturated disk reads as slow even when healthy.
 - **Retransmissions are per destination only** (no process: the kernel retransmits without one), and inbound connections are folded into one row per client address. Connects and retransmissions are TCP only; dropped packets cover every protocol.
 - **The listener of a dropped packet is known only for TCP ports that entered LISTEN while the agent was running.** A service that was already listening when the agent started shows no listener until it listens again (the agent starts at boot before most services, so this mostly matters after an agent restart). The tiers of drop reasons are a fixed table; a reason the table does not know is shown as housekeeping.
+- **Failed opens are seen at `open` / `openat` / `openat2` only.** A program that checks a file with `stat()` before opening it (Rust coreutils' `cat`, many shells) fails there, not here. Paths are as the program gave them: relative paths stay relative, and the first 95 bytes are kept. fsync is measured at `do_fsync` (the syscalls); io_uring and NFS server syncs are not seen.
 - **DNS is measured at glibc's `getaddrinfo`**: programs that resolve without glibc (Go's built-in resolver, musl in containers) are not seen, and names are kept to their first 63 bytes.
 - **Only the first GPU is watched**, and per-process GPU utilization is not available on GeForce cards (NVML returns Not Found), so the verdict reasons from what the process was doing (CPU, copies, synchronize) and how busy the device was. The uprobes need kernel 6.6+ (multi-uprobe BPF links); on an older kernel the GPU screen shows the device only.
 - **Linux only.** macOS has no eBPF; a best-effort macOS agent is planned, not built.
@@ -377,7 +390,9 @@ Trigger file (values shown are the defaults):
                 "retrans":        {"caution": 10,     "warning": 100,     "minSeconds": 3, "maxGapSeconds": 5},
                 "drops":          {"caution": 10,     "warning": 100,     "minSeconds": 1, "maxGapSeconds": 10}},
   "dns":       {"fails":   {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
-                "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
+                "latency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}},
+  "files":     {"fails":        {"caution": 5,      "warning": 50,      "minSeconds": 1, "maxGapSeconds": 10}, "failSpreadSeconds": 3,
+                "fsyncLatency": {"caution": 100000, "warning": 1000000, "minSeconds": 3, "maxGapSeconds": 5}}
 }
 ```
 

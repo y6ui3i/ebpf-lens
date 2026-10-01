@@ -74,17 +74,47 @@ nested attempt fail, in quarter-second steps), and the apparent need for `irqlat
 map-lock contention and wake-ups, so removing either lowered the odds enough to survive a 4-minute trial; the VM
 "not reproducing" was a 15-minute sample of something that took 50 minutes on the host).
 
-Kernels up to v6.14 would not have locked up here. Checked in `kernel/bpf/hashtab.c`: through v6.14
-`htab_lock_bucket()` increments a per-CPU `map_locked` counter and returns `-EBUSY` when the same CPU is already
-inside the map, so the nested delete simply fails. In **v6.15** that guard was replaced by
-`raw_res_spin_lock_irqsave()` (rqspinlock, new in the same release), whose slow path calls
-`trace_contention_begin(lock, LCB_F_SPIN)` and `trace_contention_end()` and relies on its own deadlock detection
-and a timeout of `NSEC_PER_SEC / 4` to get out. An AA re-entry is exactly what rqspinlock is meant to detect, and
-here it did not get the CPU out within the hard-lockup window; why not is not established (see the last
-consequence). So the exposure is v6.15 and later, and it goes by the kernel that is booted, not by the
-distribution: Ubuntu 26.04 boots 7.0 and 25.10 boots 6.17, but Ubuntu 24.04 also ships 6.17 kernels (HWE, and
-`linux-aws-6.17`), and Amazon Linux 2023's default AMI moved from 6.1 to 6.18 on 2026-08-17 while instances
-launched earlier stay on 6.1 or 6.12. Check `uname -r`.
+### Why the kernel did not get itself out
+
+rqspinlock exists to survive exactly this: it detects AA and ABBA deadlocks and times out after
+`NSEC_PER_SEC / 4`. It did detect this one. In the dump both stuck CPUs have `RAX = 0xffffffdd` (`-EDEADLK`)
+and `RIP = resilient_queued_spin_lock_slowpath+0x514`, and the disassembly of the running kernel puts that
+address in this loop of the slow path (`kernel/bpf/rqspinlock.c`, v7.0):
+
+```c
+	/* Disable queue destruction when we detect deadlocks. */
+	if (ret == -EDEADLK) {
+		if (!next)
+			next = smp_cond_load_relaxed(&node->next, (VAL));   /* <- here, forever */
+		arch_mcs_spin_unlock_contended(&next->locked);
+		goto err_release_node;
+	}
+```
+
+The waiter at the head of the queue has seen the deadlock and wants to leave, but first waits for a next waiter
+to hand the queue to. The lock word still has this CPU's node as the tail: there is no next waiter, and none can
+arrive, because every other CPU is behind `jiffies_lock`, which this CPU holds. The 1–7 s stalls before each
+lockup were the same wait ended by a waiter that did arrive.
+
+This is a kernel bug and it is already fixed upstream: 7a3c0289c3c8 "rqspinlock: Reset tail when preserving queue
+on deadlock" (2026-08-06, v7.2-rc7; in stable 7.1.y since 2026-08-19), which resets the tail instead of waiting.
+Its commit message calls the indefinite stall theoretical and reachable only through ABBA. Here it was reached by
+re-entry through the contention tracepoints. (How the nested attempt got past the AA check made before queueing
+is not established.)
+
+The versions, checked in the source of each branch:
+
+| Kernel | Nested map operation from the tracepoint | Result |
+|---|---|---|
+| up to v6.14 | per-CPU `map_locked` guard in `htab_lock_bucket()` returns `-EBUSY` | fails, harmless |
+| v6.15 – v6.18 | bucket lock is rqspinlock, whose slow path fires `contention_begin` / `contention_end`; a deadlock at the head of the queue flushes the queue | not tested; the unbounded wait is not in the code |
+| v6.19, v7.0, v7.1 before the fix | 7bd6e5ce5be6 keeps the queue on a deadlock and waits for a next waiter | **can hard-lock** |
+| v7.1.y with the fix, v7.2 | tail reset | fixed |
+
+Upstream 6.19.y and 7.0.y reached end of life without the fix (6.19.14, 7.0.14). Ubuntu 26.04's
+7.0.0-34.34 is based on 7.0.14 and its running binary has the old loop. The exposure goes by the booted kernel,
+not the distribution (`uname -r`): Amazon Linux 2023's default 6.18 is outside the range, an Ubuntu 26.04 host is
+inside it.
 
 ## Decision
 
@@ -106,7 +136,6 @@ launched earlier stay on 6.1 or 6.12. Check `uname -r`.
 - A new probe that attaches to a lock tracepoint, a scheduler tracepoint that can fire under a lock, or anything
   in hardirq / softirq context gets reviewed against this ADR before it is merged.
 - `ebpflens-agent -disable` and `cmd/probe-only` stay in the tree as the tools for this kind of isolation.
-- Not reported upstream. The backtrace above is what there is; the kernel log is kept on the test host. Two
-  things are left open: why rqspinlock's AA detection and timeout did not break the nested wait, and whether the
-  lockup reproduces in a VM (the stacks show no hardware dependence, but the only VM run was 15 minutes and the
-  odds depend on CPU count, tick mode and load pattern).
+- The kernel side is fixed upstream; what is missing is the fix in Ubuntu 26.04's 7.0 kernel. Whether the
+  lockup reproduces in a VM is being tested (the stacks show no hardware dependence, but the odds depend on CPU
+  count, tick mode and load pattern).

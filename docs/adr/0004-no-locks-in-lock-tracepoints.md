@@ -74,9 +74,14 @@ nested attempt fail, in quarter-second steps), and the apparent need for `irqlat
 map-lock contention and wake-ups, so removing either lowered the odds enough to survive a 4-minute trial; the VM
 "not reproducing" was a 15-minute sample of something that took 50 minutes on the host).
 
-Older kernels would not have locked up here: before hash maps moved to rqspinlock, a per-CPU re-entrancy guard
-made the nested map operation fail with `-EBUSY`. The guard was dropped in favour of rqspinlock's own deadlock
-detection, which did not get this case out within the hard-lockup window.
+Kernels up to v6.14 would not have locked up here. Checked in `kernel/bpf/hashtab.c`: through v6.14
+`htab_lock_bucket()` increments a per-CPU `map_locked` counter and returns `-EBUSY` when the same CPU is already
+inside the map, so the nested delete simply fails. In **v6.15** that guard was replaced by
+`raw_res_spin_lock_irqsave()` (rqspinlock, new in the same release), whose slow path calls
+`trace_contention_begin(lock, LCB_F_SPIN)` and `trace_contention_end()` and relies on its own deadlock detection
+and a timeout of `NSEC_PER_SEC / 4` to get out. That did not get this case out within the hard-lockup window. So
+the exposure is v6.15 and later (6.15–6.19 and 7.x; Ubuntu 25.10 and 26.04, a 24.04 HWE kernel at 6.17, current
+Fedora), not 6.1 / 6.8 / 6.12 / 6.14 (Amazon Linux 2023, Ubuntu 24.04 GA, Debian 13).
 
 ## Decision
 

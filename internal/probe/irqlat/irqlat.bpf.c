@@ -10,10 +10,11 @@
 // core — spread it (RSS, RPS, irqbalance) rather than buying a faster one.
 //
 // Everything here is a per-CPU array: no hash map, no spinlock, no string copy. These programs run in hardirq
-// and softirq context, and a map bucket lock contended there fires the kernel's lock contention tracepoints —
-// which another probe (lockwait) listens to. With the NVIDIA driver's interrupt in the mix that combination
-// hard-locked the test host (2026-10-01, three times, 1-2 minutes after a load burst). Lock-free maps keep the
-// interrupt path to plain per-CPU additions; the IRQ names come from /proc/interrupts in user space.
+// and softirq context; a locking map there adds bucket-lock contention in interrupt context, and every contended
+// lock fires the kernel's lock contention tracepoints, which another probe (lockwait) listens to. The hard
+// lockups of 2026-10-01 turned out to be lockwait's own recursion (docs/adr/0004), with this probe's first,
+// hash-map version only raising the odds — but the rule stands: a program in interrupt context takes no lock.
+// The interrupt path is plain per-CPU additions; the IRQ names come from /proc/interrupts in user space.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

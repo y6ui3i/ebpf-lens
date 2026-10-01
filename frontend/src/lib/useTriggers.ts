@@ -14,6 +14,7 @@ export type Triggers = {
   network: { connectFails: ExcursionRule; failSpreadSeconds: number; connectLatency: ExcursionRule; retrans: ExcursionRule; drops: ExcursionRule }; // failed connects in 10 s (in at least failSpreadSeconds of them), µs, per second, trouble drops in 10 s
   dns: { fails: ExcursionRule; failSpreadSeconds: number; latency: ExcursionRule }; // failed lookups in 10 s; getaddrinfo p99 in µs
   files: { fails: ExcursionRule; failSpreadSeconds: number; fsyncLatency: ExcursionRule }; // trouble-tier failed opens in 10 s; fsync p99 in µs
+  locks: ExcursionRule; // a process's lock wait in seconds per second (threads' worth blocked)
 };
 
 export const DEFAULT_TRIGGERS: Triggers = {
@@ -44,6 +45,7 @@ export const DEFAULT_TRIGGERS: Triggers = {
     failSpreadSeconds: 3,
     fsyncLatency: { caution: 100_000, warning: 1_000_000, minSeconds: 3, maxGapSeconds: 5 },
   },
+  locks: { caution: 1, warning: 4, minSeconds: 3, maxGapSeconds: 2 },
 };
 
 export function useTriggers(): Triggers {
@@ -82,5 +84,6 @@ export function useTriggers(): Triggers {
       failSpreadSeconds: d.files?.failSpreadSeconds ?? DEFAULT_TRIGGERS.files.failSpreadSeconds,
       fsyncLatency: { ...DEFAULT_TRIGGERS.files.fsyncLatency, ...d.files?.fsyncLatency },
     },
+    locks: { ...DEFAULT_TRIGGERS.locks, ...d.locks },
   };
 }

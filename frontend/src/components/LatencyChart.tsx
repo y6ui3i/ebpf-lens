@@ -9,8 +9,9 @@ import { CHART_HEIGHT } from "./Heatmap";
 
 // p50 / p99 of a per-second log2 latency histogram on a log axis, with the server's thresholds (µs) as lines.
 // Shared by the disk and network screens (the CPU screen has its own richer PercentileChart)
+// caution / warning draw the threshold lines; leave them out for a chart whose rule is not a latency (the locks screen)
 export function LatencyChart({ samples, win, schemeKey, caution, warning, ariaLabel }: {
-  samples: Sample[]; win: TimeWindow; schemeKey: string; caution: number; warning: number; ariaLabel: string;
+  samples: Sample[]; win: TimeWindow; schemeKey: string; caution?: number; warning?: number; ariaLabel: string;
 }) {
   const { lang, t } = useI18n();
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -43,7 +44,7 @@ export function LatencyChart({ samples, win, schemeKey, caution, warning, ariaLa
         padding: [8, 12, 0, 0],
         scales: {
           x: { time: true, range: () => [winRef.current.startMs / 1000, winRef.current.endMs / 1000] },
-          y: { distr: 3, log: 10, range: () => [1, Math.max(warning * 10, 1_000_000)] },
+          y: { distr: 3, log: 10, range: () => [1, Math.max((warning ?? 0) * 10, 1_000_000)] },
         },
         axes: [
           { ...axis, space: 80, values: (_u, vals) => vals.map((v) => formatHMS(lang, v * 1000)) },
@@ -60,10 +61,10 @@ export function LatencyChart({ samples, win, schemeKey, caution, warning, ariaLa
               const ctx = u.ctx;
               const { left, width } = u.bbox;
               ctx.save();
-              for (const [v, color, label] of [
-                [caution, cssVar("--status-warning"), t("chart.caution", { v: formatUs(caution) })],
-                [warning, cssVar("--status-critical"), t("chart.warning", { v: formatUs(warning) })],
-              ] as const) {
+              const lines: (readonly [number, string, string])[] = [];
+              if (caution != null) lines.push([caution, cssVar("--status-warning"), t("chart.caution", { v: formatUs(caution) })]);
+              if (warning != null) lines.push([warning, cssVar("--status-critical"), t("chart.warning", { v: formatUs(warning) })]);
+              for (const [v, color, label] of lines) {
                 const y = u.valToPos(v, "y", true);
                 ctx.strokeStyle = color;
                 ctx.globalAlpha = 0.8;

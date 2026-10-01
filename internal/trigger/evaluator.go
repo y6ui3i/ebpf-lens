@@ -36,6 +36,7 @@ const (
 	KindDNSSlow        = "dns_slow"         // name lookups slow (getaddrinfo p99)
 	KindFileFail       = "file_fail"        // opens failing for a trouble reason (EACCES, EROFS, ENOSPC, EMFILE...)
 	KindFsyncSlow      = "fsync_slow"       // fsync p99 high: the disk stalls and the committing process feels it
+	KindLockWait       = "lock_wait"        // a process's threads are blocked on locks (its own, or the kernel's) for more than a thread's worth of time
 
 	CauseHostOOM   = "host_oom"
 	CauseCgroupOOM = "cgroup_oom"
@@ -90,6 +91,7 @@ type hostState struct {
 	dnsRing                      failRing
 	fileFail, fsyncSlow          excursion
 	fileRing                     failRing
+	locks                        map[string]*excursion // process name -> its lock-wait excursion
 }
 
 // failRing counts failures per second over the last failWindow seconds (for the windowed rules).
@@ -185,7 +187,7 @@ func (e *Evaluator) Config() Config {
 func (e *Evaluator) state(host string) *hostState {
 	h := e.host[host]
 	if h == nil {
-		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}, vmcpu: map[string]*excursion{}}
+		h = &hostState{crashes: map[string][]time.Time{}, crashLoop: map[string]*model.Incident{}, ooms: map[uint32]model.ProcEvent{}, signals: map[uint32]model.ProcEvent{}, vmcpu: map[string]*excursion{}, locks: map[string]*excursion{}}
 		e.host[host] = h
 	}
 	return h
@@ -274,6 +276,30 @@ func (e *Evaluator) OnSample(x model.Sample) {
 		e.judge(&h.fileFail, x.Host, KindFileFail, "", e.cfg.Files.Fails, windowed(&h.fileRing, x.Time, fails, e.cfg.Files.FailSpreadSeconds), x.Time, e.fileDecorator(x.Host))
 		if p99, ok := Percentile(x.Slots, 0.99); ok {
 			e.judge(&h.fsyncSlow, x.Host, KindFsyncSlow, "", e.cfg.Files.FsyncLatency, p99, x.Time, e.fsyncDecorator(x.Host))
+		}
+	case "lockwait":
+		if x.Lock == nil || x.IntervalMs <= 0 {
+			return
+		}
+		sec := float64(x.IntervalMs) / 1000
+		judged := map[string]bool{}
+		for _, p := range x.Procs {
+			ex := h.locks[p.Comm]
+			if ex == nil {
+				ex = &excursion{}
+				h.locks[p.Comm] = ex
+			}
+			judged[p.Comm] = true
+			e.judge(ex, x.Host, KindLockWait, p.Comm, e.cfg.Locks, float64(p.WaitNs+p.KernelLockNs)/1e9/sec, x.Time, lockDecorator(p))
+		}
+		// A process that fell out of the top list waited little this second: judge it at zero so its excursion closes
+		for comm, ex := range h.locks {
+			if !judged[comm] {
+				e.judge(ex, x.Host, KindLockWait, comm, e.cfg.Locks, 0, x.Time, nil)
+				if !ex.active && ex.open == nil {
+					delete(h.locks, comm)
+				}
+			}
 		}
 	case "dnslat":
 		if x.DNS == nil {
@@ -624,6 +650,25 @@ func (e *Evaluator) fsyncDecorator(host string) func(*model.Incident) {
 			end = *i.End
 		}
 		i.Culprits, i.CulpritShare = e.fsyncCulprits(host, i.Start, end)
+	}
+}
+
+// lockDecorator splits a process's lock wait between its own (user-space) locks and the kernel's, as culprits.
+func lockDecorator(p model.ProcStat) func(*model.Incident) {
+	return func(i *model.Incident) {
+		total := float64(p.WaitNs + p.KernelLockNs)
+		if total == 0 {
+			return
+		}
+		i.Culprits = nil
+		if p.WaitNs > 0 {
+			i.Culprits = append(i.Culprits, model.Culprit{Name: "user lock", Share: float64(p.WaitNs) / total})
+		}
+		if p.KernelLockNs > 0 {
+			i.Culprits = append(i.Culprits, model.Culprit{Name: "kernel lock", Share: float64(p.KernelLockNs) / total})
+		}
+		i.CulpritShare = 1
+		i.Count = p.Locks
 	}
 }
 

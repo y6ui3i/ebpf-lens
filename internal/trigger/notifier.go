@@ -162,6 +162,12 @@ func Text(event string, i model.Incident) string {
 		what = fmt.Sprintf("file opens are failing (%.0f in 10 s, %d s since %s; EACCES / EPERM is a permission, EROFS a read-only mount, ENOSPC a full disk, EMFILE / ENFILE a file descriptor leak or limit)%s", i.Peak, i.Seconds, when, nameText(i, "failures"))
 	case KindFsyncSlow:
 		what = fmt.Sprintf("fsync is slow (99%% completed within %s, %d s since %s: the disk is stalling and whoever commits feels it)%s", formatUs(i.Peak), i.Seconds, when, nameText(i, "fsync time"))
+	case KindLockWait:
+		where := "its own locks"
+		if len(i.Culprits) > 0 && i.Culprits[0].Name == "kernel lock" && i.Culprits[0].Share > 0.5 {
+			where = "kernel locks (mmap_lock, inode locks)"
+		}
+		what = fmt.Sprintf("%s is waiting for locks (%.1f threads' worth of time blocked, %d s since %s, mostly %s; more CPUs will not help, the work serializes on a lock)", i.Subject, i.Peak, i.Seconds, when, where)
 	case KindVRAMFull:
 		what = fmt.Sprintf("VRAM is %.0f%% full (%d s since %s); the next large allocation may fail", i.Peak*100, i.Seconds, when)
 	case KindOOMKill:

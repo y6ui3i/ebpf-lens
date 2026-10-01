@@ -28,6 +28,25 @@ export interface Sample {
   net?: NetStat; // probe "tcpconn" only. Its Slots are a histogram of TCP connect latency (SYN sent to established)
   dns?: DNSStat; // probe "dnslat" only. Its Slots are a histogram of getaddrinfo latency
   files?: FileStat; // probe "fileops" only. Its Slots are a histogram of fsync latency
+  lock?: LockStat; // probe "lockwait" only. Its Slots are a histogram of contended user-lock waits
+}
+/**
+ * LockStat is one interval of lock waiting, host-wide. Procs on the same sample say who waited (Wait* = contended
+ * user-space locks, KernelLock* = kernel locks).
+ */
+export interface LockStat {
+  userWaits: number /* uint64 */; // contended futex waits (an address two or more threads waited on)
+  userNs: number /* uint64 */;
+  parkedNs: number /* uint64 */; // single-waiter futex time: threads parked on their own address (idle workers), not lock waits
+  kernel?: KernelLock[]; // kernel lock contention by kind
+}
+/**
+ * KernelLock is the kernel lock contention of one kind during the interval.
+ */
+export interface KernelLock {
+  kind: string; // "mutex" | "rwsem-read" | "rwsem-write" | "spinlock" | "rtmutex" | "percpu-rwsem" | "other"
+  count: number /* uint64 */;
+  latNs: number /* uint64 */;
 }
 /**
  * FileStat is one interval of failed opens and fsync waits. Procs on the same sample say who fsynced (Wait*) and
@@ -274,6 +293,12 @@ export interface ProcStat {
    * fileops only. In fileops, Wait* means "time spent in fsync"
    */
   openFails?: number /* uint64 */;
+  /**
+   * lockwait only. In lockwait, Wait* means "time blocked on a contended user-space lock"
+   */
+  locks?: number /* int */; // distinct contended lock addresses
+  kernelLockCount?: number /* uint64 */; // kernel lock contention events
+  kernelLockNs?: number /* uint64 */;
 }
 /**
  * HostInfo is used for the list of hosts known to the server.
@@ -290,7 +315,7 @@ export interface HostInfo {
 export interface Incident {
   id: string; // host + kind + subject + start; stable across updates
   host: string;
-  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow"
+  kind: string; // "cpu_wait" | "mem_stall" | "oom_kill" | "crash" | "crash_loop" | "agent_down" | "vm_down" | "vm_cpu_wait" | "gpu_starved" | "vram_full" | "disk_slow" | "disk_error" | "net_connect_fail" | "net_connect_slow" | "net_retrans" | "net_drop" | "dns_fail" | "dns_slow" | "file_fail" | "fsync_slow" | "lock_wait"
   level: string; // "caution" | "warning"
   subject?: string; // process name for oom_kill / crash / crash_loop
   start: string /* RFC3339 */;

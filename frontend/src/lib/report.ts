@@ -101,6 +101,10 @@ export function ownerOf(x: Incident, t: TFn): string {
       return x.culprits?.length ? t("owner.fileCulprits", { list: names(x, t) }) : t("owner.fileUnknown");
     case "fsync_slow":
       return x.culprits?.length ? t("owner.fsyncFiles", { list: names(x, t) }) : t("owner.fsyncDisk");
+    case "lock_wait": {
+      const kernel = x.culprits?.find((c) => c.name === "kernel lock");
+      return kernel && kernel.share > 0.5 ? t("owner.lockKernel", { comm: x.subject ?? "?" }) : t("owner.lockApp", { comm: x.subject ?? "?" });
+    }
     case "gpu_starved":
       return t("owner.app", { comm: x.subject ?? "?" });
     case "vram_full":

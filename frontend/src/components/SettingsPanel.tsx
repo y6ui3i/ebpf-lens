@@ -56,6 +56,7 @@ export function SettingsPanel() {
     { key: "settings.rule.dnsLatency", get: (tr) => tr.dns.latency, set: (tr, r) => ({ ...tr, dns: { ...tr.dns, latency: r } }) },
     { key: "settings.rule.fileFails", get: (tr) => tr.files.fails, set: (tr, r) => ({ ...tr, files: { ...tr.files, fails: r } }) },
     { key: "settings.rule.fsyncLatency", get: (tr) => tr.files.fsyncLatency, set: (tr, r) => ({ ...tr, files: { ...tr.files, fsyncLatency: r } }) },
+    { key: "settings.rule.locks", get: (tr) => tr.locks, set: (tr, r) => ({ ...tr, locks: r }), step: 0.5 },
     { key: "settings.rule.gpuStarved", get: (tr) => tr.gpu.starved, set: (tr, r) => ({ ...tr, gpu: { ...tr.gpu, starved: r } }), step: 0.05 },
     { key: "settings.rule.vram", get: (tr) => tr.gpu.vram, set: (tr, r) => ({ ...tr, gpu: { ...tr.gpu, vram: r } }), step: 0.01 },
   ];

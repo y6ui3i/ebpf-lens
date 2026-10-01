@@ -219,6 +219,16 @@ lab での webhook の文面: `[CAUTION] hal: VM fleet-04 is waiting for host CP
 
 検証機で再現: 一般ユーザーが毎秒 `open("/root/lenstest/server.key")` を試す → `file_fail` 注意、`python3 /root/lenstest/server.key (EACCES) (100%)` を名指し。SATA SSD へ `dd … conv=fsync` で 256 MB 書く横で別プロセスが小さなジャーナルを fsync → `fsync_slow` **警告**、p99 1.04 秒、名指しは `lenstest/a (76%)`、`lenstest/journal (24%)`。小さなジャーナルのコミットが大きな書き込みの writeback の後ろで待った。バックアップの横で動くデータベースが感じるのがまさにこれ。限界: 開く前に `stat()` で確かめるプログラム(Rust 版 coreutils の `cat` など)はそこで失敗するので open には出ない。パスはプログラムが渡したままで、相対パスは相対のまま。
 
+## ロックを待っているのか
+
+ほかの画面には、自分には見えない待ちに付けた名前がある。GPU の判定は「別の待ち」と言い、CPU 画面は走ってもいなければ実行待ちでもないプロセスを見せる。その「別の」はしばしばロックで、プロセス自身のものか、取り続けているカーネルのロックだ。症状は容量計画で一番たちが悪い: **CPU を足しても何も変わらない**。スレッドが順番待ちをしているから。eBPFLens はロック待ちを 2 か所で測る。
+
+**ユーザー空間のロック**は futex システムコールで(`tp_btf/sys_enter` / `sys_exit`、`FUTEX_WAIT` と `FUTEX_LOCK_PI`)。競合した pthread mutex、CPython の GIL の mutex、Go のランタイムロックはみなここに来る。だが手の空いたスレッドを寝かせる(Go のスケジューラ、あらゆるスレッドプール)のも同じ呼び出しで、それは競合ではない。両者は**アドレス**で見分ける。競合したロックは 2 本以上のスレッドが待ったアドレス、寝ているスレッドは自分のアドレスで 1 本だけ待つ。検証機の実測: 1 つの mutex を 8 スレッドで取り合う → 10 秒で 1 アドレスに 70 秒の待ち。手の空いた Go のサービス(containerd、dockerd、eBPFLens 自身)→ 13 アドレスに 80 秒、全部 1 本待ち。1 本待ちの時間は「寝ている」として持つが数えない(条件変数は `FUTEX_WAIT_BITSET` を使うので除く。仕事を待つのはロックを待つのではない)。glibc の遅い経路に uprobe を打たない理由: `__lll_lock_wait` は動的シンボル表に無く(bpftrace は debuginfod 経由で見つける)、`pthread_mutex_lock` 自体は速い経路で毎秒数百万回呼ばれる。
+
+**カーネルのロック**は `lock:contention_begin` / `contention_end`(5.19 以降)で。mutex、rwsem(多スレッドのプロセスが mmap やページフォールトで取る `mmap_lock`、熱いファイルの inode ロック)、spinlock を種類ごと・プロセスごとに。カーネルの idle タスクが spin する分は除く。
+
+出来事は 1 つ、`lock_wait`。プロセスのロック待ち(ユーザー + カーネル、スレッド全体の合計)が **毎秒 1.0 秒**、つまりスレッド 1 本分の時間がずっと止まっている状態が 3 秒続いたら注意、4.0 で警告。原因は「ユーザーロック」と「カーネルロック」の割合で示し、次の一手は「やってはいけないこと」から: CPU を足さない。ロックを特定して(`perf lock contention`、py-spy、async-profiler、Go の mutex profile)、握っている間の処理を短くする。再現: 8 スレッドの mutex プログラム → `lock_wait` **警告** 7.0(常に 7 本が止まっている)。8 スレッドで mmap を回す CPython → GIL の mutex で 1.4 秒/秒、毎秒 27 万回、1 回約 5 µs の受け渡し。カーネルから見た GIL だ。ついでに検証機で見つかったもの: `localsearch-3`(GNOME のファイルインデクサ)が 9 秒間、スレッド 7.4 本分の時間を自分のロックで止まっていた。
+
 ## なぜ GPU が遊んでいるのか
 
 `nvidia-smi` は「GPU は 30% 稼働」とは言うが、なぜかは言えない。eBPFLens は両側から答える([ADR 0003](docs/adr/0003-gpu-nvml-and-uprobes.md)):
@@ -287,7 +297,7 @@ Lens Summary(と各 VM のページ)に **送る報告文** がある。状況�
 11. ✅ ディスク(biolatency: I/O ごとの待ち時間、ディスクごと、誰が出したか。`disk_slow` / `disk_error`)とネットワーク(tcpconnect / tcpconnlat / tcpretrans を 1 つのプローブに。`net_connect_fail` / `net_connect_slow` / `net_retrans`)
 12. macOS エージェント: サーバー・画面・出来事の仕組みは同じまま、macOS が特別な権限なしに公開している範囲(CPU とロード、メモリ圧迫の段階、kqueue によるプロセスの起動・終了、libproc によるプロセス別 CPU)を流す。macOS には eBPF がないので、実行待ち時間の分布やプロセス別の回収停止は取れない。Mac は「できる範囲」であって本線ではない。収集部は OS ごとに分ける([ADR 0002](docs/adr/0002-collectors-per-os.md))。Windows は需要があれば(ETW になる)
 13. ✅ パケット破棄をカーネル自身の理由付きで(`kfree_skb` + `enum skb_drop_reason`。名前は動いているカーネルの BTF から読む。ポートで待ち受けるプロセスは `inet_csk_listen_start` から。カーネルが報告しない accept 待ち行列満杯の SYN は `tcp_conn_request` の `fexit` から。`net_drop`)
-14. ✅(先頭のみ)/ 予定: eBPF でしか見えないものをさらに、この順で(2026-09-30 に決めた。「報告文はもういい、eBPF 側を広げる」): **✅ ファイル操作の失敗と fsync 待ち**(「どのファイルが、なぜ開けないのか」を参照。`open` / `openat` / `openat2` の生の syscall tracepoint でパス・プロセス・errno を取り、問題 / 注目 / 日常に分ける。`do_fsync` でプロセスごと・ファイルごと。`file_fail` / `fsync_slow`)、**ロック・futex 待ち**(`contention_begin/end`、`futex`: CPU も I/O も待っていないのに自分の鎖で止まっている。GPU 判定の「別の待ち」に欠けていた答え)、**ページフォールト・スワップ**(`page_fault_user`、swap in/out: スワップ往復しているホストの被害者。メモリ画面を回収停止の先へ広げる)、**softirq / IRQ 遅延**(`softirq_entry/exit`、`irq_handler_*`: ネットワーク割り込みが 1 つの CPU を占有。高負荷 NIC と VM ホスト向け)
+14. ✅(先頭のみ)/ 予定: eBPF でしか見えないものをさらに、この順で(2026-09-30 に決めた。「報告文はもういい、eBPF 側を広げる」): **✅ ファイル操作の失敗と fsync 待ち**(「どのファイルが、なぜ開けないのか」を参照。`open` / `openat` / `openat2` の生の syscall tracepoint でパス・プロセス・errno を取り、問題 / 注目 / 日常に分ける。`do_fsync` でプロセスごと・ファイルごと。`file_fail` / `fsync_slow`)、**✅ ロック・futex 待ち**(「ロックを待っているのか」を参照。futex の待ちをアドレスごとの待ち手の数で寝かせと見分ける。`lock:contention_begin/end` を種類・プロセスごとに。`lock_wait` はスレッド本数分の秒/秒)、**ページフォールト・スワップ**(`page_fault_user`、swap in/out: スワップ往復しているホストの被害者。メモリ画面を回収停止の先へ広げる)、**softirq / IRQ 遅延**(`softirq_entry/exit`、`irq_handler_*`: ネットワーク割り込みが 1 つの CPU を占有。高負荷 NIC と VM ホスト向け)
 
 ## 判定のしきい値(仮)
 

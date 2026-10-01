@@ -25,6 +25,7 @@ import (
 	"github.com/y6ui3i/ebpf-lens/internal/probe/dnslat"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/fileops"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/gpu"
+	"github.com/y6ui3i/ebpf-lens/internal/probe/lockwait"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/memstall"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/proclife"
 	"github.com/y6ui3i/ebpf-lens/internal/probe/runqlat"
@@ -105,6 +106,15 @@ func main() {
 	}
 	defer fo.Close()
 
+	lw, err := lockwait.Open()
+	if err != nil {
+		log.Fatalf("lockwait: %v", err)
+	}
+	defer lw.Close()
+	if lw.Warning != "" {
+		log.Printf("lockwait: %s", lw.Warning)
+	}
+
 	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
 	dns := openDNS()
 	if dns != nil {
@@ -168,6 +178,11 @@ func main() {
 				log.Fatalf("fileops: %v", err)
 			}
 			fx.Host, fx.Time, fx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+			lx, err := lockSample(lw, vms, *topN)
+			if err != nil {
+				log.Fatalf("lockwait: %v", err)
+			}
+			lx.Host, lx.Time, lx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
 			var sx *model.Sample
 			if dns != nil {
 				x, err := dnsSample(dns, vms, *topN)
@@ -199,6 +214,7 @@ func main() {
 				printDisk(dx)
 				printNet(nx)
 				printFiles(fx)
+				printLocks(lx)
 				if sx != nil {
 					printDNS(*sx)
 				}
@@ -232,6 +248,9 @@ func main() {
 				}
 				if err := send(client, *serverURL, "/api/ingest", fx); err != nil {
 					log.Printf("send fileops: %v", err)
+				}
+				if err := send(client, *serverURL, "/api/ingest", lx); err != nil {
+					log.Printf("send lockwait: %v", err)
 				}
 				if sx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *sx); err != nil {
@@ -268,6 +287,9 @@ func main() {
 				log.Fatal(err)
 			}
 			if err := enc.Encode(fx); err != nil {
+				log.Fatal(err)
+			}
+			if err := enc.Encode(lx); err != nil {
 				log.Fatal(err)
 			}
 			if sx != nil {
@@ -473,6 +495,36 @@ func printFiles(x model.Sample) {
 	}
 	for _, f := range x.Files.Fsyncs {
 		fmt.Printf("fsync %-40s n=%d avg=%.2fms max=%.2fms\n", f.Name, f.Fsyncs, float64(f.LatNs)/1e6/float64(max(1, f.Fsyncs)), float64(f.LatMaxNs)/1e6)
+	}
+}
+
+// lockSample builds one interval of lock waiting: the histogram of contended user-lock waits, the processes
+// that waited the most (user locks and kernel locks), and the kernel lock kinds.
+func lockSample(lw *lockwait.Probe, vms *vm.Map, topN int) (model.Sample, error) {
+	r, err := lw.Read(vms.Label)
+	if err != nil {
+		return model.Sample{}, err
+	}
+	r.Stat.ParkedNs = r.Parked
+	procs := topBy(r.Procs, topN,
+		func(a, b model.ProcStat) int { return cmpDesc(a.WaitNs, b.WaitNs) },
+		func(a, b model.ProcStat) int { return cmpDesc(a.KernelLockNs, b.KernelLockNs) },
+	)
+	return model.Sample{Probe: "lockwait", Unit: "usecs", Slots: r.Slots[:], Procs: procs, Lock: &r.Stat}, nil
+}
+
+func printLocks(x model.Sample) {
+	l := x.Lock
+	if l.UserWaits == 0 && len(l.Kernel) == 0 {
+		return
+	}
+	fmt.Printf("lock user: waits=%d total=%.1fms parked=%.1fms\n", l.UserWaits, float64(l.UserNs)/1e6, float64(l.ParkedNs)/1e6)
+	for _, k := range l.Kernel {
+		fmt.Printf("lock kernel %-13s waits=%d total=%.2fms\n", k.Kind, k.Count, float64(k.LatNs)/1e6)
+	}
+	for _, s := range x.Procs {
+		fmt.Printf("  %-16s x%-3d locks=%d waits=%d user=%.1fms max=%.1fms kernel=%d/%.2fms\n",
+			s.Comm, s.Procs, s.Locks, s.WaitCount, float64(s.WaitNs)/1e6, float64(s.WaitMaxNs)/1e6, s.KernelLockCount, float64(s.KernelLockNs)/1e6)
 	}
 }
 

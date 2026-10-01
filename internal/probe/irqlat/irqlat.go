@@ -1,40 +1,51 @@
 // Package irqlat measures time spent in interrupt context: soft interrupts per CPU and vector, hard interrupts
-// per handler name and per CPU, with a histogram of one softirq's run time.
+// per IRQ line and per CPU, with a histogram of one softirq's run time. The BPF side is lock-free (per-CPU arrays
+// only; see irqlat.bpf.c for why); the IRQ names come from /proc/interrupts.
 package irqlat
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -cc clang -cflags "-O2 -g -Wall" -target amd64 irqlat irqlat.bpf.c -- -I../../../bpf/headers
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 
 	"github.com/y6ui3i/ebpf-lens/internal/model"
-	"github.com/y6ui3i/ebpf-lens/internal/probe"
 )
 
 // MaxSlots must match MAX_SLOTS on the BPF side.
 const MaxSlots = 27
 
-// nrVecs must match NR_VECS on the BPF side.
-const nrVecs = 16
+// nrVecs and maxIRQs must match NR_VECS and MAX_IRQS on the BPF side.
+const (
+	nrVecs  = 16
+	maxIRQs = 512
+)
 
 // Softirq vector names (include/linux/interrupt.h).
 var vecNames = [...]string{"HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU"}
 
 // Probe holds the loaded BPF objects and the attached links.
 type Probe struct {
-	objs    irqlatObjects
-	links   []link.Link
-	prev    [MaxSlots]uint64
-	prevCPU []irqlatCountNs
+	objs     irqlatObjects
+	links    []link.Link
+	prev     [MaxSlots]uint64
+	prevSoft [nrVecs][]irqlatCountNs // cumulative per-CPU counters at the previous read
+	prevIRQ  [maxIRQs][]irqlatCountNs
+	names    map[int]string // irq number -> name from /proc/interrupts
+	namesAt  time.Time
 }
 
 // Open loads the programs and attaches them to the irq tracepoints.
 func Open() (*Probe, error) {
-	p := &Probe{}
+	p := &Probe{names: map[int]string{}}
 	if err := loadIrqlatObjects(&p.objs, nil); err != nil {
 		return nil, fmt.Errorf("load bpf objects: %w", err)
 	}
@@ -67,71 +78,117 @@ func (p *Probe) Delta() ([MaxSlots]uint64, error) {
 	return out, nil
 }
 
-// Read drains the per-(cpu, vector) softirq and per-irq aggregates and reads the per-CPU hardirq totals (as deltas).
+// Read returns the interval's interrupt time from the cumulative per-CPU counters (deltas since the previous call).
 func (p *Probe) Read() (model.IRQStat, error) {
 	var st model.IRQStat
 	cpuSoft := map[int]uint64{}
+	cpuIRQ := map[int]*model.CPUIRQ{}
 
-	var (
-		sk   uint32
-		sv   irqlatCountNs
-		skey []uint32
-	)
-	it := p.objs.Soft.Iterate()
-	for it.Next(&sk, &sv) {
-		skey = append(skey, sk)
-		cpu, vec := int(sk/nrVecs), int(sk%nrVecs)
+	for vec := uint32(0); vec < nrVecs; vec++ {
+		var perCPU []irqlatCountNs
+		if err := p.objs.Soft.Lookup(vec, &perCPU); err != nil {
+			return st, fmt.Errorf("lookup vec %d: %w", vec, err)
+		}
+		if len(p.prevSoft[vec]) != len(perCPU) {
+			p.prevSoft[vec] = make([]irqlatCountNs, len(perCPU))
+		}
 		name := "OTHER"
-		if vec < len(vecNames) {
+		if int(vec) < len(vecNames) {
 			name = vecNames[vec]
 		}
-		st.Softirqs = append(st.Softirqs, model.SoftirqStat{Vec: name, CPU: cpu, Count: sv.Count, Ns: sv.Ns})
-		cpuSoft[cpu] += sv.Ns
-	}
-	if err := it.Err(); err != nil {
-		return st, fmt.Errorf("iterate softirqs: %w", err)
-	}
-	for i := range skey {
-		_ = p.objs.Soft.Delete(&skey[i])
-	}
-
-	var (
-		ik   uint32
-		iv   irqlatIrqVal
-		ikey []uint32
-	)
-	it = p.objs.Irqs.Iterate()
-	for it.Next(&ik, &iv) {
-		ikey = append(ikey, ik)
-		st.IRQs = append(st.IRQs, model.HardIRQ{IRQ: int(ik), Name: probe.CString(iv.Name[:]), Count: iv.Count, Ns: iv.Ns})
-	}
-	if err := it.Err(); err != nil {
-		return st, fmt.Errorf("iterate irqs: %w", err)
-	}
-	for i := range ikey {
-		_ = p.objs.Irqs.Delete(&ikey[i])
-	}
-
-	// Hardirq time per CPU is a cumulative per-CPU counter; the per-CPU slice index is the CPU number
-	var perCPU []irqlatCountNs
-	if err := p.objs.IrqCpu.Lookup(uint32(0), &perCPU); err != nil {
-		return st, fmt.Errorf("lookup irq per cpu: %w", err)
-	}
-	if len(p.prevCPU) != len(perCPU) {
-		p.prevCPU = make([]irqlatCountNs, len(perCPU))
-	}
-	for cpu, v := range perCPU {
-		d := irqlatCountNs{Count: v.Count - p.prevCPU[cpu].Count, Ns: v.Ns - p.prevCPU[cpu].Ns}
-		p.prevCPU[cpu] = v
-		if d.Ns > 0 || cpuSoft[cpu] > 0 {
-			st.CPUs = append(st.CPUs, model.CPUIRQ{CPU: cpu, SoftirqNs: cpuSoft[cpu], IRQNs: d.Ns, IRQCount: d.Count})
-			delete(cpuSoft, cpu)
+		for cpu, v := range perCPU {
+			d := irqlatCountNs{Count: v.Count - p.prevSoft[vec][cpu].Count, Ns: v.Ns - p.prevSoft[vec][cpu].Ns}
+			p.prevSoft[vec][cpu] = v
+			if d.Count == 0 {
+				continue
+			}
+			st.Softirqs = append(st.Softirqs, model.SoftirqStat{Vec: name, CPU: cpu, Count: d.Count, Ns: d.Ns})
+			cpuSoft[cpu] += d.Ns
 		}
 	}
+
+	p.refreshNames()
+	for irq := uint32(0); irq < maxIRQs; irq++ {
+		var perCPU []irqlatCountNs
+		if err := p.objs.Irqs.Lookup(irq, &perCPU); err != nil {
+			return st, fmt.Errorf("lookup irq %d: %w", irq, err)
+		}
+		if len(p.prevIRQ[irq]) != len(perCPU) {
+			p.prevIRQ[irq] = make([]irqlatCountNs, len(perCPU))
+		}
+		var total irqlatCountNs
+		for cpu, v := range perCPU {
+			d := irqlatCountNs{Count: v.Count - p.prevIRQ[irq][cpu].Count, Ns: v.Ns - p.prevIRQ[irq][cpu].Ns}
+			p.prevIRQ[irq][cpu] = v
+			if d.Count == 0 {
+				continue
+			}
+			total.Count += d.Count
+			total.Ns += d.Ns
+			c := cpuIRQ[cpu]
+			if c == nil {
+				c = &model.CPUIRQ{CPU: cpu}
+				cpuIRQ[cpu] = c
+			}
+			c.IRQNs += d.Ns
+			c.IRQCount += d.Count
+		}
+		if total.Count > 0 {
+			name := p.names[int(irq)]
+			if name == "" {
+				name = fmt.Sprintf("irq%d", irq)
+			}
+			st.IRQs = append(st.IRQs, model.HardIRQ{IRQ: int(irq), Name: name, Count: total.Count, Ns: total.Ns})
+		}
+	}
+
 	for cpu, ns := range cpuSoft {
-		st.CPUs = append(st.CPUs, model.CPUIRQ{CPU: cpu, SoftirqNs: ns})
+		c := cpuIRQ[cpu]
+		if c == nil {
+			c = &model.CPUIRQ{CPU: cpu}
+			cpuIRQ[cpu] = c
+		}
+		c.SoftirqNs = ns
+	}
+	for _, c := range cpuIRQ {
+		st.CPUs = append(st.CPUs, *c)
 	}
 	return st, nil
+}
+
+// refreshNames re-reads /proc/interrupts every 10 s: "  44:  123  456  IR-PCI-MSI-0000:04:00.0 0-edge  ahci[0000:04:00.0]".
+// The name is the last field (several words joined when a line has them, e.g. "nvme0q3" or "ahci[0000:04:00.0]").
+func (p *Probe) refreshNames() {
+	if time.Since(p.namesAt) < 10*time.Second {
+		return
+	}
+	p.namesAt = time.Now()
+	f, err := os.Open("/proc/interrupts")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	ncpu := 0
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		if ncpu == 0 && strings.HasPrefix(fields[0], "CPU") {
+			ncpu = len(fields)
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSuffix(fields[0], ":"))
+		if err != nil || len(fields) < 2+ncpu {
+			continue
+		}
+		rest := fields[1+ncpu:] // chip name, flow type, then the action names
+		if len(rest) == 0 {
+			continue
+		}
+		p.names[n] = rest[len(rest)-1]
+	}
 }
 
 // Close detaches the links and releases the BPF objects.

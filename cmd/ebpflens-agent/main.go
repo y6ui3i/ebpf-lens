@@ -43,7 +43,15 @@ func main() {
 	serverURL := flag.String("server", "", "ebpflens-server to send to (e.g. http://127.0.0.1:8080)")
 	hostFlag := flag.String("host", "", "host name (defaults to os.Hostname)")
 	topN := flag.Int("top", 8, "number of processes to send (each for the top by wait time and the top by CPU usage)")
+	disable := flag.String("disable", "", "comma-separated probes not to load (lockwait, pgfault, irqlat, gpu, dnslat): a debugging aid for isolating a probe")
 	flag.Parse()
+	disabled := map[string]bool{}
+	for _, name := range strings.Split(*disable, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			disabled[name] = true
+			log.Printf("%s: disabled by -disable", name)
+		}
+	}
 
 	host := *hostFlag
 	if host == "" {
@@ -108,36 +116,48 @@ func main() {
 	}
 	defer fo.Close()
 
-	lw, err := lockwait.Open()
-	if err != nil {
-		log.Fatalf("lockwait: %v", err)
-	}
-	defer lw.Close()
-	if lw.Warning != "" {
-		log.Printf("lockwait: %s", lw.Warning)
+	var lw *lockwait.Probe
+	if !disabled["lockwait"] {
+		if lw, err = lockwait.Open(); err != nil {
+			log.Fatalf("lockwait: %v", err)
+		}
+		defer lw.Close()
+		if lw.Warning != "" {
+			log.Printf("lockwait: %s", lw.Warning)
+		}
 	}
 
-	pf, err := pgfault.Open()
-	if err != nil {
-		log.Fatalf("pgfault: %v", err)
+	var pf *pgfault.Probe
+	if !disabled["pgfault"] {
+		if pf, err = pgfault.Open(); err != nil {
+			log.Fatalf("pgfault: %v", err)
+		}
+		defer pf.Close()
 	}
-	defer pf.Close()
 	swap := &swapReader{}
 
-	iq, err := irqlat.Open()
-	if err != nil {
-		log.Fatalf("irqlat: %v", err)
+	var iq *irqlat.Probe
+	if !disabled["irqlat"] {
+		if iq, err = irqlat.Open(); err != nil {
+			log.Fatalf("irqlat: %v", err)
+		}
+		defer iq.Close()
 	}
-	defer iq.Close()
 
 	// DNS: optional. Without glibc at the usual paths (or on a kernel without multi-uprobe links) there are no dns samples
-	dns := openDNS()
-	if dns != nil {
-		defer dns.Close()
+	var dns *dnslat.Probe
+	if !disabled["dnslat"] {
+		dns = openDNS()
+		if dns != nil {
+			defer dns.Close()
+		}
 	}
 
 	// GPU: optional. A host without an NVIDIA driver, or without libcuda, simply sends no "gpu" samples
-	gw := openGPU()
+	gw := &gpuWatch{comm: map[uint32]string{}}
+	if !disabled["gpu"] {
+		gw = openGPU()
+	}
 	defer gw.Close()
 
 	sig := make(chan os.Signal, 1)
@@ -193,21 +213,32 @@ func main() {
 				log.Fatalf("fileops: %v", err)
 			}
 			fx.Host, fx.Time, fx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
-			lx, err := lockSample(lw, vms, *topN)
-			if err != nil {
-				log.Fatalf("lockwait: %v", err)
+			// The optional probes (-disable) produce nil samples that are neither printed nor sent
+			var lx, px, ix *model.Sample
+			if lw != nil {
+				x, err := lockSample(lw, vms, *topN)
+				if err != nil {
+					log.Fatalf("lockwait: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+				lx = &x
 			}
-			lx.Host, lx.Time, lx.IntervalMs = host, now, now.Sub(prev).Milliseconds()
-			px, err := faultSample(pf, swap, vms, *topN)
-			if err != nil {
-				log.Fatalf("pgfault: %v", err)
+			if pf != nil {
+				x, err := faultSample(pf, swap, vms, *topN)
+				if err != nil {
+					log.Fatalf("pgfault: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs = host, now, now.Sub(prev).Milliseconds()
+				px = &x
 			}
-			px.Host, px.Time, px.IntervalMs = host, now, now.Sub(prev).Milliseconds()
-			ix, err := irqSample(iq)
-			if err != nil {
-				log.Fatalf("irqlat: %v", err)
+			if iq != nil {
+				x, err := irqSample(iq)
+				if err != nil {
+					log.Fatalf("irqlat: %v", err)
+				}
+				x.Host, x.Time, x.IntervalMs, x.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
+				ix = &x
 			}
-			ix.Host, ix.Time, ix.IntervalMs, ix.CPUs = host, now, now.Sub(prev).Milliseconds(), runtime.NumCPU()
 			var sx *model.Sample
 			if dns != nil {
 				x, err := dnsSample(dns, vms, *topN)
@@ -239,9 +270,19 @@ func main() {
 				printDisk(dx)
 				printNet(nx)
 				printFiles(fx)
-				printLocks(lx)
-				printFaults(px)
-				printIRQ(ix)
+				for _, x := range []*model.Sample{lx, px, ix} {
+					if x == nil {
+						continue
+					}
+					switch x.Probe {
+					case "lockwait":
+						printLocks(*x)
+					case "pgfault":
+						printFaults(*x)
+					case "irqlat":
+						printIRQ(*x)
+					}
+				}
 				if sx != nil {
 					printDNS(*sx)
 				}
@@ -276,14 +317,13 @@ func main() {
 				if err := send(client, *serverURL, "/api/ingest", fx); err != nil {
 					log.Printf("send fileops: %v", err)
 				}
-				if err := send(client, *serverURL, "/api/ingest", lx); err != nil {
-					log.Printf("send lockwait: %v", err)
-				}
-				if err := send(client, *serverURL, "/api/ingest", px); err != nil {
-					log.Printf("send pgfault: %v", err)
-				}
-				if err := send(client, *serverURL, "/api/ingest", ix); err != nil {
-					log.Printf("send irqlat: %v", err)
+				for _, x := range []*model.Sample{lx, px, ix} {
+					if x == nil {
+						continue
+					}
+					if err := send(client, *serverURL, "/api/ingest", *x); err != nil {
+						log.Printf("send %s: %v", x.Probe, err)
+					}
 				}
 				if sx != nil {
 					if err := send(client, *serverURL, "/api/ingest", *sx); err != nil {
@@ -322,14 +362,12 @@ func main() {
 			if err := enc.Encode(fx); err != nil {
 				log.Fatal(err)
 			}
-			if err := enc.Encode(lx); err != nil {
-				log.Fatal(err)
-			}
-			if err := enc.Encode(px); err != nil {
-				log.Fatal(err)
-			}
-			if err := enc.Encode(ix); err != nil {
-				log.Fatal(err)
+			for _, x := range []*model.Sample{lx, px, ix} {
+				if x != nil {
+					if err := enc.Encode(*x); err != nil {
+						log.Fatal(err)
+					}
+				}
 			}
 			if sx != nil {
 				if err := enc.Encode(*sx); err != nil {

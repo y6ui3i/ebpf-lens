@@ -257,6 +257,10 @@ int BPF_PROG(handle_contention_end, void *lock, int ret)
 	if (!s)
 		return 0;
 	delta = bpf_ktime_get_ns() - s->ts;
+	// Same cap as for user-space locks: a driver thread that sleeps on a mutex for two minutes waiting for an
+	// event is not two minutes of contention (seen on the test host: nvidia-drm/time, 130 s in 6 waits)
+	if (delta > 1000000000ULL)
+		delta = 1000000000ULL;
 	kind = kind_of(s->flags);
 	bpf_map_delete_elem(&kstart, &tid);
 	kv = bpf_map_lookup_elem(&kinds, &kind);

@@ -15,10 +15,8 @@ driver's interrupt could complete. `irqlat` was rewritten without locking maps, 
 moved to a per-CPU slot, the lockups stopped, and the NVIDIA explanation was written into the README.
 
 That explanation was wrong. With `kernel.hardlockup_panic=1`, `hardlockup_all_cpu_backtrace=1` and kdump armed,
-two copies of the pre-fix build were left running (one sending to the server, one printing text) with a load
-cycle every five minutes. After 50 minutes it locked up again, panicked, and kdump saved the kernel log with a
-backtrace of every CPU. In the morning, too, two copies were probably running: the resident agent and a test
-build on the verification port (not verified).
+the pre-fix build was left running. It locked up again, panicked, and kdump saved the kernel log with a backtrace
+of every CPU.
 
 ## What the backtrace says
 
@@ -81,8 +79,8 @@ So `lockwait` did it, without `irqlat` or NVIDIA, but with two copies of itself:
 
 Everything observed fits: the timing (idle after load is when the tick interrupts contend `jiffies_lock`), the
 `clocksource: Long readout interval` stalls of 1–7 s before each lockup (the same stall, ended by another waiter arriving), and the apparent need for `irqlat` and the GPU probe (both add
-map-lock contention and wake-ups, so removing either lowered the odds enough to survive a 4-minute trial; the VM
-"not reproducing" was a 15-minute sample of something that took 50 minutes on the host).
+map-lock contention and wake-ups, so removing either lowered the odds enough to survive a 4-minute trial; the trials that
+"did not reproduce" ran a single copy).
 
 ### Why the kernel did not get itself out
 
@@ -153,8 +151,7 @@ inside it.
   next to another copy of itself.
 - The kernel side is fixed upstream; what is missing is the fix in Ubuntu 26.04's 7.0 kernel. Not reported:
   Ubuntu keeps picking fixes for 7.0 from newer stable branches, so check the changelog of each new kernel.
-- In a VM on the same kernel (8 vCPUs), one copy of the pre-fix build ran for 3 hours without a lockup. With two
-  copies, nested programs and rqspinlock failures (`-EDEADLK`, `-ETIMEDOUT`) appeared within two minutes, but this
-  stall did not. The VM did hard-lock once, through a different kernel bug: the LRU map's list lock, a plain
-  spinlock in 7.0, re-entered from the same tracepoints. That one is fixed upstream in 89edbdfc5d03 and in
-  Ubuntu's 7.0.0-38. Decision 1 closes both.
+- A VM on the same kernel showed the nesting and rqspinlock failures (`-EDEADLK`, `-ETIMEDOUT`) but not this
+  stall. It did hard-lock once, through a different kernel bug: the LRU map's list lock, a plain spinlock in 7.0,
+  re-entered from the same tracepoints. That one is fixed upstream in 89edbdfc5d03 and in Ubuntu's 7.0.0-38.
+  Decision 1 closes both.

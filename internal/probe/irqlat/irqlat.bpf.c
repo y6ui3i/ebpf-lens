@@ -12,7 +12,7 @@
 // Everything here is a per-CPU array: no hash map, no spinlock, no string copy. These programs run in hardirq
 // and softirq context; a locking map there adds bucket-lock contention in interrupt context, and every contended
 // lock fires the kernel's lock contention tracepoints, which another probe (lockwait) listens to. The hard
-// lockups of 2026-10-01 turned out to be lockwait's own recursion (docs/adr/0004), with this probe's first,
+// lockups of 2026-10-01 turned out to be lockwait nesting into a second copy of itself (docs/adr/0004), with this probe's first,
 // hash-map version only raising the odds — but the rule stands: a program in interrupt context takes no lock.
 // The interrupt path is plain per-CPU additions; the IRQ names come from /proc/interrupts in user space.
 

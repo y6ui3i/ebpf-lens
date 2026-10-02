@@ -75,11 +75,16 @@ struct kstart {
 	u32 pad;
 };
 
-// A spinlock wait in progress on this CPU. Spinlock contention can happen in hardirq and softirq context, where
-// a locking map (hash, LRU) must not be touched: the bucket lock contending there fires the very tracepoint this
-// program is attached to, and on the test host that path, together with the NVIDIA interrupt handler, stalled
-// CPUs for seconds and hard-locked the machine (2026-10-01). A spinner does not sleep or migrate, so a per-CPU
-// slot is enough; sleeping locks (mutex, rwsem) are process context and keep the per-thread map
+// A spinlock wait in progress on this CPU. On the spinlock path this program must not touch a locking map
+// (hash, LRU): a map's bucket lock is itself a spinlock (BPF's rqspinlock), and when it is contended it fires
+// the very tracepoints this program is attached to, from inside its slow path. The first version deleted its
+// start-time entry from an LRU hash here; the bucket lock fired contention_end for itself, a second copy of this
+// program (two agents on one host) ran nested and went for a bucket lock of its own map while the CPU held
+// jiffies_lock, rqspinlock stalled on the deadlock it had detected (a kernel bug, fixed upstream in
+// 7a3c0289c3c8), and the whole machine hard-locked (2026-10-01, four times; backtrace in docs/adr/0004). A spinner does not sleep or
+// migrate, so a per-CPU slot is enough, and perf's lock_contention.bpf.c does the same. Sleeping locks (mutex,
+// rwsem) are process context and keep the per-thread map: the nested events their map operations cause are
+// spinlock events and take this path
 struct spin_start {
 	u64 ts;
 	u64 lock;
